@@ -1,56 +1,38 @@
 # hk-tick-collector
 
-HK tick-by-tick collector using Futu OpenAPI and SQLite with JChart-compatible schema.
+面向服务器 24/7 的港股逐笔成交采集器（Futu OpenAPI + SQLite 分库落盘）。
 
-## Quick Start
-```bash
-cp .env.example .env
-# Edit .env and set HKTC_SYMBOLS=HK.00700,HK.09988 ...
+- OpenD 必须使用富途官方发行包在服务器原生安装运行（禁止第三方 Docker 镜像）。
+- 数据按交易日分库：`/data/sqlite/HK/YYYYMMDD.db`，表结构与索引固定一致。
 
-docker compose up -d --build
+## 快速开始
+
+1) 按照 `docs/runbook.md` 完成 OpenD 安装与 systemd 守护。
+2) 复制环境变量样例：
+
+```
+cp .env.example /etc/hk-tick-collector.env
 ```
 
-## Configuration
-- Default config: `config/collector.yaml`
-- ENV overrides use prefix `HKTC_` (see `.env.example`)
-- SQLite shards: `/data/sqlite/HK/YYYYMMDD.db`
+3) 安装采集器并启动：
 
-## 2FA / Login
-- First run may require OpenD login or 2FA
-- Check OpenD logs and follow prompts:
-  ```bash
-  docker logs -f futu-opend
-  ```
-
-## Logs and Health
-- Collector logs: `docker logs -f hk-tick-collector`
-- OpenD logs: `docker logs -f futu-opend`
-- Optional health check (inside container):
-  ```bash
-  docker exec -it hk-tick-collector python - <<'PY'
-  import urllib.request, json
-  print(json.loads(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read()))
-  PY
-  ```
-
-## Verify Writes
-```bash
-ls /data/sqlite/HK
-sqlite3 /data/sqlite/HK/$(date +%Y%m%d).db "select count(*) from ticks;"
+```
+sudo ops/install_collector.sh
 ```
 
-## Repo Layout
-- `hk_tick_collector/` core logic
-- `config/collector.yaml` default config
-- `docs/architecture.md` architecture and data flow
-- `docs/runbook.md` operations guide
+## 目录
 
-## Development
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-pytest
-ruff check .
-black --check .
+- `hk_tick_collector/` 采集器代码
+- `docs/architecture.md` 架构与容量规划
+- `docs/runbook.md` 部署与运维步骤
+- `ops/` systemd 模板与脚本
+- `tests/` 单元测试
+
+## 本地测试
+
+```
+python3.11 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q
 ```

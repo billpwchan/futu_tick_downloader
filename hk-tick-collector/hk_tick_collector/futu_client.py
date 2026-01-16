@@ -2,144 +2,117 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import List
 
 from futu import OpenQuoteContext, RET_OK, Session, SubType, TickerHandlerBase
 
-from .config import BackfillConfig, OpendConfig, ReconnectConfig
-from .normalizer import normalize_futu_df
-from .queue import TickPersistQueue
+from .collector import AsyncTickCollector
+from .config import Config
+from .mapping import ticker_df_to_rows
+from .utils import ExponentialBackoff
 
 logger = logging.getLogger(__name__)
 
 
 class FutuTickerHandler(TickerHandlerBase):
-    def __init__(self, loop: asyncio.AbstractEventLoop, queue: TickPersistQueue, market: str) -> None:
+    def __init__(self, collector: AsyncTickCollector, loop: asyncio.AbstractEventLoop) -> None:
         super().__init__()
+        self._collector = collector
         self._loop = loop
-        self._queue = queue
-        self._market = market
 
-    def on_recv_rsp(self, rsp):
-        ret, data = super().on_recv_rsp(rsp)
+    def on_recv_rsp(self, rsp_pb):
+        ret, data = super().on_recv_rsp(rsp_pb)
         if ret != RET_OK:
-            logger.error("Futu ticker handler error: %s", data)
+            logger.error("ticker push error: %s", data)
             return ret, data
+
         try:
-            ticks = normalize_futu_df(data, self._market, provider="futu")
+            rows = ticker_df_to_rows(data, provider="futu", push_type="push")
         except Exception:
-            logger.exception("Failed to normalize futu ticker payload")
+            logger.exception("failed to map ticker data")
             return ret, data
-        if ticks:
-            future = asyncio.run_coroutine_threadsafe(self._queue.enqueue(ticks), self._loop)
-            future.add_done_callback(_log_future_exception)
+
+        if rows:
+            self._loop.call_soon_threadsafe(self._collector.enqueue, rows)
         return ret, data
 
 
-def _log_future_exception(task: asyncio.Future) -> None:
-    try:
-        task.result()
-    except Exception:
-        logger.exception("Tick enqueue failed")
-
-
-class FutuTickerClient:
-    def __init__(
-        self,
-        opend: OpendConfig,
-        reconnect: ReconnectConfig,
-        backfill: BackfillConfig,
-        queue: TickPersistQueue,
-        loop: asyncio.AbstractEventLoop,
-        market: str,
-    ) -> None:
-        self._opend = opend
-        self._reconnect = reconnect
-        self._backfill = backfill
-        self._queue = queue
+class FutuQuoteClient:
+    def __init__(self, config: Config, collector: AsyncTickCollector, loop: asyncio.AbstractEventLoop) -> None:
+        self._config = config
+        self._collector = collector
         self._loop = loop
-        self._market = market
-        self._ctx: Optional[OpenQuoteContext] = None
-        self._handler = FutuTickerHandler(loop, queue, market)
-        self._task: Optional[asyncio.Task[None]] = None
-        self._stop_event = asyncio.Event()
-        self._connected = False
+        self._ctx: OpenQuoteContext | None = None
+        self._handler = FutuTickerHandler(collector, loop)
 
-    def is_connected(self) -> bool:
-        return self._connected
-
-    async def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._run())
-
-    async def stop(self) -> None:
-        self._stop_event.set()
-        if self._task:
-            await self._task
-            self._task = None
-        await self._close_ctx()
-
-    async def _run(self) -> None:
-        delay = self._reconnect.base_delay_ms / 1000
-        max_delay = self._reconnect.max_delay_ms / 1000
-        while not self._stop_event.is_set():
-            if self._ctx is None or not self._ctx.is_connected():
-                self._connected = False
-                await self._close_ctx()
+    async def run_forever(self) -> None:
+        backoff = ExponentialBackoff(self._config.reconnect_min_delay, self._config.reconnect_max_delay)
+        try:
+            while True:
                 try:
                     await self._connect_and_subscribe()
-                    self._connected = True
-                    delay = self._reconnect.base_delay_ms / 1000
-                    if self._backfill.enabled:
-                        await self._backfill_recent()
-                except Exception:
-                    logger.exception("Failed to connect or subscribe; retrying")
-                    self._connected = False
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, max_delay)
-                    continue
-            await asyncio.sleep(1)
+                    backoff.reset()
+                    await self._monitor_connection()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("futu connection error: %s", exc)
+                finally:
+                    self._close_ctx()
+
+                delay = backoff.next_delay()
+                logger.info("reconnecting in %ss", delay)
+                await asyncio.sleep(delay)
+        finally:
+            self._close_ctx()
 
     async def _connect_and_subscribe(self) -> None:
-        if not self._opend.symbols:
-            raise RuntimeError("No symbols configured to subscribe")
-        self._ctx = OpenQuoteContext(host=self._opend.host, port=self._opend.port)
+        if not self._config.symbols:
+            raise RuntimeError("FUTU_SYMBOLS is empty")
+
+        self._close_ctx()
+        self._ctx = OpenQuoteContext(host=self._config.futu_host, port=self._config.futu_port)
         self._ctx.set_handler(self._handler)
-        session = _parse_session(self._opend.session)
-        ret, data = self._ctx.subscribe(self._opend.symbols, [SubType.TICKER], session=session)
+
+        ret, data = self._ctx.subscribe(
+            self._config.symbols,
+            [SubType.TICKER],
+            subscribe_push=True,
+            session=Session.ALL,
+        )
         if ret != RET_OK:
-            raise RuntimeError(f"Subscribe failed: {data}")
-        logger.info("Subscribed to %s symbols", len(self._opend.symbols))
+            raise RuntimeError(f"subscribe failed: {data}")
+
+        logger.info("subscribed to %s", ",".join(self._config.symbols))
+
+        if self._config.backfill_n > 0:
+            await self._backfill_recent()
+
+    async def _monitor_connection(self) -> None:
+        while True:
+            await asyncio.sleep(self._config.check_interval_sec)
+            if self._ctx is None:
+                raise RuntimeError("context closed")
+            if not self._ctx.is_connected():
+                raise RuntimeError("disconnected")
 
     async def _backfill_recent(self) -> None:
         if self._ctx is None:
             return
-        for symbol in self._opend.symbols:
-            ret, df = self._ctx.get_rt_ticker(symbol, num=self._backfill.num)
+        for symbol in self._config.symbols:
+            ret, data = self._ctx.get_rt_ticker(symbol, num=self._config.backfill_n)
             if ret != RET_OK:
-                logger.warning("Backfill failed for %s: %s", symbol, df)
+                logger.warning("backfill failed for %s: %s", symbol, data)
                 continue
-            ticks = normalize_futu_df(df, self._market, provider="futu")
-            if ticks:
-                await self._queue.enqueue(ticks)
-        logger.info("Backfill complete")
+            rows = ticker_df_to_rows(data, provider="futu", push_type="backfill", default_symbol=symbol)
+            if rows:
+                self._collector.enqueue(rows)
+                logger.info("backfill %s rows for %s", len(rows), symbol)
 
-    async def _close_ctx(self) -> None:
-        if self._ctx is None:
-            return
-        try:
+    def _close_ctx(self) -> None:
+        if self._ctx is not None:
             try:
-                self._ctx.unsubscribe(self._opend.symbols, [SubType.TICKER])
+                self._ctx.close()
             except Exception:
-                logger.exception("Failed to unsubscribe")
-            self._ctx.close()
-        finally:
+                logger.exception("failed to close futu context")
             self._ctx = None
-
-
-def _parse_session(value: str) -> Session:
-    session_key = value.strip().upper()
-    try:
-        return Session[session_key]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported session value: {value}") from exc

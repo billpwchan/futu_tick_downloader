@@ -1,0 +1,18 @@
+[Unit]
+Description=HK Tick Collector
+After=network.target futu-opend.service
+Requires=futu-opend.service
+
+[Service]
+Type=simple
+User=hkcollector
+Group=hkcollector
+WorkingDirectory=/opt/hk-tick-collector
+EnvironmentFile=/etc/hk-tick-collector.env
+ExecStart=/opt/hk-tick-collector/venv/bin/python -m hk_tick_collector.main
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
