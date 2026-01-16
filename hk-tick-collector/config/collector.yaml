@@ -1,0 +1,26 @@
+opend:
+  host: futu-opend
+  port: 11111
+  session: ALL
+  symbols:
+    - HK.00700
+reconnect:
+  base_delay_ms: 500
+  max_delay_ms: 30000
+backfill:
+  enabled: true
+  num: 200
+sqlite:
+  journal_mode: WAL
+  synchronous: NORMAL
+  temp_store: MEMORY
+health:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+collector:
+  market: HK
+  data_dir: /data
+  batch_size: 1000
+  max_wait_ms: 500
+  log_level: INFO
