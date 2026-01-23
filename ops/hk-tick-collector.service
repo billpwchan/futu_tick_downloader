@@ -2,6 +2,7 @@
 Description=HK Tick Collector
 After=network.target futu-opend.service
 Requires=futu-opend.service
+# If configuring StartLimitIntervalSec, keep it under [Unit], not [Service].
 
 [Service]
 Type=simple

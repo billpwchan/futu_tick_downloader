@@ -12,13 +12,17 @@ def test_schema_and_indexes(tmp_path):
         table_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='ticks'"
         ).fetchone()[0]
-        assert table_sql == CREATE_TABLE_SQL
+        assert _normalize_sql(table_sql) == _normalize_sql(CREATE_TABLE_SQL)
 
         for name, sql in INDEX_SQLS:
             idx_sql = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
                 (name,),
             ).fetchone()[0]
-            assert idx_sql == sql
+            assert _normalize_sql(idx_sql) == _normalize_sql(sql)
     finally:
         conn.close()
+
+
+def _normalize_sql(value: str) -> str:
+    return value.strip().rstrip(";")

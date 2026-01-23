@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List
+from collections import deque
+from typing import Callable, Deque, Dict, List, Optional, Sequence
 
 from futu import OpenQuoteContext, RET_OK, Session, SubType, TickerHandlerBase
 
 from .collector import AsyncTickCollector
 from .config import Config
 from .mapping import ticker_df_to_rows
+from .models import TickRow
 from .utils import ExponentialBackoff
 
 logger = logging.getLogger(__name__)
 
+POLL_SKIP_PUSH_SEC = 2
+POLL_RECENT_KEY_LIMIT = 500
+HEALTH_LOG_INTERVAL_SEC = 60
+
 
 class FutuTickerHandler(TickerHandlerBase):
-    def __init__(self, collector: AsyncTickCollector, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, on_rows: Callable[[List[TickRow]], None], loop: asyncio.AbstractEventLoop) -> None:
         super().__init__()
-        self._collector = collector
+        self._on_rows = on_rows
         self._loop = loop
 
     def on_recv_rsp(self, rsp_pb):
@@ -33,76 +39,201 @@ class FutuTickerHandler(TickerHandlerBase):
             return ret, data
 
         if rows:
-            self._loop.call_soon_threadsafe(self._collector.enqueue, rows)
+            self._loop.call_soon_threadsafe(self._on_rows, rows)
         return ret, data
 
 
 class FutuQuoteClient:
-    def __init__(self, config: Config, collector: AsyncTickCollector, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        config: Config,
+        collector: AsyncTickCollector,
+        loop: asyncio.AbstractEventLoop,
+        initial_last_seq: Optional[Dict[str, int]] = None,
+        context_factory: Optional[Callable[..., OpenQuoteContext]] = None,
+    ) -> None:
         self._config = config
         self._collector = collector
         self._loop = loop
         self._ctx: OpenQuoteContext | None = None
-        self._handler = FutuTickerHandler(collector, loop)
+        self._context_factory = context_factory or OpenQuoteContext
+        self._handler = FutuTickerHandler(self._handle_push_rows, loop)
+        self._stop_event = asyncio.Event()
+        self._connected = False
+
+        self._last_seq: Dict[str, int] = dict(initial_last_seq or {})
+        self._last_tick_at: Dict[str, float] = {}
+        self._last_push_at: Dict[str, float] = {}
+        self._recent_keys: Dict[str, Deque[tuple]] = {}
+        self._recent_key_sets: Dict[str, set] = {}
+        self._push_rows_since_report = 0
 
     async def run_forever(self) -> None:
         backoff = ExponentialBackoff(self._config.reconnect_min_delay, self._config.reconnect_max_delay)
         try:
-            while True:
+            while not self._stop_event.is_set():
+                poll_task: asyncio.Task | None = None
+                health_task: asyncio.Task | None = None
                 try:
                     await self._connect_and_subscribe()
                     backoff.reset()
+                    poll_task = asyncio.create_task(self._poll_loop())
+                    health_task = asyncio.create_task(self._health_loop())
                     await self._monitor_connection()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.warning("futu connection error: %s", exc)
                 finally:
+                    self._connected = False
+                    for task in (poll_task, health_task):
+                        if task is not None:
+                            task.cancel()
+                    for task in (poll_task, health_task):
+                        if task is not None:
+                            await asyncio.gather(task, return_exceptions=True)
                     self._close_ctx()
+
+                if self._stop_event.is_set():
+                    break
 
                 delay = backoff.next_delay()
                 logger.info("reconnecting in %ss", delay)
-                await asyncio.sleep(delay)
+                await self._sleep_with_stop(delay)
         finally:
+            self._connected = False
             self._close_ctx()
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        self._close_ctx()
 
     async def _connect_and_subscribe(self) -> None:
         if not self._config.symbols:
             raise RuntimeError("FUTU_SYMBOLS is empty")
 
         self._close_ctx()
-        self._ctx = OpenQuoteContext(host=self._config.futu_host, port=self._config.futu_port)
+        self._ctx = self._context_factory(host=self._config.futu_host, port=self._config.futu_port)
         self._ctx.set_handler(self._handler)
 
+        logger.info("futu_connecting host=%s port=%s", self._config.futu_host, self._config.futu_port)
         ret, data = self._ctx.subscribe(
             self._config.symbols,
             [SubType.TICKER],
             subscribe_push=True,
             session=Session.ALL,
         )
+        logger.info("subscribe ret=%s msg=%s symbols=%s", ret, data, ",".join(self._config.symbols))
         if ret != RET_OK:
             raise RuntimeError(f"subscribe failed: {data}")
 
-        logger.info("subscribed to %s", ",".join(self._config.symbols))
+        self._connected = True
+        logger.info("futu_connected host=%s port=%s", self._config.futu_host, self._config.futu_port)
 
         if self._config.backfill_n > 0:
             await self._backfill_recent()
 
     async def _monitor_connection(self) -> None:
-        while True:
-            await asyncio.sleep(self._config.check_interval_sec)
+        while not self._stop_event.is_set():
+            await self._sleep_with_stop(self._config.check_interval_sec)
+            if self._stop_event.is_set():
+                return
             if self._ctx is None:
+                logger.warning("futu_disconnected reason=context_closed")
                 raise RuntimeError("context closed")
             if hasattr(self._ctx, "is_connected"):
                 if not self._ctx.is_connected():
+                    logger.warning("futu_disconnected reason=is_connected_false")
                     raise RuntimeError("disconnected")
                 continue
             if hasattr(self._ctx, "get_global_state"):
                 ret, data = self._ctx.get_global_state()
                 if ret != RET_OK:
+                    logger.warning("futu_disconnected reason=get_global_state_failed msg=%s", data)
                     raise RuntimeError(f"get_global_state failed: {data}")
                 continue
             logger.debug("connection health check skipped: no supported method")
+
+    async def _poll_loop(self) -> None:
+        if not self._config.poll_enabled:
+            logger.info("poll_disabled")
+            await self._stop_event.wait()
+            return
+
+        while not self._stop_event.is_set():
+            cycle_start = self._loop.time()
+            if self._ctx is None:
+                await self._sleep_with_stop(self._config.poll_interval_sec)
+                continue
+
+            for symbol in self._config.symbols:
+                if self._stop_event.is_set():
+                    break
+                if self._ctx is None:
+                    break
+                if self._should_skip_poll(symbol):
+                    continue
+
+                try:
+                    ret, data = self._ctx.get_rt_ticker(symbol, num=self._config.poll_num)
+                except Exception as exc:
+                    logger.warning("poll_error symbol=%s err=%s", symbol, exc)
+                    continue
+                if ret != RET_OK:
+                    logger.warning("poll_failed symbol=%s msg=%s", symbol, data)
+                    continue
+
+                try:
+                    rows = ticker_df_to_rows(
+                        data,
+                        provider="futu",
+                        push_type="poll",
+                        default_symbol=symbol,
+                    )
+                except Exception:
+                    logger.exception("poll_map_failed symbol=%s", symbol)
+                    continue
+
+                new_rows = self._filter_polled_rows(symbol, rows)
+                if new_rows:
+                    self._handle_rows(new_rows, source="poll")
+
+                logger.info(
+                    "poll_stats symbol=%s fetched=%s enqueued=%s last_seq=%s",
+                    symbol,
+                    len(rows),
+                    len(new_rows),
+                    self._last_seq.get(symbol),
+                )
+
+                await self._sleep_with_stop(0.05)
+
+            elapsed = self._loop.time() - cycle_start
+            await self._sleep_with_stop(max(0.0, self._config.poll_interval_sec - elapsed))
+
+    async def _health_loop(self) -> None:
+        while not self._stop_event.is_set():
+            await self._sleep_with_stop(HEALTH_LOG_INTERVAL_SEC)
+            if self._stop_event.is_set():
+                return
+            now = self._loop.time()
+            parts = []
+            for symbol in self._config.symbols:
+                last_tick = self._last_tick_at.get(symbol)
+                age = None if last_tick is None else round(now - last_tick, 1)
+                last_seq = self._last_seq.get(symbol)
+                parts.append(
+                    f"{symbol}:last_seq={last_seq if last_seq is not None else 'none'}"
+                    f" last_tick_age_sec={age if age is not None else 'none'}"
+                )
+
+            logger.info(
+                "health connected=%s push_rows_per_min=%s symbols=%s",
+                self._connected,
+                self._push_rows_since_report,
+                " | ".join(parts),
+            )
+            self._push_rows_since_report = 0
 
     async def _backfill_recent(self) -> None:
         if self._ctx is None:
@@ -114,8 +245,86 @@ class FutuQuoteClient:
                 continue
             rows = ticker_df_to_rows(data, provider="futu", push_type="backfill", default_symbol=symbol)
             if rows:
-                self._collector.enqueue(rows)
+                self._handle_rows(rows, source="backfill")
                 logger.info("backfill %s rows for %s", len(rows), symbol)
+
+    def _filter_polled_rows(self, symbol: str, rows: Sequence[TickRow]) -> List[TickRow]:
+        if not rows:
+            return []
+        last_seq = self._last_seq.get(symbol)
+        seen_seq = set()
+        seen_keys = set()
+        new_rows: List[TickRow] = []
+        recent_keys = self._recent_key_sets.get(symbol, set())
+
+        for row in rows:
+            if row.seq is None:
+                key = self._row_key(row)
+                if key in recent_keys or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                new_rows.append(row)
+                continue
+
+            if row.seq in seen_seq:
+                continue
+            if last_seq is None or row.seq > last_seq:
+                seen_seq.add(row.seq)
+                new_rows.append(row)
+
+        return new_rows
+
+    def _handle_push_rows(self, rows: List[TickRow]) -> None:
+        self._handle_rows(rows, source="push")
+
+    def _handle_rows(self, rows: List[TickRow], source: str) -> None:
+        if not rows:
+            return
+        now = self._loop.time()
+        for row in rows:
+            symbol = row.symbol
+            self._last_tick_at[symbol] = now
+            if source == "push":
+                self._last_push_at[symbol] = now
+            if row.seq is not None:
+                last_seq = self._last_seq.get(symbol)
+                if last_seq is None or row.seq > last_seq:
+                    self._last_seq[symbol] = row.seq
+            else:
+                self._remember_key(symbol, self._row_key(row))
+
+        if source == "push":
+            self._push_rows_since_report += len(rows)
+
+        self._collector.enqueue(rows)
+
+    def _remember_key(self, symbol: str, key: tuple) -> None:
+        queue = self._recent_keys.setdefault(symbol, deque())
+        key_set = self._recent_key_sets.setdefault(symbol, set())
+        if key in key_set:
+            return
+        queue.append(key)
+        key_set.add(key)
+        if len(queue) > POLL_RECENT_KEY_LIMIT:
+            old = queue.popleft()
+            key_set.discard(old)
+
+    def _row_key(self, row: TickRow) -> tuple:
+        return (row.ts_ms, row.price, row.volume, row.turnover)
+
+    def _should_skip_poll(self, symbol: str) -> bool:
+        last_push = self._last_push_at.get(symbol)
+        if last_push is None:
+            return False
+        return (self._loop.time() - last_push) < POLL_SKIP_PUSH_SEC
+
+    async def _sleep_with_stop(self, delay: float) -> None:
+        if delay <= 0:
+            return
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            return
 
     def _close_ctx(self) -> None:
         if self._ctx is not None:

@@ -100,3 +100,46 @@ sudo ops/verify.sh
 ```
 
 输出包含：端口监听、订阅权限、当日数据库写入情况。
+
+提示：如果需要设置 `StartLimitIntervalSec`，请放在 `[Unit]`，不要放在 `[Service]`，避免 systemd 警告。
+
+## 9) 故障排查：DB 不再更新
+
+常见排查步骤：
+
+1) OpenD 监听状态：
+
+```bash
+ss -tnp | grep 11111
+```
+
+2) 订阅与行情状态（示例 Python）：
+
+```bash
+python3 - <<'PY'
+import os
+from futu import OpenQuoteContext, RET_OK, SubType
+
+host = os.getenv("FUTU_HOST", "127.0.0.1")
+port = int(os.getenv("FUTU_PORT", "11111"))
+symbols = [s.strip() for s in os.getenv("FUTU_SYMBOLS", "").split(",") if s.strip()]
+
+ctx = OpenQuoteContext(host=host, port=port)
+ret, sub_df = ctx.query_subscription()
+if ret == RET_OK:
+    print(sub_df)
+
+if symbols:
+    ret, state_df = ctx.get_market_state(symbols)
+    if ret == RET_OK:
+        print(state_df)
+
+    # get_rt_ticker 需要先 subscribe（subscribe_push 可为 False）
+    ret, msg = ctx.subscribe(symbols, [SubType.TICKER], subscribe_push=False)
+    print(ret, msg)
+    ret, df = ctx.get_rt_ticker(symbols[0], num=3)
+    print(ret, df)
+
+ctx.close()
+PY
+```

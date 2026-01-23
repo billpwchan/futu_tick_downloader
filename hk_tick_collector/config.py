@@ -34,6 +34,18 @@ def _get_env_list(name: str, default: List[str]) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class Config:
     futu_host: str
@@ -47,6 +59,9 @@ class Config:
     reconnect_min_delay: int
     reconnect_max_delay: int
     check_interval_sec: int
+    poll_enabled: bool
+    poll_interval_sec: int
+    poll_num: int
     log_level: str
 
     @classmethod
@@ -64,5 +79,8 @@ class Config:
             reconnect_min_delay=_get_env_int("RECONNECT_MIN_DELAY", 1),
             reconnect_max_delay=_get_env_int("RECONNECT_MAX_DELAY", 60),
             check_interval_sec=_get_env_int("CHECK_INTERVAL_SEC", 5),
+            poll_enabled=_get_env_bool("FUTU_POLL_ENABLED", True),
+            poll_interval_sec=_get_env_int("FUTU_POLL_INTERVAL_SEC", 3),
+            poll_num=_get_env_int("FUTU_POLL_NUM", 100),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

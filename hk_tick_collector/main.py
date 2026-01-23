@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from datetime import datetime
 
 from .collector import AsyncTickCollector
 from .config import Config
@@ -27,6 +28,17 @@ async def run() -> None:
     setup_logging(config.log_level)
 
     store = SQLiteTickStore(config.data_root)
+    trading_day = datetime.now().strftime("%Y%m%d")
+    initial_last_seq = await asyncio.to_thread(
+        store.fetch_max_seq_by_symbol,
+        trading_day,
+        config.symbols,
+    )
+    if initial_last_seq:
+        logger.info("seed_last_seq trading_day=%s values=%s", trading_day, initial_last_seq)
+    else:
+        logger.info("seed_last_seq trading_day=%s values=none", trading_day)
+
     collector = AsyncTickCollector(
         store,
         batch_size=config.batch_size,
@@ -36,7 +48,7 @@ async def run() -> None:
     await collector.start()
 
     loop = asyncio.get_running_loop()
-    client = FutuQuoteClient(config, collector, loop)
+    client = FutuQuoteClient(config, collector, loop, initial_last_seq=initial_last_seq)
     client_task = asyncio.create_task(client.run_forever())
 
     stop_event = asyncio.Event()
@@ -45,13 +57,18 @@ async def run() -> None:
     await stop_event.wait()
     logger.info("shutdown signal received")
 
-    client_task.cancel()
+    await client.stop()
     try:
-        await client_task
-    except asyncio.CancelledError:
-        pass
+        await asyncio.wait_for(client_task, timeout=12)
+    except asyncio.TimeoutError:
+        logger.warning("client shutdown timeout, cancelling")
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
 
-    await collector.stop()
+    try:
+        await asyncio.wait_for(collector.stop(), timeout=12)
+    except asyncio.TimeoutError:
+        logger.warning("collector shutdown timeout")
 
 
 def main() -> None:

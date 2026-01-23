@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Iterable, List
+from typing import Dict, Iterable, List, Sequence
 
 from .models import TickRow
 
@@ -106,8 +106,40 @@ class SQLiteTickStore:
         conn = _open_conn(db_path)
         try:
             ensure_schema(conn)
+            before = conn.total_changes
             conn.executemany(INSERT_SQL, [row.as_tuple() for row in rows_list])
             conn.commit()
-            return conn.total_changes
+            inserted = conn.total_changes - before
+            ignored = max(0, len(rows_list) - inserted)
+            logger.info(
+                "persist_ticks db=%s batch=%s inserted=%s ignored=%s",
+                db_path,
+                len(rows_list),
+                inserted,
+                ignored,
+            )
+            return inserted
+        finally:
+            conn.close()
+
+    def fetch_max_seq_by_symbol(self, trading_day: str, symbols: Sequence[str]) -> Dict[str, int]:
+        if not symbols:
+            return {}
+        db_path = db_path_for_trading_day(self._data_root, trading_day)
+        if not db_path.exists():
+            return {}
+        conn = _open_conn(db_path)
+        try:
+            ensure_schema(conn)
+            placeholders = ",".join("?" for _ in symbols)
+            rows = conn.execute(
+                (
+                    "SELECT symbol, MAX(seq) "
+                    "FROM ticks WHERE trading_day = ? AND seq IS NOT NULL "
+                    f"AND symbol IN ({placeholders}) GROUP BY symbol"
+                ),
+                (trading_day, *symbols),
+            ).fetchall()
+            return {symbol: seq for symbol, seq in rows if seq is not None}
         finally:
             conn.close()
