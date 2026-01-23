@@ -93,8 +93,16 @@ class FutuQuoteClient:
             await asyncio.sleep(self._config.check_interval_sec)
             if self._ctx is None:
                 raise RuntimeError("context closed")
-            if not self._ctx.is_connected():
-                raise RuntimeError("disconnected")
+            if hasattr(self._ctx, "is_connected"):
+                if not self._ctx.is_connected():
+                    raise RuntimeError("disconnected")
+                continue
+            if hasattr(self._ctx, "get_global_state"):
+                ret, data = self._ctx.get_global_state()
+                if ret != RET_OK:
+                    raise RuntimeError(f"get_global_state failed: {data}")
+                continue
+            logger.debug("connection health check skipped: no supported method")
 
     async def _backfill_recent(self) -> None:
         if self._ctx is None:
