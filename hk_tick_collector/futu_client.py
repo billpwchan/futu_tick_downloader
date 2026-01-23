@@ -141,11 +141,6 @@ class FutuQuoteClient:
             if self._ctx is None:
                 logger.warning("futu_disconnected reason=context_closed")
                 raise RuntimeError("context closed")
-            if hasattr(self._ctx, "is_connected"):
-                if not self._ctx.is_connected():
-                    logger.warning("futu_disconnected reason=is_connected_false")
-                    raise RuntimeError("disconnected")
-                continue
             if hasattr(self._ctx, "get_global_state"):
                 ret, data = self._ctx.get_global_state()
                 if ret != RET_OK:
@@ -196,14 +191,24 @@ class FutuQuoteClient:
 
                 new_rows = self._filter_polled_rows(symbol, rows)
                 if new_rows:
-                    self._handle_rows(new_rows, source="poll")
+                    accepted_count, accepted_max = self._handle_rows(new_rows, source="poll")
+                else:
+                    accepted_count, accepted_max = 0, {}
 
+                accepted_last_seq = accepted_max.get(symbol)
+                if accepted_last_seq is not None:
+                    self._last_seq[symbol] = accepted_last_seq
+
+                fetched_last_seq = self._max_seq(rows)
                 logger.info(
-                    "poll_stats symbol=%s fetched=%s enqueued=%s last_seq=%s",
+                    "poll_stats symbol=%s fetched=%s enqueued=%s last_seq=%s "
+                    "fetched_last_seq=%s accepted_last_seq=%s",
                     symbol,
                     len(rows),
-                    len(new_rows),
+                    accepted_count,
                     self._last_seq.get(symbol),
+                    fetched_last_seq,
+                    accepted_last_seq,
                 )
 
                 await self._sleep_with_stop(0.05)
@@ -245,8 +250,11 @@ class FutuQuoteClient:
                 continue
             rows = ticker_df_to_rows(data, provider="futu", push_type="backfill", default_symbol=symbol)
             if rows:
-                self._handle_rows(rows, source="backfill")
-                logger.info("backfill %s rows for %s", len(rows), symbol)
+                accepted_count, accepted_max = self._handle_rows(rows, source="backfill")
+                accepted_last_seq = accepted_max.get(symbol)
+                if accepted_last_seq is not None:
+                    self._last_seq[symbol] = accepted_last_seq
+                logger.info("backfill %s rows for %s", accepted_count, symbol)
 
     def _filter_polled_rows(self, symbol: str, rows: Sequence[TickRow]) -> List[TickRow]:
         if not rows:
@@ -275,28 +283,35 @@ class FutuQuoteClient:
         return new_rows
 
     def _handle_push_rows(self, rows: List[TickRow]) -> None:
-        self._handle_rows(rows, source="push")
+        _, accepted_max = self._handle_rows(rows, source="push")
+        for symbol, accepted_last_seq in accepted_max.items():
+            if accepted_last_seq is not None:
+                self._last_seq[symbol] = accepted_last_seq
 
-    def _handle_rows(self, rows: List[TickRow], source: str) -> None:
+    def _handle_rows(self, rows: List[TickRow], source: str) -> tuple[int, Dict[str, int]]:
         if not rows:
-            return
+            return 0, {}
+        accepted = self._collector.enqueue(rows)
+        if not accepted:
+            return 0, {}
         now = self._loop.time()
+        accepted_max_seq: Dict[str, int] = {}
         for row in rows:
             symbol = row.symbol
             self._last_tick_at[symbol] = now
             if source == "push":
                 self._last_push_at[symbol] = now
             if row.seq is not None:
-                last_seq = self._last_seq.get(symbol)
-                if last_seq is None or row.seq > last_seq:
-                    self._last_seq[symbol] = row.seq
+                current = accepted_max_seq.get(symbol)
+                if current is None or row.seq > current:
+                    accepted_max_seq[symbol] = row.seq
             else:
                 self._remember_key(symbol, self._row_key(row))
 
         if source == "push":
             self._push_rows_since_report += len(rows)
 
-        self._collector.enqueue(rows)
+        return len(rows), accepted_max_seq
 
     def _remember_key(self, symbol: str, key: tuple) -> None:
         queue = self._recent_keys.setdefault(symbol, deque())
@@ -311,6 +326,10 @@ class FutuQuoteClient:
 
     def _row_key(self, row: TickRow) -> tuple:
         return (row.ts_ms, row.price, row.volume, row.turnover)
+
+    def _max_seq(self, rows: Sequence[TickRow]) -> Optional[int]:
+        seqs = [row.seq for row in rows if row.seq is not None]
+        return max(seqs) if seqs else None
 
     def _should_skip_poll(self, symbol: str) -> bool:
         last_push = self._last_push_at.get(symbol)

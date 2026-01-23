@@ -12,11 +12,15 @@ from hk_tick_collector.models import TickRow
 
 
 class DummyCollector:
-    def __init__(self) -> None:
+    def __init__(self, accept: bool = True) -> None:
         self.enqueued = []
+        self.accept = accept
 
-    def enqueue(self, rows) -> None:
+    def enqueue(self, rows) -> bool:
+        if not self.accept:
+            return False
         self.enqueued.append(rows)
+        return True
 
 
 def build_config(**overrides) -> Config:
@@ -93,12 +97,15 @@ def test_poll_dedup_only_new_seq():
         row_new = make_row(11, ts_ms=1704161402000)
         row_dupe = make_row(11, ts_ms=1704161403000)
         row_no_seq = make_row(None, ts_ms=1704161404000, price=11.0)
-        client._handle_rows([row_no_seq], source="push")
+        client._handle_push_rows([row_no_seq])
 
         filtered = client._filter_polled_rows("HK.00700", [row_old, row_new, row_dupe, row_no_seq])
 
         assert [row.seq for row in filtered] == [11]
-        client._handle_rows(filtered, source="poll")
+        accepted_count, accepted_max = client._handle_rows(filtered, source="poll")
+        accepted_last_seq = accepted_max.get("HK.00700")
+        if accepted_last_seq is not None:
+            client._last_seq["HK.00700"] = accepted_last_seq
         assert client._last_seq["HK.00700"] == 11
 
     asyncio.run(runner())
@@ -125,11 +132,11 @@ def test_reconnect_triggers_resubscribe_and_close():
                 calls["subscribe"] += 1
                 return RET_OK, "ok"
 
-            def is_connected(self):
+            def get_global_state(self):
                 if self._remaining_checks <= 0:
-                    return False
+                    return 1, "disconnected"
                 self._remaining_checks -= 1
-                return True
+                return RET_OK, "ok"
 
             def close(self):
                 self.closed = True
@@ -153,5 +160,24 @@ def test_reconnect_triggers_resubscribe_and_close():
 
         assert calls["subscribe"] >= 2
         assert any(ctx.closed for ctx in contexts)
+
+    asyncio.run(runner())
+
+
+def test_last_seq_not_updated_when_enqueue_fails():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector(accept=False)
+        client = FutuQuoteClient(
+            build_config(),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+        row = make_row(6)
+        client._handle_push_rows([row])
+
+        assert client._last_seq["HK.00700"] == 5
+        assert collector.enqueued == []
 
     asyncio.run(runner())

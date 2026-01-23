@@ -5,6 +5,7 @@
 - 采集器运行在服务器本机，与 OpenD 同机同网段通信。
 - OpenD 仅监听 `127.0.0.1:11111`，采集器通过本机回环连接。
 - 数据流：OpenD push 回调 -> asyncio queue -> batch flush -> SQLite 日分库。
+- 兜底轮询：定时调用 `get_rt_ticker`，并按 `seq` 去重补写。
 
 ## 数据流
 
@@ -20,6 +21,7 @@
 - 重连成功后自动重新订阅。
 - 可选回补：`BACKFILL_N > 0` 时，调用 `get_rt_ticker(code, num=N)` 拉取最近 N 笔。
 - SQLite 写入使用唯一索引与 `INSERT OR IGNORE`，可幂等去重。
+- 轮询默认启用：推送短时间内有数据则跳过轮询，避免对 OpenD 造成压力。
 
 ## 容量规划（粗略估算）
 

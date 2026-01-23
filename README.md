@@ -8,10 +8,16 @@
 ## 快速开始
 
 1) 按照 `docs/runbook.md` 完成 OpenD 安装与 systemd 守护。
-2) 复制环境变量样例：
+2) 复制环境变量样例（任选其一）：
 
 ```
 cp .env.example /etc/hk-tick-collector.env
+```
+
+或：
+
+```
+cp .env.example .env
 ```
 
 3) 安装采集器并启动：

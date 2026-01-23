@@ -35,13 +35,15 @@ class AsyncTickCollector:
         if self._task is not None:
             await self._task
 
-    def enqueue(self, rows: List[TickRow]) -> None:
+    def enqueue(self, rows: List[TickRow]) -> bool:
         if not rows:
-            return
+            return False
         try:
             self._queue.put_nowait(rows)
+            return True
         except asyncio.QueueFull:
             logger.warning("queue full, dropping %s rows", len(rows))
+            return False
 
     async def _flush_loop(self) -> None:
         buffer: List[TickRow] = []

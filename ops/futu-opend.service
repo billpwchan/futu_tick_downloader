@@ -7,7 +7,7 @@ Type=simple
 User=futu
 Group=futu
 WorkingDirectory=/opt/futu-opend
-ExecStart=/opt/futu-opend/FutuOpenD -c /opt/futu-opend/OpenD.xml
+ExecStart=/opt/futu-opend/FutuOpenD -c /opt/futu-opend/OpenD.xml -no_monitor=1
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
