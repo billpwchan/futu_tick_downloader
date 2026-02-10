@@ -1,10 +1,24 @@
 import asyncio
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
-futu = pytest.importorskip("futu")
-RET_OK = futu.RET_OK
+if "futu" not in sys.modules:
+    class _TickerHandlerBase:
+        def on_recv_rsp(self, rsp_pb):
+            return 0, rsp_pb
+
+    fake_futu = types.ModuleType("futu")
+    fake_futu.RET_OK = 0
+    fake_futu.Session = types.SimpleNamespace(ALL="ALL")
+    fake_futu.SubType = types.SimpleNamespace(TICKER="TICKER")
+    fake_futu.OpenQuoteContext = object
+    fake_futu.TickerHandlerBase = _TickerHandlerBase
+    sys.modules["futu"] = fake_futu
+
+RET_OK = 0
 
 from hk_tick_collector.config import Config
 from hk_tick_collector.futu_client import FutuQuoteClient
@@ -12,15 +26,22 @@ from hk_tick_collector.models import TickRow
 
 
 class DummyCollector:
-    def __init__(self, accept: bool = True) -> None:
+    def __init__(self, accept: bool = True, queue_maxsize: int = 10) -> None:
         self.enqueued = []
         self.accept = accept
+        self._queue_maxsize = queue_maxsize
 
     def enqueue(self, rows) -> bool:
         if not self.accept:
             return False
         self.enqueued.append(rows)
         return True
+
+    def queue_size(self) -> int:
+        return len(self.enqueued)
+
+    def queue_maxsize(self) -> int:
+        return self._queue_maxsize
 
 
 def build_config(**overrides) -> Config:
@@ -39,6 +60,8 @@ def build_config(**overrides) -> Config:
         poll_enabled=False,
         poll_interval_sec=3,
         poll_num=100,
+        watchdog_stall_sec=180,
+        watchdog_upstream_window_sec=60,
         log_level="INFO",
     )
     data.update(overrides)
@@ -63,7 +86,7 @@ def make_row(seq, ts_ms=1704161400000, price=10.0, volume=100, turnover=1000.0) 
     )
 
 
-def test_push_handler_updates_last_seq():
+def test_push_handler_updates_seen_and_accepted_seq():
     async def runner():
         loop = asyncio.get_running_loop()
         collector = DummyCollector()
@@ -78,12 +101,13 @@ def test_push_handler_updates_last_seq():
         client._handle_push_rows([row1, row2])
 
         assert collector.enqueued == [[row1, row2]]
-        assert client._last_seq["HK.00700"] == 7
+        assert client._last_seen_seq["HK.00700"] == 7
+        assert client._last_accepted_seq["HK.00700"] == 7
 
     asyncio.run(runner())
 
 
-def test_poll_dedup_only_new_seq():
+def test_poll_dedup_uses_accepted_not_seen_when_push_enqueue_fails():
     async def runner():
         loop = asyncio.get_running_loop()
         collector = DummyCollector()
@@ -93,20 +117,85 @@ def test_poll_dedup_only_new_seq():
             loop,
             initial_last_seq={"HK.00700": 10},
         )
-        row_old = make_row(9)
-        row_new = make_row(11, ts_ms=1704161402000)
-        row_dupe = make_row(11, ts_ms=1704161403000)
-        row_no_seq = make_row(None, ts_ms=1704161404000, price=11.0)
-        client._handle_push_rows([row_no_seq])
 
-        filtered = client._filter_polled_rows("HK.00700", [row_old, row_new, row_dupe, row_no_seq])
+        collector.accept = False
+        client._handle_push_rows([make_row(20)])
+        assert client._last_seen_seq["HK.00700"] == 20
+        assert client._last_accepted_seq["HK.00700"] == 10
+
+        collector.accept = True
+        row_old = make_row(10)
+        row_new = make_row(11, ts_ms=1704161402000)
+        filtered, dropped_duplicate, dropped_filter = client._filter_polled_rows("HK.00700", [row_old, row_new])
 
         assert [row.seq for row in filtered] == [11]
-        accepted_count, accepted_max = client._handle_rows(filtered, source="poll")
-        accepted_last_seq = accepted_max.get("HK.00700")
-        if accepted_last_seq is not None:
-            client._last_seq["HK.00700"] = accepted_last_seq
-        assert client._last_seq["HK.00700"] == 11
+        assert dropped_duplicate == 1
+        assert dropped_filter == 0
+
+        enqueued, accepted_max = client._handle_rows(filtered, source="poll")
+        for symbol, seq in accepted_max.items():
+            client._update_seq_max(client._last_accepted_seq, symbol, seq)
+
+        assert enqueued == 1
+        assert client._last_accepted_seq["HK.00700"] == 11
+
+    asyncio.run(runner())
+
+
+def test_enqueue_failure_does_not_advance_accepted_or_persisted_seq():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector(accept=False)
+        client = FutuQuoteClient(
+            build_config(),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+        client._handle_push_rows([make_row(6)])
+
+        assert client._last_seen_seq["HK.00700"] == 6
+        assert client._last_accepted_seq["HK.00700"] == 5
+        assert client._last_persisted_seq["HK.00700"] == 5
+        assert collector.enqueued == []
+
+    asyncio.run(runner())
+
+
+def test_watchdog_exits_on_upstream_active_and_persist_stalled(monkeypatch):
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        client = FutuQuoteClient(
+            build_config(watchdog_stall_sec=1),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+
+        client._push_rows_since_report = 5
+        client._poll_fetched_since_report = 10
+        client._poll_accepted_since_report = 10
+        client._poll_enqueued_since_report = 0
+        client._dropped_queue_full_since_report = 10
+        client._last_persist_time = loop.time() - 5
+        client._last_upstream_active_at = loop.time()
+
+        class ExitTriggered(Exception):
+            pass
+
+        def fake_exit(code: int):
+            raise ExitTriggered(code)
+
+        monkeypatch.setattr("hk_tick_collector.futu_client.os._exit", fake_exit)
+
+        with pytest.raises(ExitTriggered):
+            client._check_watchdog(
+                now=loop.time(),
+                queue_size=10,
+                queue_maxsize=10,
+                persisted_rows_per_min=0,
+            )
 
     asyncio.run(runner())
 
@@ -160,24 +249,5 @@ def test_reconnect_triggers_resubscribe_and_close():
 
         assert calls["subscribe"] >= 2
         assert any(ctx.closed for ctx in contexts)
-
-    asyncio.run(runner())
-
-
-def test_last_seq_not_updated_when_enqueue_fails():
-    async def runner():
-        loop = asyncio.get_running_loop()
-        collector = DummyCollector(accept=False)
-        client = FutuQuoteClient(
-            build_config(),
-            collector,
-            loop,
-            initial_last_seq={"HK.00700": 5},
-        )
-        row = make_row(6)
-        client._handle_push_rows([row])
-
-        assert client._last_seq["HK.00700"] == 5
-        assert collector.enqueued == []
 
     asyncio.run(runner())

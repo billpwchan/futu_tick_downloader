@@ -49,6 +49,7 @@ async def run() -> None:
 
     loop = asyncio.get_running_loop()
     client = FutuQuoteClient(config, collector, loop, initial_last_seq=initial_last_seq)
+    collector.set_persist_observer(client.handle_persist_result)
     client_task = asyncio.create_task(client.run_forever())
 
     stop_event = asyncio.Event()
@@ -65,10 +66,7 @@ async def run() -> None:
         client_task.cancel()
         await asyncio.gather(client_task, return_exceptions=True)
 
-    try:
-        await asyncio.wait_for(collector.stop(), timeout=12)
-    except asyncio.TimeoutError:
-        logger.warning("collector shutdown timeout")
+    await collector.stop(timeout_sec=12)
 
 
 def main() -> None:

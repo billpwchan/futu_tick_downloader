@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
@@ -55,6 +57,16 @@ INSERT_SQL = (
 )
 
 
+@dataclass(frozen=True)
+class PersistResult:
+    db_path: Path
+    batch: int
+    inserted: int
+    ignored: int
+    commit_latency_ms: int
+    checkpoint: str = "none"
+
+
 def db_path_for_trading_day(data_root: Path, trading_day: str) -> Path:
     return Path(data_root) / f"{trading_day}.db"
 
@@ -64,6 +76,7 @@ def _open_conn(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     return conn
 
 
@@ -98,27 +111,44 @@ class SQLiteTickStore:
             conn.close()
         return db_path
 
-    def insert_ticks(self, trading_day: str, rows: Iterable[TickRow]) -> int:
+    def insert_ticks(self, trading_day: str, rows: Iterable[TickRow]) -> PersistResult:
         rows_list = list(rows)
         if not rows_list:
-            return 0
+            db_path = db_path_for_trading_day(self._data_root, trading_day)
+            return PersistResult(
+                db_path=db_path,
+                batch=0,
+                inserted=0,
+                ignored=0,
+                commit_latency_ms=0,
+            )
         db_path = db_path_for_trading_day(self._data_root, trading_day)
         conn = _open_conn(db_path)
         try:
             ensure_schema(conn)
             before = conn.total_changes
+            start = time.perf_counter()
             conn.executemany(INSERT_SQL, [row.as_tuple() for row in rows_list])
             conn.commit()
+            latency_ms = int((time.perf_counter() - start) * 1000)
             inserted = conn.total_changes - before
             ignored = max(0, len(rows_list) - inserted)
             logger.info(
-                "persist_ticks db=%s batch=%s inserted=%s ignored=%s",
+                "persist_ticks db_path=%s batch=%s inserted=%s ignored=%s commit_latency_ms=%s checkpoint=%s",
                 db_path,
                 len(rows_list),
                 inserted,
                 ignored,
+                latency_ms,
+                "none",
             )
-            return inserted
+            return PersistResult(
+                db_path=db_path,
+                batch=len(rows_list),
+                inserted=inserted,
+                ignored=ignored,
+                commit_latency_ms=latency_ms,
+            )
         finally:
             conn.close()
 

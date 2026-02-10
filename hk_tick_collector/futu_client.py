@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import deque
 from typing import Callable, Deque, Dict, List, Optional, Sequence
 
@@ -9,6 +10,7 @@ from futu import OpenQuoteContext, RET_OK, Session, SubType, TickerHandlerBase
 
 from .collector import AsyncTickCollector
 from .config import Config
+from .db import PersistResult
 from .mapping import ticker_df_to_rows
 from .models import TickRow
 from .utils import ExponentialBackoff
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 POLL_SKIP_PUSH_SEC = 2
 POLL_RECENT_KEY_LIMIT = 500
 HEALTH_LOG_INTERVAL_SEC = 60
+WATCHDOG_EXIT_CODE = 2
 
 
 class FutuTickerHandler(TickerHandlerBase):
@@ -61,12 +64,31 @@ class FutuQuoteClient:
         self._stop_event = asyncio.Event()
         self._connected = False
 
-        self._last_seq: Dict[str, int] = dict(initial_last_seq or {})
-        self._last_tick_at: Dict[str, float] = {}
+        seed = dict(initial_last_seq or {})
+        self._last_seen_seq: Dict[str, int] = {}
+        self._last_accepted_seq: Dict[str, int] = dict(seed)
+        self._last_persisted_seq: Dict[str, int] = dict(seed)
+
+        self._last_tick_seen_at: Dict[str, float] = {}
         self._last_push_at: Dict[str, float] = {}
         self._recent_keys: Dict[str, Deque[tuple]] = {}
         self._recent_key_sets: Dict[str, set] = {}
+        self._last_poll_fetched_seq: Dict[str, int] = {}
+
+        self._started_at = self._loop.time()
+        self._last_upstream_active_at: float | None = None
+        self._last_persist_time: float | None = None
+
         self._push_rows_since_report = 0
+        self._poll_fetched_since_report = 0
+        self._poll_accepted_since_report = 0
+        self._poll_enqueued_since_report = 0
+        self._poll_seq_advanced_since_report = 0
+        self._persisted_rows_since_report = 0
+        self._ignored_rows_since_report = 0
+        self._dropped_queue_full_since_report = 0
+        self._dropped_duplicate_since_report = 0
+        self._dropped_filter_since_report = 0
 
     async def run_forever(self) -> None:
         backoff = ExponentialBackoff(self._config.reconnect_min_delay, self._config.reconnect_max_delay)
@@ -107,6 +129,18 @@ class FutuQuoteClient:
     async def stop(self) -> None:
         self._stop_event.set()
         self._close_ctx()
+
+    def handle_persist_result(self, rows: List[TickRow], result: PersistResult) -> None:
+        if not rows:
+            return
+        self._persisted_rows_since_report += result.inserted
+        self._ignored_rows_since_report += result.ignored
+        self._last_persist_time = self._loop.time()
+
+        for row in rows:
+            if row.seq is None:
+                continue
+            self._update_seq_max(self._last_persisted_seq, row.symbol, row.seq)
 
     async def _connect_and_subscribe(self) -> None:
         if not self._config.symbols:
@@ -189,26 +223,47 @@ class FutuQuoteClient:
                     logger.exception("poll_map_failed symbol=%s", symbol)
                     continue
 
-                new_rows = self._filter_polled_rows(symbol, rows)
-                if new_rows:
-                    accepted_count, accepted_max = self._handle_rows(new_rows, source="poll")
-                else:
-                    accepted_count, accepted_max = 0, {}
-
-                accepted_last_seq = accepted_max.get(symbol)
-                if accepted_last_seq is not None:
-                    self._last_seq[symbol] = accepted_last_seq
-
+                self._record_seen_rows(rows, source="poll")
+                fetched = len(rows)
                 fetched_last_seq = self._max_seq(rows)
+                self._poll_fetched_since_report += fetched
+                self._record_poll_seq_advance(symbol, fetched_last_seq)
+
+                new_rows, dropped_duplicate, dropped_filter = self._filter_polled_rows(symbol, rows)
+                accepted = len(new_rows)
+                self._poll_accepted_since_report += accepted
+                self._dropped_duplicate_since_report += dropped_duplicate
+                self._dropped_filter_since_report += dropped_filter
+
+                if new_rows:
+                    enqueued, accepted_max = self._handle_rows(new_rows, source="poll")
+                else:
+                    enqueued, accepted_max = 0, {}
+
+                for accepted_symbol, accepted_last_seq in accepted_max.items():
+                    self._update_seq_max(self._last_accepted_seq, accepted_symbol, accepted_last_seq)
+
+                dropped_queue_full = max(0, accepted - enqueued)
+                self._poll_enqueued_since_report += enqueued
+
                 logger.info(
-                    "poll_stats symbol=%s fetched=%s enqueued=%s last_seq=%s "
-                    "fetched_last_seq=%s accepted_last_seq=%s",
+                    "poll_stats symbol=%s fetched=%s accepted=%s enqueued=%s "
+                    "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
+                    "queue_size=%s queue_maxsize=%s fetched_last_seq=%s "
+                    "last_seen_seq=%s last_accepted_seq=%s last_persisted_seq=%s",
                     symbol,
-                    len(rows),
-                    accepted_count,
-                    self._last_seq.get(symbol),
+                    fetched,
+                    accepted,
+                    enqueued,
+                    dropped_queue_full,
+                    dropped_duplicate,
+                    dropped_filter,
+                    self._collector.queue_size(),
+                    self._collector.queue_maxsize(),
                     fetched_last_seq,
-                    accepted_last_seq,
+                    self._last_seen_seq.get(symbol),
+                    self._last_accepted_seq.get(symbol),
+                    self._last_persisted_seq.get(symbol),
                 )
 
                 await self._sleep_with_stop(0.05)
@@ -221,24 +276,64 @@ class FutuQuoteClient:
             await self._sleep_with_stop(HEALTH_LOG_INTERVAL_SEC)
             if self._stop_event.is_set():
                 return
+
             now = self._loop.time()
+            queue_size = self._collector.queue_size()
+            queue_maxsize = self._collector.queue_maxsize()
+            persisted_rows_per_min = self._persisted_rows_since_report
+            ignored_rows_per_min = self._ignored_rows_since_report
+
             parts = []
             for symbol in self._config.symbols:
-                last_tick = self._last_tick_at.get(symbol)
+                last_tick = self._last_tick_seen_at.get(symbol)
                 age = None if last_tick is None else round(now - last_tick, 1)
-                last_seq = self._last_seq.get(symbol)
+                last_seen = self._last_seen_seq.get(symbol)
+                last_accepted = self._last_accepted_seq.get(symbol)
+                last_persisted = self._last_persisted_seq.get(symbol)
                 parts.append(
-                    f"{symbol}:last_seq={last_seq if last_seq is not None else 'none'}"
+                    f"{symbol}:last_seen_seq={last_seen if last_seen is not None else 'none'}"
+                    f" last_accepted_seq={last_accepted if last_accepted is not None else 'none'}"
+                    f" last_persisted_seq={last_persisted if last_persisted is not None else 'none'}"
                     f" last_tick_age_sec={age if age is not None else 'none'}"
                 )
 
             logger.info(
-                "health connected=%s push_rows_per_min=%s symbols=%s",
+                "health connected=%s queue=%s/%s push_rows_per_min=%s "
+                "poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
+                "persisted_rows_per_min=%s ignored_rows_per_min=%s "
+                "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s symbols=%s",
                 self._connected,
+                queue_size,
+                queue_maxsize,
                 self._push_rows_since_report,
+                self._poll_fetched_since_report,
+                self._poll_accepted_since_report,
+                self._poll_enqueued_since_report,
+                persisted_rows_per_min,
+                ignored_rows_per_min,
+                self._dropped_queue_full_since_report,
+                self._dropped_duplicate_since_report,
+                self._dropped_filter_since_report,
                 " | ".join(parts),
             )
+
+            self._check_watchdog(
+                now=now,
+                queue_size=queue_size,
+                queue_maxsize=queue_maxsize,
+                persisted_rows_per_min=persisted_rows_per_min,
+            )
+
             self._push_rows_since_report = 0
+            self._poll_fetched_since_report = 0
+            self._poll_accepted_since_report = 0
+            self._poll_enqueued_since_report = 0
+            self._poll_seq_advanced_since_report = 0
+            self._persisted_rows_since_report = 0
+            self._ignored_rows_since_report = 0
+            self._dropped_queue_full_since_report = 0
+            self._dropped_duplicate_since_report = 0
+            self._dropped_filter_since_report = 0
 
     async def _backfill_recent(self) -> None:
         if self._ctx is None:
@@ -249,56 +344,84 @@ class FutuQuoteClient:
                 logger.warning("backfill failed for %s: %s", symbol, data)
                 continue
             rows = ticker_df_to_rows(data, provider="futu", push_type="backfill", default_symbol=symbol)
+            self._record_seen_rows(rows, source="backfill")
             if rows:
-                accepted_count, accepted_max = self._handle_rows(rows, source="backfill")
-                accepted_last_seq = accepted_max.get(symbol)
-                if accepted_last_seq is not None:
-                    self._last_seq[symbol] = accepted_last_seq
-                logger.info("backfill %s rows for %s", accepted_count, symbol)
+                accepted, accepted_max = self._handle_rows(rows, source="backfill")
+                for accepted_symbol, accepted_last_seq in accepted_max.items():
+                    self._update_seq_max(self._last_accepted_seq, accepted_symbol, accepted_last_seq)
+                logger.info(
+                    "backfill_stats symbol=%s fetched=%s enqueued=%s queue_size=%s queue_maxsize=%s",
+                    symbol,
+                    len(rows),
+                    accepted,
+                    self._collector.queue_size(),
+                    self._collector.queue_maxsize(),
+                )
 
-    def _filter_polled_rows(self, symbol: str, rows: Sequence[TickRow]) -> List[TickRow]:
+    def _filter_polled_rows(self, symbol: str, rows: Sequence[TickRow]) -> tuple[List[TickRow], int, int]:
         if not rows:
-            return []
-        last_seq = self._last_seq.get(symbol)
+            return [], 0, 0
+
+        baseline_seq = self._dedupe_baseline_seq(symbol)
         seen_seq = set()
         seen_keys = set()
         new_rows: List[TickRow] = []
         recent_keys = self._recent_key_sets.get(symbol, set())
+        dropped_duplicate = 0
+        dropped_filter = 0
 
         for row in rows:
+            if row.symbol != symbol:
+                dropped_filter += 1
+                continue
+
             if row.seq is None:
                 key = self._row_key(row)
                 if key in recent_keys or key in seen_keys:
+                    dropped_duplicate += 1
                     continue
                 seen_keys.add(key)
                 new_rows.append(row)
                 continue
 
             if row.seq in seen_seq:
+                dropped_duplicate += 1
                 continue
-            if last_seq is None or row.seq > last_seq:
-                seen_seq.add(row.seq)
-                new_rows.append(row)
+            if baseline_seq is not None and row.seq <= baseline_seq:
+                dropped_duplicate += 1
+                continue
 
-        return new_rows
+            seen_seq.add(row.seq)
+            new_rows.append(row)
+
+        return new_rows, dropped_duplicate, dropped_filter
 
     def _handle_push_rows(self, rows: List[TickRow]) -> None:
+        self._record_seen_rows(rows, source="push")
         _, accepted_max = self._handle_rows(rows, source="push")
         for symbol, accepted_last_seq in accepted_max.items():
-            if accepted_last_seq is not None:
-                self._last_seq[symbol] = accepted_last_seq
+            self._update_seq_max(self._last_accepted_seq, symbol, accepted_last_seq)
 
     def _handle_rows(self, rows: List[TickRow], source: str) -> tuple[int, Dict[str, int]]:
         if not rows:
             return 0, {}
+
         accepted = self._collector.enqueue(rows)
         if not accepted:
+            self._dropped_queue_full_since_report += len(rows)
+            logger.warning(
+                "enqueue_failed source=%s rows=%s queue_size=%s queue_maxsize=%s",
+                source,
+                len(rows),
+                self._collector.queue_size(),
+                self._collector.queue_maxsize(),
+            )
             return 0, {}
+
         now = self._loop.time()
         accepted_max_seq: Dict[str, int] = {}
         for row in rows:
             symbol = row.symbol
-            self._last_tick_at[symbol] = now
             if source == "push":
                 self._last_push_at[symbol] = now
             if row.seq is not None:
@@ -312,6 +435,105 @@ class FutuQuoteClient:
             self._push_rows_since_report += len(rows)
 
         return len(rows), accepted_max_seq
+
+    def _record_seen_rows(self, rows: Sequence[TickRow], source: str) -> None:
+        if not rows:
+            return
+
+        now = self._loop.time()
+        self._last_upstream_active_at = now
+
+        for row in rows:
+            symbol = row.symbol
+            self._last_tick_seen_at[symbol] = now
+            if source == "push":
+                self._last_push_at[symbol] = now
+            if row.seq is not None:
+                self._update_seq_max(self._last_seen_seq, symbol, row.seq)
+
+    def _record_poll_seq_advance(self, symbol: str, fetched_last_seq: Optional[int]) -> None:
+        if fetched_last_seq is None:
+            return
+
+        prev = self._last_poll_fetched_seq.get(symbol)
+        if prev is None or fetched_last_seq > prev:
+            self._last_poll_fetched_seq[symbol] = fetched_last_seq
+            self._poll_seq_advanced_since_report += 1
+            self._last_upstream_active_at = self._loop.time()
+
+    def _check_watchdog(
+        self,
+        *,
+        now: float,
+        queue_size: int,
+        queue_maxsize: int,
+        persisted_rows_per_min: int,
+    ) -> None:
+        if self._stop_event.is_set():
+            return
+
+        poll_active = self._poll_fetched_since_report > 0 and self._poll_seq_advanced_since_report > 0
+        recent_upstream = (
+            self._last_upstream_active_at is not None
+            and (now - self._last_upstream_active_at) <= self._config.watchdog_upstream_window_sec
+        )
+        upstream_active = recent_upstream and (self._push_rows_since_report > 0 or poll_active)
+        last_persist_at = self._last_persist_time if self._last_persist_time is not None else self._started_at
+        persist_stall_sec = now - last_persist_at
+
+        if not upstream_active:
+            return
+        if persisted_rows_per_min > 0:
+            return
+        if persist_stall_sec < self._config.watchdog_stall_sec:
+            return
+
+        logger.error(
+            "WATCHDOG persistent_stall upstream_active=%s poll_active=%s "
+            "persist_stall_sec=%.1f queue=%s/%s push_rows_per_min=%s "
+            "poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
+            "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
+            "max_seq_lag=%s",
+            upstream_active,
+            poll_active,
+            persist_stall_sec,
+            queue_size,
+            queue_maxsize,
+            self._push_rows_since_report,
+            self._poll_fetched_since_report,
+            self._poll_accepted_since_report,
+            self._poll_enqueued_since_report,
+            self._dropped_queue_full_since_report,
+            self._dropped_duplicate_since_report,
+            self._dropped_filter_since_report,
+            self._max_seq_lag(),
+        )
+        os._exit(WATCHDOG_EXIT_CODE)
+
+    def _max_seq_lag(self) -> int:
+        max_lag = 0
+        symbols = set(self._last_seen_seq.keys()) | set(self._last_persisted_seq.keys())
+        for symbol in symbols:
+            last_seen = self._last_seen_seq.get(symbol)
+            if last_seen is None:
+                continue
+            last_persisted = self._last_persisted_seq.get(symbol, 0)
+            max_lag = max(max_lag, last_seen - last_persisted)
+        return max_lag
+
+    def _dedupe_baseline_seq(self, symbol: str) -> Optional[int]:
+        accepted = self._last_accepted_seq.get(symbol)
+        persisted = self._last_persisted_seq.get(symbol)
+        if accepted is None:
+            return persisted
+        if persisted is None:
+            return accepted
+        return max(accepted, persisted)
+
+    def _update_seq_max(self, target: Dict[str, int], symbol: str, seq: int) -> None:
+        current = target.get(symbol)
+        if current is None or seq > current:
+            target[symbol] = seq
 
     def _remember_key(self, symbol: str, key: tuple) -> None:
         queue = self._recent_keys.setdefault(symbol, deque())

@@ -6,6 +6,7 @@
 - OpenD 仅监听 `127.0.0.1:11111`，采集器通过本机回环连接。
 - 数据流：OpenD push 回调 -> asyncio queue -> batch flush -> SQLite 日分库。
 - 兜底轮询：定时调用 `get_rt_ticker`，并按 `seq` 去重补写。
+- seq 状态拆分为 `last_seen_seq`（观测）、`last_accepted_seq`（成功入队）、`last_persisted_seq`（成功落库）。
 
 ## 数据流
 
@@ -14,6 +15,7 @@
 3) 写入 async queue（高吞吐，削峰）。
 4) Flush 任务按 `batch_size/max_wait_ms` 触发批量写入。
 5) 按交易日分库落盘到 `/data/sqlite/HK/YYYYMMDD.db`。
+6) 每分钟输出 health 汇总（push/poll/persist/dropped），并在“上游活跃但持久化停滞”时触发 watchdog 自愈重启。
 
 ## 断线恢复
 
@@ -21,7 +23,8 @@
 - 重连成功后自动重新订阅。
 - 可选回补：`BACKFILL_N > 0` 时，调用 `get_rt_ticker(code, num=N)` 拉取最近 N 笔。
 - SQLite 写入使用唯一索引与 `INSERT OR IGNORE`，可幂等去重。
-- 轮询默认启用：推送短时间内有数据则跳过轮询，避免对 OpenD 造成压力。
+- 轮询去重基准使用 `max(last_accepted_seq, last_persisted_seq)`，不会被 `last_seen_seq` 污染。
+- 轮询默认启用：推送短时间内有数据则短暂跳过轮询，避免对 OpenD 造成压力。
 
 ## 容量规划（粗略估算）
 
@@ -35,3 +38,4 @@
 
 - 服务器时区建议设置为 `Asia/Hong_Kong`，保证 `ts_ms` 与 `trading_day` 一致性。
 - OpenD 与采集器都使用 systemd 守护，`Restart=always`。
+- 建议配置 `WATCHDOG_STALL_SEC=120~300`，在持续停写时由进程主动退出并交给 systemd 快速恢复。

@@ -4,6 +4,7 @@
 
 - OpenD 必须使用富途官方发行包在服务器原生安装运行（禁止第三方 Docker 镜像）。
 - 数据按交易日分库：`/data/sqlite/HK/YYYYMMDD.db`，表结构与索引固定一致。
+- 内置 push/poll/persist 指标日志与 stall watchdog（上游活跃但持久化停滞时主动退出，交给 systemd 拉起）。
 
 ## 快速开始
 
@@ -30,6 +31,7 @@ sudo ops/install_collector.sh
 
 - `hk_tick_collector/` 采集器代码
 - `docs/architecture.md` 架构与容量规划
+- `docs/project-memory.md` 项目知识库（事故与修复沉淀）
 - `docs/runbook.md` 部署与运维步骤
 - `ops/` systemd 模板与脚本
 - `tests/` 单元测试

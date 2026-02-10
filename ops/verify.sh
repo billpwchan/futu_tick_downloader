@@ -94,6 +94,7 @@ import time
 
 symbols = [s.strip() for s in "${SYMBOLS}".split(",") if s.strip()]
 strict = int("${MARKET_OPEN:-0}")
+db_file = "$db_file"
 
 def fetch_max_seq(conn, symbols):
     if not symbols:
@@ -103,7 +104,7 @@ def fetch_max_seq(conn, symbols):
     ).fetchall()
     return {symbol: seq for symbol, seq in rows if symbol in symbols and seq is not None}
 
-conn = sqlite3.connect("$db_file")
+conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
 count = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
 seq_before = fetch_max_seq(conn, symbols)
 conn.close()
@@ -112,7 +113,7 @@ print(f"max seq before: {seq_before}")
 
 time.sleep(5)
 
-conn = sqlite3.connect("$db_file")
+conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
 seq_after = fetch_max_seq(conn, symbols)
 conn.close()
 print(f"max seq after: {seq_after}")
