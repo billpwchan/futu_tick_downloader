@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, List, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from .models import TickRow
 
 logger = logging.getLogger(__name__)
+HK_TZ = ZoneInfo("Asia/Hong_Kong")
+UTC_TZ = timezone.utc
 
 
 def normalize_trading_day(value: Optional[str]) -> Optional[str]:
@@ -28,7 +31,11 @@ def normalize_trading_day(value: Optional[str]) -> Optional[str]:
 
 
 def trading_day_from_ts(ts_ms: int) -> str:
-    return datetime.fromtimestamp(ts_ms / 1000.0).strftime("%Y%m%d")
+    return (
+        datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC_TZ)
+        .astimezone(HK_TZ)
+        .strftime("%Y%m%d")
+    )
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -43,7 +50,13 @@ def _parse_datetime(value: str) -> datetime:
             return datetime.strptime(text, fmt)
         except ValueError:
             continue
-    return datetime.fromisoformat(text)
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def _to_utc_epoch_ms(dt: datetime, *, default_tz: ZoneInfo = HK_TZ) -> int:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=default_tz)
+    return int(dt.astimezone(UTC_TZ).timestamp() * 1000)
 
 
 def parse_time_to_ts_ms(value: object, trading_day: Optional[str]) -> int:
@@ -68,17 +81,17 @@ def parse_time_to_ts_ms(value: object, trading_day: Optional[str]) -> int:
 
     if any(token in text for token in ("-", "/", " ")):
         dt = _parse_datetime(text)
-        return int(dt.timestamp() * 1000)
+        return _to_utc_epoch_ms(dt)
 
     # time-only string (HH:MM:SS[.ms])
     day = normalize_trading_day(trading_day)
     if day is None:
-        day = datetime.now().strftime("%Y%m%d")
+        day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
     if "." in text:
         dt = datetime.strptime(f"{day} {text}", "%Y%m%d %H:%M:%S.%f")
     else:
         dt = datetime.strptime(f"{day} {text}", "%Y%m%d %H:%M:%S")
-    return int(dt.timestamp() * 1000)
+    return _to_utc_epoch_ms(dt)
 
 
 def parse_market_symbol(code: str) -> tuple[str, str]:

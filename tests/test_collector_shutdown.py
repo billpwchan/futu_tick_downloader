@@ -1,7 +1,27 @@
 import asyncio
 
+import pytest
+
 from hk_tick_collector.collector import AsyncTickCollector
 from hk_tick_collector.models import TickRow
+
+
+def _row(seq: int = 1) -> TickRow:
+    return TickRow(
+        market="HK",
+        symbol="HK.00700",
+        ts_ms=1704161400000 + seq,
+        price=10.0,
+        volume=100,
+        turnover=1000.0,
+        direction="BUY",
+        seq=seq,
+        tick_type="AUTO_MATCH",
+        push_type="push",
+        provider="futu",
+        trading_day="20240102",
+        inserted_at_ms=1704161400000,
+    )
 
 
 class FakeStore:
@@ -14,6 +34,25 @@ class FakeStore:
         return len(rows_list)
 
 
+class FlakyStore:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.inserted = []
+
+    def insert_ticks(self, trading_day, rows):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("transient sqlite busy")
+        rows_list = list(rows)
+        self.inserted.append((trading_day, rows_list))
+        return len(rows_list)
+
+
+class BrokenStore:
+    def insert_ticks(self, trading_day, rows):
+        raise RuntimeError("db write failed")
+
+
 def test_collector_flushes_on_stop():
     async def runner():
         store = FakeStore()
@@ -24,27 +63,55 @@ def test_collector_flushes_on_stop():
             max_queue_size=10,
         )
         await collector.start()
-
-        row = TickRow(
-            market="HK",
-            symbol="HK.00700",
-            ts_ms=1704161400000,
-            price=10.0,
-            volume=100,
-            turnover=1000.0,
-            direction="BUY",
-            seq=1,
-            tick_type="AUTO_MATCH",
-            push_type="push",
-            provider="futu",
-            trading_day="20240102",
-            inserted_at_ms=1704161400000,
-        )
-        collector.enqueue([row])
-
-        await collector.stop()
-
+        collector.enqueue([_row(1)])
+        await collector.stop(timeout_sec=2)
         assert store.inserted
-        assert store.inserted[0][1] == [row]
+        assert store.inserted[0][1] == [_row(1)]
+
+    asyncio.run(runner())
+
+
+def test_collector_retries_transient_persist_failure_and_recovers():
+    async def runner():
+        store = FlakyStore()
+        collector = AsyncTickCollector(
+            store,
+            batch_size=1,
+            max_wait_ms=10,
+            max_queue_size=10,
+            persist_retry_max_attempts=3,
+            persist_retry_backoff_sec=0.01,
+        )
+        await collector.start()
+        collector.enqueue([_row(2)])
+        await asyncio.sleep(0.2)
+        await collector.stop(timeout_sec=2)
+
+        assert store.calls >= 2
+        assert store.inserted
+        assert collector.fatal_error() is None
+
+    asyncio.run(runner())
+
+
+def test_collector_sets_fatal_on_persist_loop_failure():
+    async def runner():
+        store = BrokenStore()
+        collector = AsyncTickCollector(
+            store,
+            batch_size=1,
+            max_wait_ms=10,
+            max_queue_size=10,
+            persist_retry_max_attempts=2,
+            persist_retry_backoff_sec=0.01,
+        )
+        await collector.start()
+        collector.enqueue([_row(3)])
+
+        await asyncio.wait_for(collector.wait_fatal(), timeout=1)
+        assert collector.fatal_error() is not None
+
+        with pytest.raises(RuntimeError):
+            await collector.stop(timeout_sec=1, cancel_on_timeout=True)
 
     asyncio.run(runner())

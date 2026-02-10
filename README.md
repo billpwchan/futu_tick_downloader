@@ -33,7 +33,9 @@ sudo ops/install_collector.sh
 - `docs/architecture.md` 架构与容量规划
 - `docs/project-memory.md` 项目知识库（事故与修复沉淀）
 - `docs/runbook.md` 部署与运维步骤
+- `docs/ops/hk_tick_collector_runbook.md` 在线排障与验收 SQL
 - `ops/` systemd 模板与脚本
+- `scripts/redeploy_hk_tick_collector.sh` 一键重部署与验收
 - `tests/` 单元测试
 
 ## 本地测试

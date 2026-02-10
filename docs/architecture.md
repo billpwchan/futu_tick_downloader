@@ -36,6 +36,6 @@
 
 ## 可靠性建议
 
-- 服务器时区建议设置为 `Asia/Hong_Kong`，保证 `ts_ms` 与 `trading_day` 一致性。
+- 采集器已强制使用 `Asia/Hong_Kong` 解析市场时间并转换到 UTC epoch，不再依赖服务器系统时区。
 - OpenD 与采集器都使用 systemd 守护，`Restart=always`。
 - 建议配置 `WATCHDOG_STALL_SEC=120~300`，在持续停写时由进程主动退出并交给 systemd 快速恢复。

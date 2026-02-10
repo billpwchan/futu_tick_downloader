@@ -27,6 +27,13 @@ def _get_env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _get_env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
 def _get_env_list(name: str, default: List[str]) -> List[str]:
     value = os.getenv(name)
     if not value:
@@ -64,6 +71,13 @@ class Config:
     poll_num: int
     watchdog_stall_sec: int
     watchdog_upstream_window_sec: int
+    drift_warn_sec: int
+    stop_flush_timeout_sec: int
+    persist_retry_max_attempts: int
+    persist_retry_backoff_sec: float
+    sqlite_busy_timeout_ms: int
+    sqlite_journal_mode: str
+    sqlite_synchronous: str
     log_level: str
 
     @classmethod
@@ -86,5 +100,12 @@ class Config:
             poll_num=_get_env_int("FUTU_POLL_NUM", 100),
             watchdog_stall_sec=_get_env_int("WATCHDOG_STALL_SEC", 180),
             watchdog_upstream_window_sec=_get_env_int("WATCHDOG_UPSTREAM_WINDOW_SEC", 60),
+            drift_warn_sec=_get_env_int("DRIFT_WARN_SEC", 120),
+            stop_flush_timeout_sec=_get_env_int("STOP_FLUSH_TIMEOUT_SEC", 60),
+            persist_retry_max_attempts=_get_env_int("PERSIST_RETRY_MAX_ATTEMPTS", 5),
+            persist_retry_backoff_sec=_get_env_float("PERSIST_RETRY_BACKOFF_SEC", 1.0),
+            sqlite_busy_timeout_ms=_get_env_int("SQLITE_BUSY_TIMEOUT_MS", 5000),
+            sqlite_journal_mode=os.getenv("SQLITE_JOURNAL_MODE", "WAL"),
+            sqlite_synchronous=os.getenv("SQLITE_SYNCHRONOUS", "NORMAL"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

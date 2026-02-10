@@ -4,6 +4,7 @@ import asyncio
 import logging
 import signal
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .collector import AsyncTickCollector
 from .config import Config
@@ -12,6 +13,7 @@ from .futu_client import FutuQuoteClient
 from .logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+HK_TZ = ZoneInfo("Asia/Hong_Kong")
 
 
 def _install_signal_handlers(stop_event: asyncio.Event) -> None:
@@ -27,8 +29,13 @@ async def run() -> None:
     config = Config.from_env()
     setup_logging(config.log_level)
 
-    store = SQLiteTickStore(config.data_root)
-    trading_day = datetime.now().strftime("%Y%m%d")
+    store = SQLiteTickStore(
+        config.data_root,
+        busy_timeout_ms=config.sqlite_busy_timeout_ms,
+        journal_mode=config.sqlite_journal_mode,
+        synchronous=config.sqlite_synchronous,
+    )
+    trading_day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
     initial_last_seq = await asyncio.to_thread(
         store.fetch_max_seq_by_symbol,
         trading_day,
@@ -44,6 +51,8 @@ async def run() -> None:
         batch_size=config.batch_size,
         max_wait_ms=config.max_wait_ms,
         max_queue_size=config.max_queue_size,
+        persist_retry_max_attempts=config.persist_retry_max_attempts,
+        persist_retry_backoff_sec=config.persist_retry_backoff_sec,
     )
     await collector.start()
 
@@ -54,9 +63,31 @@ async def run() -> None:
 
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
+    stop_wait_task = asyncio.create_task(stop_event.wait())
+    collector_fatal_task = asyncio.create_task(collector.wait_fatal())
+    tasks = {stop_wait_task, collector_fatal_task, client_task}
 
-    await stop_event.wait()
-    logger.info("shutdown signal received")
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    aux_pending = [task for task in pending if task is not client_task]
+    for task in aux_pending:
+        task.cancel()
+    for task in aux_pending:
+        await asyncio.gather(task, return_exceptions=True)
+
+    fatal_error: BaseException | None = None
+    if collector_fatal_task in done and collector_fatal_task.exception() is None:
+        fatal_error = collector.fatal_error() or RuntimeError("persist loop exited unexpectedly")
+        logger.error("shutdown reason=collector_fatal err=%r", fatal_error)
+    elif client_task in done and not stop_event.is_set():
+        client_error = client_task.exception()
+        if client_error is not None:
+            fatal_error = client_error
+            logger.error("shutdown reason=futu_client_fatal err=%r", client_error)
+        else:
+            fatal_error = RuntimeError("futu client task exited unexpectedly")
+            logger.error("shutdown reason=futu_client_exit_without_error")
+    else:
+        logger.info("shutdown signal received")
 
     await client.stop()
     try:
@@ -66,7 +97,13 @@ async def run() -> None:
         client_task.cancel()
         await asyncio.gather(client_task, return_exceptions=True)
 
-    await collector.stop(timeout_sec=12)
+    try:
+        await collector.stop(timeout_sec=config.stop_flush_timeout_sec, cancel_on_timeout=False)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("collector flush timed out during shutdown") from exc
+
+    if fatal_error is not None:
+        raise RuntimeError("collector terminated because of fatal background failure") from fatal_error
 
 
 def main() -> None:

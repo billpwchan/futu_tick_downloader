@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import deque
+from datetime import datetime, timezone
 from typing import Callable, Deque, Dict, List, Optional, Sequence
 
 from futu import OpenQuoteContext, RET_OK, Session, SubType, TickerHandlerBase
@@ -77,15 +79,14 @@ class FutuQuoteClient:
 
         self._started_at = self._loop.time()
         self._last_upstream_active_at: float | None = None
-        self._last_persist_time: float | None = None
+        self._max_ts_ms_seen: int | None = None
+        self._last_ts_ms_by_symbol: Dict[str, int] = {}
 
         self._push_rows_since_report = 0
         self._poll_fetched_since_report = 0
         self._poll_accepted_since_report = 0
         self._poll_enqueued_since_report = 0
         self._poll_seq_advanced_since_report = 0
-        self._persisted_rows_since_report = 0
-        self._ignored_rows_since_report = 0
         self._dropped_queue_full_since_report = 0
         self._dropped_duplicate_since_report = 0
         self._dropped_filter_since_report = 0
@@ -133,9 +134,6 @@ class FutuQuoteClient:
     def handle_persist_result(self, rows: List[TickRow], result: PersistResult) -> None:
         if not rows:
             return
-        self._persisted_rows_since_report += result.inserted
-        self._ignored_rows_since_report += result.ignored
-        self._last_persist_time = self._loop.time()
 
         for row in rows:
             if row.seq is None:
@@ -245,11 +243,16 @@ class FutuQuoteClient:
 
                 dropped_queue_full = max(0, accepted - enqueued)
                 self._poll_enqueued_since_report += enqueued
+                pipeline = self._collector.snapshot_pipeline_counters(reset=False)
+                drift_sec = self._drift_sec()
+                last_commit_age_sec = self._last_commit_age_sec(now=self._loop.time())
 
                 logger.info(
                     "poll_stats symbol=%s fetched=%s accepted=%s enqueued=%s "
                     "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
                     "queue_size=%s queue_maxsize=%s fetched_last_seq=%s "
+                    "queue_in=%s queue_out=%s last_commit_monotonic_age_sec=%s "
+                    "db_write_rate=%s ts_drift_sec=%s "
                     "last_seen_seq=%s last_accepted_seq=%s last_persisted_seq=%s",
                     symbol,
                     fetched,
@@ -261,6 +264,11 @@ class FutuQuoteClient:
                     self._collector.queue_size(),
                     self._collector.queue_maxsize(),
                     fetched_last_seq,
+                    pipeline["queue_in_rows"],
+                    pipeline["queue_out_rows"],
+                    f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
+                    pipeline["persisted_rows"],
+                    f"{drift_sec:.1f}" if drift_sec is not None else "none",
                     self._last_seen_seq.get(symbol),
                     self._last_accepted_seq.get(symbol),
                     self._last_persisted_seq.get(symbol),
@@ -280,8 +288,23 @@ class FutuQuoteClient:
             now = self._loop.time()
             queue_size = self._collector.queue_size()
             queue_maxsize = self._collector.queue_maxsize()
-            persisted_rows_per_min = self._persisted_rows_since_report
-            ignored_rows_per_min = self._ignored_rows_since_report
+            pipeline = self._collector.snapshot_pipeline_counters(reset=True)
+            persisted_rows_per_min = pipeline["persisted_rows"]
+            ignored_rows_per_min = pipeline["ignored_rows"]
+            queue_in_rows_per_min = pipeline["queue_in_rows"]
+            queue_out_rows_per_min = pipeline["queue_out_rows"]
+            db_commits_per_min = pipeline["db_commits"]
+            last_commit_age_sec = self._last_commit_age_sec(now=now)
+            drift_sec = self._drift_sec()
+            max_ts_utc = self._format_ts_ms_utc(self._max_ts_ms_seen)
+            if drift_sec is not None and abs(drift_sec) > self._config.drift_warn_sec:
+                logger.warning(
+                    "ts_drift_warn drift_sec=%.1f now_utc_ms=%s max_ts_ms=%s max_ts_utc=%s",
+                    drift_sec,
+                    int(time.time() * 1000),
+                    self._max_ts_ms_seen,
+                    max_ts_utc,
+                )
 
             parts = []
             for symbol in self._config.symbols:
@@ -301,6 +324,8 @@ class FutuQuoteClient:
                 "health connected=%s queue=%s/%s push_rows_per_min=%s "
                 "poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
                 "persisted_rows_per_min=%s ignored_rows_per_min=%s "
+                "queue_in=%s queue_out=%s db_commits_per_min=%s db_write_rate=%s "
+                "last_commit_monotonic_age_sec=%s ts_drift_sec=%s max_ts_utc=%s "
                 "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s symbols=%s",
                 self._connected,
                 queue_size,
@@ -311,6 +336,13 @@ class FutuQuoteClient:
                 self._poll_enqueued_since_report,
                 persisted_rows_per_min,
                 ignored_rows_per_min,
+                queue_in_rows_per_min,
+                queue_out_rows_per_min,
+                db_commits_per_min,
+                persisted_rows_per_min,
+                f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
+                f"{drift_sec:.1f}" if drift_sec is not None else "none",
+                max_ts_utc,
                 self._dropped_queue_full_since_report,
                 self._dropped_duplicate_since_report,
                 self._dropped_filter_since_report,
@@ -329,8 +361,6 @@ class FutuQuoteClient:
             self._poll_accepted_since_report = 0
             self._poll_enqueued_since_report = 0
             self._poll_seq_advanced_since_report = 0
-            self._persisted_rows_since_report = 0
-            self._ignored_rows_since_report = 0
             self._dropped_queue_full_since_report = 0
             self._dropped_duplicate_since_report = 0
             self._dropped_filter_since_report = 0
@@ -446,6 +476,8 @@ class FutuQuoteClient:
         for row in rows:
             symbol = row.symbol
             self._last_tick_seen_at[symbol] = now
+            self._last_ts_ms_by_symbol[symbol] = max(self._last_ts_ms_by_symbol.get(symbol, row.ts_ms), row.ts_ms)
+            self._max_ts_ms_seen = row.ts_ms if self._max_ts_ms_seen is None else max(self._max_ts_ms_seen, row.ts_ms)
             if source == "push":
                 self._last_push_at[symbol] = now
             if row.seq is not None:
@@ -478,7 +510,9 @@ class FutuQuoteClient:
             and (now - self._last_upstream_active_at) <= self._config.watchdog_upstream_window_sec
         )
         upstream_active = recent_upstream and (self._push_rows_since_report > 0 or poll_active)
-        last_persist_at = self._last_persist_time if self._last_persist_time is not None else self._started_at
+        last_persist_at = self._collector.get_last_persist_at()
+        if last_persist_at is None:
+            last_persist_at = self._started_at
         persist_stall_sec = now - last_persist_at
 
         if not upstream_active:
@@ -488,12 +522,16 @@ class FutuQuoteClient:
         if persist_stall_sec < self._config.watchdog_stall_sec:
             return
 
+        pipeline = self._collector.snapshot_pipeline_counters(reset=False)
+        drift_sec = self._drift_sec()
+        last_commit_age_sec = self._last_commit_age_sec(now)
         logger.error(
             "WATCHDOG persistent_stall upstream_active=%s poll_active=%s "
             "persist_stall_sec=%.1f queue=%s/%s push_rows_per_min=%s "
             "poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
+            "queue_in=%s queue_out=%s last_commit_monotonic_age_sec=%s db_write_rate=%s "
             "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
-            "max_seq_lag=%s",
+            "max_seq_lag=%s ts_drift_sec=%s",
             upstream_active,
             poll_active,
             persist_stall_sec,
@@ -503,10 +541,15 @@ class FutuQuoteClient:
             self._poll_fetched_since_report,
             self._poll_accepted_since_report,
             self._poll_enqueued_since_report,
+            pipeline["queue_in_rows"],
+            pipeline["queue_out_rows"],
+            f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
+            pipeline["persisted_rows"],
             self._dropped_queue_full_since_report,
             self._dropped_duplicate_since_report,
             self._dropped_filter_since_report,
             self._max_seq_lag(),
+            f"{drift_sec:.1f}" if drift_sec is not None else "none",
         )
         os._exit(WATCHDOG_EXIT_CODE)
 
@@ -558,6 +601,22 @@ class FutuQuoteClient:
         if last_push is None:
             return False
         return (self._loop.time() - last_push) < POLL_SKIP_PUSH_SEC
+
+    def _last_commit_age_sec(self, now: float) -> float | None:
+        last_commit = self._collector.get_last_persist_at()
+        if last_commit is None:
+            return None
+        return max(0.0, now - last_commit)
+
+    def _drift_sec(self) -> float | None:
+        if self._max_ts_ms_seen is None:
+            return None
+        return (int(time.time() * 1000) - self._max_ts_ms_seen) / 1000.0
+
+    def _format_ts_ms_utc(self, ts_ms: int | None) -> str:
+        if ts_ms is None:
+            return "none"
+        return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat()
 
     async def _sleep_with_stop(self, delay: float) -> None:
         if delay <= 0:

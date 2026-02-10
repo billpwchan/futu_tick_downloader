@@ -8,12 +8,14 @@ Requires=futu-opend.service
 Type=simple
 User=hkcollector
 Group=hkcollector
-WorkingDirectory=/opt/hk-tick-collector
+WorkingDirectory=/opt/futu_tick_downloader
 # If you prefer repo-local env, set EnvironmentFile=/opt/futu_tick_downloader/.env
 EnvironmentFile=/etc/hk-tick-collector.env
-ExecStart=/opt/hk-tick-collector/venv/bin/python -m hk_tick_collector.main
+ExecStart=/opt/futu_tick_downloader/.venv/bin/python -m hk_tick_collector.main
 Restart=always
 RestartSec=5
+TimeoutStopSec=120
+KillSignal=SIGINT
 LimitNOFILE=65535
 
 [Install]

@@ -30,11 +30,20 @@ class DummyCollector:
         self.enqueued = []
         self.accept = accept
         self._queue_maxsize = queue_maxsize
+        self._last_persist_at = None
+        self._pipeline = {
+            "persisted_rows": 0,
+            "ignored_rows": 0,
+            "queue_in_rows": 0,
+            "queue_out_rows": 0,
+            "db_commits": 0,
+        }
 
     def enqueue(self, rows) -> bool:
         if not self.accept:
             return False
         self.enqueued.append(rows)
+        self._pipeline["queue_in_rows"] += len(rows)
         return True
 
     def queue_size(self) -> int:
@@ -42,6 +51,16 @@ class DummyCollector:
 
     def queue_maxsize(self) -> int:
         return self._queue_maxsize
+
+    def get_last_persist_at(self):
+        return self._last_persist_at
+
+    def snapshot_pipeline_counters(self, reset: bool = False):
+        data = dict(self._pipeline)
+        if reset:
+            for key in self._pipeline:
+                self._pipeline[key] = 0
+        return data
 
 
 def build_config(**overrides) -> Config:
@@ -62,6 +81,13 @@ def build_config(**overrides) -> Config:
         poll_num=100,
         watchdog_stall_sec=180,
         watchdog_upstream_window_sec=60,
+        drift_warn_sec=120,
+        stop_flush_timeout_sec=60,
+        persist_retry_max_attempts=5,
+        persist_retry_backoff_sec=1.0,
+        sqlite_busy_timeout_ms=5000,
+        sqlite_journal_mode="WAL",
+        sqlite_synchronous="NORMAL",
         log_level="INFO",
     )
     data.update(overrides)
@@ -178,7 +204,7 @@ def test_watchdog_exits_on_upstream_active_and_persist_stalled(monkeypatch):
         client._poll_accepted_since_report = 10
         client._poll_enqueued_since_report = 0
         client._dropped_queue_full_since_report = 10
-        client._last_persist_time = loop.time() - 5
+        collector._last_persist_at = loop.time() - 5
         client._last_upstream_active_at = loop.time()
 
         class ExitTriggered(Exception):

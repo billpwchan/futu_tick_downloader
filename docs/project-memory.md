@@ -35,3 +35,30 @@
 - Enqueue failure does not advance accepted/persisted seq.
 - Push updates seen seq but does not poison poll dedupe baseline.
 - Watchdog exits when upstream is active but persist remains stalled.
+
+## 2026-02-10: timestamp drift and persist-loop hardening
+
+### Incident summary
+
+- `ts_ms` 出现与 UTC epoch 偏离约 8 小时，导致基于 `strftime('%s','now')` 的窗口查询失真。
+- 线上出现 `WATCHDOG persistent_stall`，表现为上游仍活跃但 `persisted_rows_per_min=0` 且队列增长。
+
+### Root cause
+
+- 时间解析对 naive datetime 依赖系统时区，未显式按 `Asia/Hong_Kong` 解释市场时间。
+- persist loop 对落库异常仅记录后继续，缺少“重试上限 + fatal 信号”，可能形成长期停摆风险。
+
+### Permanent fix
+
+- `mapping.parse_time_to_ts_ms` 统一为 `Asia/Hong_Kong -> UTC epoch ms` 转换。
+- `trading_day_from_ts` 改为 UTC->HK 反推，摆脱系统时区依赖。
+- collector 持久化新增重试与 fatal 机制：
+  - `persist_flush_failed` 带上下文（queue/db path/last seq）日志。
+  - 超过重试上限触发 `persist_loop_exited`，主流程非零退出。
+- health/poll 增加 `queue_in/queue_out`、`last_commit_monotonic_age_sec`、`db_write_rate`、`ts_drift_sec`。
+- watchdog stall 仅基于 monotonic commit 时间计算。
+
+### Ops assets
+
+- 新增 `scripts/redeploy_hk_tick_collector.sh`（拉代码/装依赖/重启/SQL+日志验收）。
+- 新增 `docs/ops/hk_tick_collector_runbook.md`（时间规则、watchdog、排障 SQL）。
