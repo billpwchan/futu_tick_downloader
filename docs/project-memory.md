@@ -53,7 +53,7 @@
   - Poll dedupe baseline moved to `last_persisted_seq` (durable progress).
 - Ops:
   - Added `scripts/check_ts_semantics.py` (`max(ts_ms)-now_utc` within tolerance, default `±5s`).
-  - Added `ops/restart_and_verify.sh` (`stop -> start -> persist_ticks <=30s -> drift check -> no WATCHDOG`).
+- Added scripted restart acceptance checks (now consolidated under `scripts/`).
 
 ## 2026-02-10: HK tick pipeline hidden stall fix
 

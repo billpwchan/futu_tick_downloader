@@ -125,15 +125,8 @@ else
 fi
 
 log_step "Install systemd unit"
-UNIT_SOURCE=""
-if [[ -f "${TARGET_DIR}/deploy/systemd/${SERVICE_NAME}.service" ]]; then
-  UNIT_SOURCE="${TARGET_DIR}/deploy/systemd/${SERVICE_NAME}.service"
-elif [[ -f "${TARGET_DIR}/ops/${SERVICE_NAME}.service" ]]; then
-  # Backward compatibility for older repository layout.
-  UNIT_SOURCE="${TARGET_DIR}/ops/${SERVICE_NAME}.service"
-else
-  fail "service template missing: ${TARGET_DIR}/deploy/systemd/${SERVICE_NAME}.service"
-fi
+UNIT_SOURCE="${TARGET_DIR}/deploy/systemd/${SERVICE_NAME}.service"
+[[ -f "${UNIT_SOURCE}" ]] || fail "service template missing: ${UNIT_SOURCE}"
 install -m 0644 "${UNIT_SOURCE}" "${SERVICE_FILE}"
 systemctl daemon-reload
 
