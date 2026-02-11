@@ -1,5 +1,35 @@
 # Project Memory (Agents)
 
+## 2026-02-11: doc/runbook baseline finalized
+
+### Deliverables
+
+- Added canonical docs:
+  - `docs/configuration.md`
+  - `docs/deployment/ubuntu-systemd.md`
+  - `docs/operations/runbook-hk-tick-collector.md`
+- Reworked `README.md` with quickstart + command cookbook + compatibility.
+- Added ops helper scripts:
+  - `scripts/verify_db.sh`
+  - `scripts/tail_logs.sh`
+  - `scripts/healthcheck.sh`
+  - `scripts/install_systemd.sh`
+- Added recommended unit template:
+  - `deploy/systemd/hk-tick-collector.service`
+
+### Minimal code fix
+
+- Watchdog now honors `WATCHDOG_QUEUE_THRESHOLD_ROWS` (was previously unused).
+- This reduces false positives on tiny/no backlog without changing data format.
+
+### Tests added
+
+- `tests/test_config.py`
+- `tests/test_smoke_pipeline.py`
+- `tests/test_mapping.py::test_parse_time_to_ts_ms_is_independent_from_system_tz`
+- `tests/test_schema.py::test_connect_applies_sqlite_pragmas`
+- `tests/test_futu_client.py` watchdog regression tests
+
 ## 2026-02-11: hk-tick-collector persistent stall + future ts_ms
 
 ### Failure signature

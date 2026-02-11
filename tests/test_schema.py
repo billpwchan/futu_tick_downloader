@@ -74,5 +74,29 @@ def test_connect_sets_temp_store_memory(tmp_path):
     assert temp_store == 2
 
 
+def test_connect_applies_sqlite_pragmas(tmp_path):
+    store = SQLiteTickStore(
+        tmp_path,
+        busy_timeout_ms=7000,
+        journal_mode="WAL",
+        synchronous="FULL",
+        wal_autocheckpoint=2048,
+    )
+    db_path = db_path_for_trading_day(tmp_path, "20240102")
+    conn = store._connect(db_path)  # noqa: SLF001
+    try:
+        journal_mode = str(conn.execute("PRAGMA journal_mode;").fetchone()[0]).upper()
+        synchronous = int(conn.execute("PRAGMA synchronous;").fetchone()[0])
+        busy_timeout = int(conn.execute("PRAGMA busy_timeout;").fetchone()[0])
+        wal_autocheckpoint = int(conn.execute("PRAGMA wal_autocheckpoint;").fetchone()[0])
+    finally:
+        conn.close()
+
+    assert journal_mode == "WAL"
+    assert synchronous == 2  # FULL
+    assert busy_timeout == 7000
+    assert wal_autocheckpoint == 2048
+
+
 def _normalize_sql(value: str) -> str:
     return value.strip().rstrip(";")

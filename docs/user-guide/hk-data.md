@@ -1,67 +1,59 @@
-# HK Data Guide
+# HK Data User Guide
 
-## Time Baseline
+## 时间字段语义
 
-- `ticks.ts_ms` is always **UTC epoch milliseconds**.
-- `ticks.recv_ts_ms` is collector receive time in **UTC epoch milliseconds**.
-- When source tick time is HK local market time, collector converts:
-  - `Asia/Hong_Kong local time` -> `UTC epoch ms`
+- `ts_ms`: tick 事件时间，UTC epoch 毫秒。
+- `recv_ts_ms`: 采集程序接收时间，UTC epoch 毫秒。
+- `trading_day`: 交易日（`YYYYMMDD`，按港股时区语义）。
 
-## Quick Query Examples
+注意：SQLite `datetime(ts_ms/1000,'unixepoch')` 默认显示 UTC，不是本地时间。
 
-Assume:
-
-```bash
-TODAY_HK=$(TZ=Asia/Hong_Kong date +%Y%m%d)
-DB=/data/sqlite/HK/${TODAY_HK}.db
-```
-
-Check latest timestamp drift:
-
-```sql
-SELECT
-  datetime(strftime('%s','now'),'unixepoch') AS now_utc,
-  datetime(MAX(ts_ms)/1000,'unixepoch') AS max_ts_utc,
-  (MAX(ts_ms)/1000.0 - strftime('%s','now')) AS max_minus_now_sec,
-  COUNT(*) AS rows
-FROM ticks;
-```
-
-Quick command (default tolerance `±5s`):
+## 快速查询
 
 ```bash
-python3 scripts/check_ts_semantics.py --db "$DB" --tolerance-sec 5
+DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)
+DB=/data/sqlite/HK/${DAY}.db
 ```
 
-View recent rows in UTC:
+最新 5 条（UTC + 本地）：
 
 ```sql
 SELECT
   symbol,
   seq,
   datetime(ts_ms/1000,'unixepoch') AS ts_utc,
+  datetime(ts_ms/1000,'unixepoch','localtime') AS ts_local,
   price,
   volume
 FROM ticks
 ORDER BY ts_ms DESC
-LIMIT 20;
+LIMIT 5;
 ```
 
-Check recent 10-minute ingestion:
+最新 lag：
 
 ```sql
 SELECT
-  COUNT(*) AS n,
-  datetime(MIN(ts_ms)/1000,'unixepoch') AS min_utc,
-  datetime(MAX(ts_ms)/1000,'unixepoch') AS max_utc
-FROM ticks
-WHERE ts_ms >= (strftime('%s','now') - 600) * 1000;
+  (strftime('%s','now') - MAX(ts_ms)/1000.0) AS lag_sec,
+  datetime(MAX(ts_ms)/1000,'unixepoch') AS max_ts_utc
+FROM ticks;
 ```
 
-## Common Pitfall
+按 symbol 看最近 10 分钟：
 
-- If `max_minus_now_sec` is close to `+28800`, data is likely stored with local time treated as UTC.
-- Use:
-  - `scripts/repair_future_ts_ms.py`
-  - `scripts/verify_hk_tick_collector.sh`
-  to repair and validate.
+```sql
+SELECT symbol, COUNT(*) AS rows_10m
+FROM ticks
+WHERE ts_ms >= (strftime('%s','now') - 600) * 1000
+GROUP BY symbol
+ORDER BY rows_10m DESC;
+```
+
+## 推荐脚本
+
+```bash
+bash scripts/verify_db.sh "$DB"
+bash scripts/healthcheck.sh
+```
+
+更多故障场景：[`docs/operations/runbook-hk-tick-collector.md`](../operations/runbook-hk-tick-collector.md)

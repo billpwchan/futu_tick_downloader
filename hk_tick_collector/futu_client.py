@@ -562,8 +562,9 @@ class FutuQuoteClient:
         exception_age_sec = (
             (now - float(last_exception)) if last_exception is not None else None
         )
+        queue_threshold = max(1, int(self._config.watchdog_queue_threshold_rows))
 
-        if queue_size <= 0:
+        if queue_size < queue_threshold:
             self._watchdog_heal_failures = 0
             self._watchdog_dumped = False
             return
@@ -608,12 +609,14 @@ class FutuQuoteClient:
             self._watchdog_heal_failures = 0
             logger.warning(
                 "WATCHDOG recovery_triggered reason=%s attempts=%s queue=%s/%s "
-                "dequeue_age_sec=%.1f commit_age_sec=%.1f last_exception_age_sec=%s queue_growth=%s "
+                "queue_threshold=%s dequeue_age_sec=%.1f commit_age_sec=%.1f "
+                "last_exception_age_sec=%s queue_growth=%s "
                 "check_elapsed_sec=%.1f worker_alive=%s",
                 reason,
                 self._watchdog_heal_attempts,
                 queue_size,
                 queue_maxsize,
+                queue_threshold,
                 dequeue_age_sec,
                 commit_age_sec,
                 f"{exception_age_sec:.1f}" if exception_age_sec is not None else "none",
@@ -627,13 +630,14 @@ class FutuQuoteClient:
         self._watchdog_heal_failures += 1
         logger.error(
             "WATCHDOG recovery_failed reason=%s failures=%s max_failures=%s queue=%s/%s "
-            "dequeue_age_sec=%.1f commit_age_sec=%.1f "
+            "queue_threshold=%s dequeue_age_sec=%.1f commit_age_sec=%.1f "
             "last_exception_type=%s last_exception_count=%s",
             reason,
             self._watchdog_heal_failures,
             self._config.watchdog_recovery_max_failures,
             queue_size,
             queue_maxsize,
+            queue_threshold,
             dequeue_age_sec,
             commit_age_sec,
             runtime.get("last_exception_type"),
@@ -655,7 +659,7 @@ class FutuQuoteClient:
         )
         logger.error(
             "WATCHDOG persistent_stall reason=%s upstream_active=%s poll_active=%s "
-            "queue=%s/%s queue_growth=%s check_elapsed_sec=%.1f "
+            "queue=%s/%s queue_threshold=%s queue_growth=%s check_elapsed_sec=%.1f "
             "push_rows_per_min=%s poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
             "queue_in=%s queue_out=%s persisted_rows_per_min=%s "
             "dequeue_age_sec=%.1f commit_age_sec=%.1f last_commit_monotonic_age_sec=%s "
@@ -667,6 +671,7 @@ class FutuQuoteClient:
             poll_active,
             queue_size,
             queue_maxsize,
+            queue_threshold,
             queue_growth,
             check_elapsed_sec,
             self._push_rows_since_report,

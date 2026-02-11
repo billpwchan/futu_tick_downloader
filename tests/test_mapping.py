@@ -1,4 +1,6 @@
 from datetime import datetime
+import os
+import time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -70,6 +72,28 @@ def test_parse_time_to_ts_ms_epoch_seconds_numeric():
 def test_parse_time_to_ts_ms_with_timezone_string():
     value = "2024-01-02T01:30:00+00:00"
     assert parse_time_to_ts_ms(value, "20240102") == _expected_ts_ms("20240102", "09:30:00")
+
+
+def test_parse_time_to_ts_ms_is_independent_from_system_tz(monkeypatch):
+    old_tz = os.environ.get("TZ")
+    try:
+        monkeypatch.setenv("TZ", "UTC")
+        if hasattr(time, "tzset"):
+            time.tzset()
+        expected = _expected_ts_ms("20240102", "09:30:00")
+        assert parse_time_to_ts_ms("2024-01-02 09:30:00", "20240102") == expected
+
+        monkeypatch.setenv("TZ", "Asia/Shanghai")
+        if hasattr(time, "tzset"):
+            time.tzset()
+        assert parse_time_to_ts_ms("2024-01-02 09:30:00", "20240102") == expected
+    finally:
+        if old_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", old_tz)
+        if hasattr(time, "tzset"):
+            time.tzset()
 
 
 def test_parse_time_to_ts_ms_corrects_obvious_future_plus_8h(monkeypatch):

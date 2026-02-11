@@ -1,41 +1,115 @@
-# 架构与容量规划
+# Architecture: hk-tick-collector
 
-## 架构概览
+## 1. 系统角色
 
-- 采集器运行在服务器本机，与 OpenD 同机同网段通信。
-- OpenD 仅监听 `127.0.0.1:11111`，采集器通过本机回环连接。
-- 数据流：OpenD push 回调 -> asyncio queue -> batch flush -> SQLite 日分库。
-- 兜底轮询：定时调用 `get_rt_ticker`，并按 `seq` 去重补写。
-- seq 状态拆分为 `last_seen_seq`（观测）、`last_accepted_seq`（成功入队）、`last_persisted_seq`（成功落库）。
+- `futu-opend.service`: 提供 Futu OpenAPI 数据入口。
+- `hk-tick-collector.service`: 本项目采集进程，负责接收、过滤、入队、落库。
+- SQLite 日分库：`DATA_ROOT/YYYYMMDD.db`，核心表 `ticks`。
 
-## 数据流
+## 2. 数据流（push + poll + queue + persist）
 
-1) OpenD 推送 `SubType.TICKER` 数据。
-2) `TickerHandlerBase.on_recv_rsp` 解析 DataFrame，映射为 `TickRow`。
-3) 写入 async queue（高吞吐，削峰）。
-4) Flush 任务按 `batch_size/max_wait_ms` 触发批量写入。
-5) 按交易日分库落盘到 `/data/sqlite/HK/YYYYMMDD.db`。
-6) 每分钟输出 health 汇总（push/poll/persist/dropped），并在“上游活跃但持久化停滞”时触发 watchdog 自愈重启。
+```mermaid
+flowchart LR
+    A["Futu OpenD\nSubType.TICKER"] --> B["FutuTickerHandler\non_recv_rsp"]
+    B --> C["ticker_df_to_rows\n(time->ts_ms, seq, symbol)"]
+    C --> D["FutuQuoteClient\npush/poll dedupe + filter"]
+    D --> E["AsyncTickCollector.enqueue\nqueue.Queue"]
+    E --> F["Persist Worker Thread\nflush by batch_size/max_wait_ms"]
+    F --> G["SQLiteTickWriter.insert_ticks\nINSERT OR IGNORE"]
+    G --> H["/data/sqlite/HK/YYYYMMDD.db\nticks"]
+    D --> I["health/watchdog logs"]
+    F --> I
+```
 
-## 断线恢复
+## 3. 关键协程/线程
 
-- 连接失败采用指数退避重连，最大间隔受 `RECONNECT_MAX_DELAY` 限制。
-- 重连成功后自动重新订阅。
-- 可选回补：`BACKFILL_N > 0` 时，调用 `get_rt_ticker(code, num=N)` 拉取最近 N 笔。
-- SQLite 写入使用唯一索引与 `INSERT OR IGNORE`，可幂等去重。
-- 轮询去重基准使用 `last_persisted_seq`（已落库进度）。
-- 轮询默认启用：仅在 push 断流/`last_tick_age_sec` 超阈值时才触发，避免重复窗口与 CPU 抖动。
+- 主协程：`main.run()`
+  - 初始化配置、SQLite store、seed 最近交易日 `max(seq)`。
+  - 启动 `AsyncTickCollector` 和 `FutuQuoteClient`。
+- `FutuQuoteClient` 协程组：
+  - `_monitor_connection()`：OpenD 连通性检查。
+  - `_poll_loop()`：按 `FUTU_POLL_*` 做兜底轮询与去重。
+  - `_health_loop()`：每分钟输出 health，并执行 watchdog。
+- `AsyncTickCollector` 持久化线程：
+  - 从队列取批次，按 `trading_day` 分组写库。
+  - 支持 retry/backoff、busy/locked 恢复、writer 重建。
 
-## 容量规划（粗略估算）
+## 4. 去重与唯一键设计
 
-- 单条 tick 记录（含索引）估算 150~250 bytes。
-- 若 100 只股票、日均 50,000 tick：
-  - 记录数约 5,000,000 行/日。
-  - 数据量约 0.75~1.25 GB/日（含索引）。
-- 建议至少预留 30 天滚动空间，并通过定期归档/压缩控制增长。
+`ticks` 表关键唯一索引：
 
-## 可靠性建议
+- `uniq_ticks_symbol_seq`：`(symbol, seq)`，仅 `seq IS NOT NULL`。
+- `uniq_ticks_symbol_ts_price_vol_turnover`：`(symbol, ts_ms, price, volume, turnover)`，仅 `seq IS NULL`。
 
-- 采集器已强制使用 `Asia/Hong_Kong` 解析市场时间并转换到 UTC epoch，不再依赖服务器系统时区。
-- OpenD 与采集器都使用 systemd 守护，`Restart=always`。
-- 建议配置 `WATCHDOG_STALL_SEC=120~300`，watchdog 会先重建 writer 自愈，连续失败才以退出码 `1` 退出交给 systemd 恢复。
+写入 SQL 为 `INSERT OR IGNORE`，因此：
+
+- `persist_ticks inserted=N ignored=M` 中的 `ignored` 大部分是重复数据被唯一索引拦截。
+- `poll_stats dropped_duplicate` 是**入队前**的轮询去重；`ignored` 是**落库时**最终幂等保护。
+
+这两个指标都高不一定是故障，常见于 push 与 poll 同时覆盖或上游重复发送。
+
+## 5. 为什么会出现大量 dropped_duplicate
+
+常见原因：
+
+- push 正常，poll 仅用于兜底，拿到的 `seq` 已落库或已接收。
+- 断线重连后，上游重复回放最近窗口。
+- `seq` 为空时，同一 `(symbol, ts_ms, price, volume, turnover)` 多次到达。
+
+判断是否健康看三件事：
+
+- `queue` 没持续上涨；
+- `persist_ticks` 持续出现；
+- `MAX(ts_ms)` lag 在阈值内。
+
+## 6. ts_ms 语义（重点）
+
+- `ticks.ts_ms`：事件发生时间，UTC epoch 毫秒。
+- `ticks.recv_ts_ms`：采集进程接收时间，UTC epoch 毫秒。
+- 对于 HK 市场本地时间（无时区字符串），映射时按 `Asia/Hong_Kong` 解释，再转 UTC epoch。
+
+验证时要注意：
+
+- SQLite `datetime(ts_ms/1000,'unixepoch')` 默认按 UTC 展示。
+- 若要本地展示，加 `,'localtime'`（取决于系统时区）或在应用层显式转 `Asia/Hong_Kong`。
+
+## 7. Watchdog 判定与自愈
+
+当前 watchdog（`futu_client._check_watchdog`）触发前提：
+
+- 上游近期活跃（push/poll/queue 指标有推进）；
+- 队列 backlog 达到 `WATCHDOG_QUEUE_THRESHOLD_ROWS`；
+- 且出现 `worker_dead` 或 `commit_age >= WATCHDOG_STALL_SEC`。
+
+触发动作：
+
+1. 打印线程栈（diagnostic dump）；
+2. 同进程重建 writer；
+3. 连续恢复失败达到 `WATCHDOG_RECOVERY_MAX_FAILURES` 才 `SystemExit(1)` 交给 systemd 拉起。
+
+## 8. 数据库结构（代码实况）
+
+```sql
+CREATE TABLE ticks (
+  market TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL,
+  price REAL,
+  volume INTEGER,
+  turnover REAL,
+  direction TEXT,
+  seq INTEGER,
+  tick_type TEXT,
+  push_type TEXT,
+  provider TEXT,
+  trading_day TEXT NOT NULL,
+  recv_ts_ms INTEGER NOT NULL,
+  inserted_at_ms INTEGER NOT NULL
+);
+```
+
+## 9. 相关文档
+
+- 配置项：[`docs/configuration.md`](configuration.md)
+- 部署：[`docs/deployment/ubuntu-systemd.md`](deployment/ubuntu-systemd.md)
+- 运维排障：[`docs/operations/runbook-hk-tick-collector.md`](operations/runbook-hk-tick-collector.md)

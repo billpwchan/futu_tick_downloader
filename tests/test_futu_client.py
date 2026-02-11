@@ -364,6 +364,70 @@ def test_watchdog_does_not_recover_when_consumer_is_draining():
     asyncio.run(runner())
 
 
+def test_watchdog_ignores_duplicate_only_window_without_backlog():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        client = FutuQuoteClient(
+            build_config(watchdog_stall_sec=1),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+
+        client._poll_fetched_since_report = 200
+        client._poll_seq_advanced_since_report = 100
+        client._poll_accepted_since_report = 0
+        client._poll_enqueued_since_report = 0
+        client._dropped_duplicate_since_report = 200
+        client._last_upstream_active_at = loop.time()
+        collector._runtime["last_dequeue_monotonic"] = loop.time() - 60
+        collector._runtime["last_commit_monotonic"] = loop.time() - 60
+        collector._runtime["worker_alive"] = True
+
+        await client._check_watchdog(
+            now=loop.time(),
+            queue_size=0,
+            queue_maxsize=100,
+            persisted_rows_per_min=0,
+            queue_in_rows_per_min=0,
+            queue_out_rows_per_min=0,
+        )
+        assert collector.recovery_calls == 0
+
+    asyncio.run(runner())
+
+
+def test_watchdog_honors_queue_threshold():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        client = FutuQuoteClient(
+            build_config(watchdog_stall_sec=1, watchdog_queue_threshold_rows=20),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+
+        client._push_rows_since_report = 20
+        client._last_upstream_active_at = loop.time()
+        collector._runtime["last_dequeue_monotonic"] = loop.time() - 5
+        collector._runtime["last_commit_monotonic"] = loop.time() - 5
+        collector._runtime["worker_alive"] = False
+
+        await client._check_watchdog(
+            now=loop.time(),
+            queue_size=5,
+            queue_maxsize=100,
+            persisted_rows_per_min=0,
+            queue_in_rows_per_min=50,
+            queue_out_rows_per_min=0,
+        )
+        assert collector.recovery_calls == 0
+
+    asyncio.run(runner())
+
+
 def test_reconnect_triggers_resubscribe_and_close():
     async def runner():
         loop = asyncio.get_running_loop()

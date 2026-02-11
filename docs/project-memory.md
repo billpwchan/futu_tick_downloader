@@ -1,5 +1,37 @@
 # Project Memory
 
+## 2026-02-11: docs/runbook standardization + watchdog threshold fix
+
+### What changed
+
+- Documentation standardized and split by concern:
+  - `README.md`
+  - `docs/architecture.md`
+  - `docs/configuration.md`
+  - `docs/deployment/ubuntu-systemd.md`
+  - `docs/operations/runbook-hk-tick-collector.md`
+- Added ops scripts:
+  - `scripts/verify_db.sh`
+  - `scripts/tail_logs.sh`
+  - `scripts/healthcheck.sh`
+  - `scripts/install_systemd.sh`
+- Added recommended unit template:
+  - `deploy/systemd/hk-tick-collector.service`
+
+### Root cause and minimal code fix
+
+- Root cause: `WATCHDOG_QUEUE_THRESHOLD_ROWS` existed in config but was not used by watchdog logic.
+- Fix: watchdog now requires `queue_size >= WATCHDOG_QUEUE_THRESHOLD_ROWS` before stall/recovery path.
+- Outcome: reduces false positives when backlog is tiny or absent.
+
+### Regression coverage
+
+- `tests/test_futu_client.py::test_watchdog_honors_queue_threshold`
+- `tests/test_futu_client.py::test_watchdog_ignores_duplicate_only_window_without_backlog`
+- `tests/test_config.py` for env parsing behavior
+- `tests/test_schema.py::test_connect_applies_sqlite_pragmas`
+- `tests/test_smoke_pipeline.py` end-to-end local smoke
+
 ## 2026-02-11: one-shot hardening for watchdog/timestamp semantics
 
 ### What changed
