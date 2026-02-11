@@ -1,51 +1,56 @@
 # Configuration Reference
 
-配置来源：`EnvironmentFile`（systemd）或仓库根目录 `.env`。解析入口见 `hk_tick_collector/config.py`。
+Configuration is environment-driven from either:
 
-## 1. 解析规则
+- `.env` in repository root (local/dev)
+- `EnvironmentFile=` in systemd unit (production)
 
-- 整数/浮点配置：非法值会在启动时抛 `ValueError` 并退出。
-- 布尔配置（`FUTU_POLL_ENABLED`）：支持 `1/0,true/false,yes/no,on/off`（大小写不敏感）；非法值回退默认值。
-- 列表配置（`FUTU_SYMBOLS`）：按逗号分割，自动去空白。
+Parser implementation: `hk_tick_collector/config.py`
 
-## 2. 全量环境变量
+## Parsing Rules
 
-| Key | 默认值 | 单位 | 作用 | 风险 | 生产建议 |
-|---|---:|---|---|---|---|
-| `FUTU_HOST` | `127.0.0.1` | - | OpenD 地址 | 配错会连接失败 | 保持回环地址 |
-| `FUTU_PORT` | `11111` | port | OpenD 端口 | 端口错误导致订阅失败 | 与 OpenD `api_port` 保持一致 |
-| `FUTU_SYMBOLS` | 空 | CSV | 订阅股票列表 | 为空会启动失败 | 明确列出目标代码，如 `HK.00700,HK.00981` |
-| `DATA_ROOT` | `/data/sqlite/HK` | path | SQLite 存储根目录 | 权限/磁盘不足导致写失败 | 独立磁盘，预留容量 |
-| `BATCH_SIZE` | `500` | rows | 批量落库大小 | 太小写放大，太大停机 flush 慢 | `300-1000` |
-| `MAX_WAIT_MS` | `1000` | ms | 最长 flush 等待时间 | 太大会增加端到端延迟 | `500-1500` |
-| `MAX_QUEUE_SIZE` | `20000` | rows | 内存队列上限 | 太小会丢队列，太大会吃内存 | `20000-100000` 视吞吐定 |
-| `BACKFILL_N` | `0` | rows | 重连后回补最近 N 笔 | 太大会放大重复/启动耗时 | 默认 `0`，仅必要时开启 |
-| `RECONNECT_MIN_DELAY` | `1` | sec | 重连最小间隔 | 过小可能频繁打点 | `1-3` |
-| `RECONNECT_MAX_DELAY` | `60` | sec | 重连最大间隔 | 过大恢复慢 | `30-60` |
-| `CHECK_INTERVAL_SEC` | `5` | sec | 连接状态检查周期 | 太短增加噪音 | `3-10` |
-| `FUTU_POLL_ENABLED` | `true` | bool | 启用 poll 兜底 | 关闭后 push 断流无法补 | 生产建议开启 |
-| `FUTU_POLL_INTERVAL_SEC` | `3` | sec | poll 周期 | 太短会增加重复和负载 | `2-5` |
-| `FUTU_POLL_NUM` | `100` | rows | 每次 poll 请求条数 | 太大增加 CPU/网络 | `50-200` |
-| `FUTU_POLL_STALE_SEC` | `10` | sec | push 多久无更新才 poll | 太小会频繁 poll | `8-15` |
-| `WATCHDOG_STALL_SEC` | `180` | sec | commit 停滞阈值 | 太短误报，太长恢复慢 | `120-300` |
-| `WATCHDOG_UPSTREAM_WINDOW_SEC` | `60` | sec | 上游活跃判断窗口 | 太小可能漏检 | `30-120` |
-| `WATCHDOG_QUEUE_THRESHOLD_ROWS` | `100` | rows | 触发 watchdog 的最小 backlog | 过低易误判 | `100-1000` |
-| `WATCHDOG_RECOVERY_MAX_FAILURES` | `3` | count | 自愈失败多少次后退出 | 过小导致频繁重启 | `3-5` |
-| `WATCHDOG_RECOVERY_JOIN_TIMEOUT_SEC` | `3.0` | sec | 等待旧 worker 退出时间 | 过小可能恢复失败 | `2-5` |
-| `DRIFT_WARN_SEC` | `120` | sec | `ts_ms` 漂移告警阈值 | 太小告警噪音 | `60-180` |
-| `STOP_FLUSH_TIMEOUT_SEC` | `60` | sec | 停机 flush 等待上限 | 太小易 timeout | `60-180` |
-| `SEED_RECENT_DB_DAYS` | `3` | day | 启动时扫描最近几天 seed seq | 太大启动慢 | `3-5` |
-| `PERSIST_RETRY_MAX_ATTEMPTS` | `0` | count | 单轮 retry 预算（0=持续重试） | 过低可能早失败 | 建议 `0` |
-| `PERSIST_RETRY_BACKOFF_SEC` | `1.0` | sec | 持久化重试初始退避 | 太小忙等，太大恢复慢 | `0.1-1.0` |
-| `PERSIST_RETRY_BACKOFF_MAX_SEC` | `2.0` | sec | 持久化最大退避 | 太小压 SQLite，太大吞吐低 | `1-5` |
-| `PERSIST_HEARTBEAT_INTERVAL_SEC` | `30.0` | sec | persist heartbeat 输出周期 | 太短日志量大 | `10-30` |
-| `SQLITE_BUSY_TIMEOUT_MS` | `5000` | ms | SQLite busy 等待时间 | 太小频繁 `locked` | `3000-10000` |
-| `SQLITE_JOURNAL_MODE` | `WAL` | enum | journal 模式 | 非 WAL 并发读写差 | 建议 `WAL` |
-| `SQLITE_SYNCHRONOUS` | `NORMAL` | enum | 同步级别 | `OFF` 有数据风险 | `NORMAL`（或高安全 `FULL`） |
-| `SQLITE_WAL_AUTOCHECKPOINT` | `1000` | pages | 自动 checkpoint 页数 | 太大 WAL 膨胀 | `500-2000` |
-| `LOG_LEVEL` | `INFO` | enum | 日志等级 | `DEBUG` 量大 | 生产 `INFO` |
+- Integer/float vars: invalid values raise `ValueError` at startup.
+- Boolean vars (`FUTU_POLL_ENABLED`): accepts `1/0,true/false,yes/no,on/off`.
+- CSV vars (`FUTU_SYMBOLS`): split by comma and trim whitespace.
 
-## 3. 稳定生产配置模板
+## Environment Variables
+
+| Variable | Default | Meaning | Recommended Range | Impact | When to Change |
+|---|---|---|---|---|---|
+| `FUTU_HOST` | `127.0.0.1` | OpenD host | local/private IP | Wrong value breaks connectivity | Change only if OpenD is remote |
+| `FUTU_PORT` | `11111` | OpenD API port | valid TCP port | Wrong value breaks subscribe/poll | Match OpenD `api_port` |
+| `FUTU_SYMBOLS` | empty | Comma-separated symbols to subscribe | explicit list | Empty list fails startup | Set to your HK universe |
+| `DATA_ROOT` | `/data/sqlite/HK` | Root directory for daily SQLite files | dedicated disk/path | Permission/full-disk causes write failures | Change for storage layout |
+| `BATCH_SIZE` | `500` | Rows per DB flush batch | `300-1000` | Too small increases write overhead; too large increases flush latency | Tune for throughput/latency |
+| `MAX_WAIT_MS` | `1000` | Max wait before flush | `500-1500` | Larger values increase end-to-end latency | Tune for latency objectives |
+| `MAX_QUEUE_SIZE` | `20000` | In-memory queue cap | `20k-100k` | Too low may drop enqueue; too high uses memory | Tune by traffic burst |
+| `BACKFILL_N` | `0` | Rows to backfill after reconnect | `0-500` | Higher values increase startup/reconnect load | Use only if replay window needed |
+| `RECONNECT_MIN_DELAY` | `1` | Reconnect lower bound (sec) | `1-3` | Too low can flap | Adjust if network unstable |
+| `RECONNECT_MAX_DELAY` | `60` | Reconnect upper bound (sec) | `30-60` | Too high delays recovery | Tune reconnect profile |
+| `CHECK_INTERVAL_SEC` | `5` | OpenD connection health check interval | `3-10` | Too low increases noise | Tune monitoring cadence |
+| `FUTU_POLL_ENABLED` | `true` | Enable poll fallback | `true/false` | Disabling removes fallback during push stalls | Keep enabled in production |
+| `FUTU_POLL_INTERVAL_SEC` | `3` | Poll loop interval (sec) | `2-5` | Too low adds load/duplicates | Tune with OpenD capacity |
+| `FUTU_POLL_NUM` | `100` | Poll fetch size per request | `50-200` | Too high increases request/parse cost | Tune by symbol activity |
+| `FUTU_POLL_STALE_SEC` | `10` | Poll only when push stale for this window | `8-15` | Too low causes unnecessary polling | Tune if push intermittency changes |
+| `WATCHDOG_STALL_SEC` | `180` | Commit stall threshold (sec) | `120-300` | Too low false positives; too high slow recovery | Tune by acceptable failover latency |
+| `WATCHDOG_UPSTREAM_WINDOW_SEC` | `60` | Upstream activity lookback window | `30-120` | Too low may miss active upstream | Tune for market burst patterns |
+| `WATCHDOG_QUEUE_THRESHOLD_ROWS` | `100` | Minimum backlog before watchdog stall logic | `100-1000` | Too low false alarms; too high delays detection | Tune by queue scale |
+| `WATCHDOG_RECOVERY_MAX_FAILURES` | `3` | Max recovery failures before exit | `3-5` | Too low triggers frequent restarts | Tune restart aggressiveness |
+| `WATCHDOG_RECOVERY_JOIN_TIMEOUT_SEC` | `3.0` | Wait time for old writer thread during recovery | `2-5` | Too short may fail recovery | Increase if thread teardown is slow |
+| `DRIFT_WARN_SEC` | `120` | Alert threshold for timestamp drift | `60-180` | Too low raises noisy warnings | Tune for monitoring sensitivity |
+| `STOP_FLUSH_TIMEOUT_SEC` | `60` | Graceful shutdown flush timeout | `60-180` | Too low risks unflushed queue on stop | Increase for larger queues |
+| `SEED_RECENT_DB_DAYS` | `3` | Days scanned on startup for seq seed | `3-5` | Higher values increase startup time | Increase if long downtime replay is common |
+| `PERSIST_RETRY_MAX_ATTEMPTS` | `0` | Persist retry budget per batch (`0` means retry until success) | `0` or small positive | Small values may escalate transient failures | Keep `0` for resilient write path |
+| `PERSIST_RETRY_BACKOFF_SEC` | `1.0` | Initial persist retry backoff (sec) | `0.1-1.0` | Too low may hammer SQLite | Tune for lock contention |
+| `PERSIST_RETRY_BACKOFF_MAX_SEC` | `2.0` | Max persist retry backoff (sec) | `1-5` | Too high lowers throughput recovery | Tune retry pacing |
+| `PERSIST_HEARTBEAT_INTERVAL_SEC` | `30.0` | Persist heartbeat log interval | `10-30` | Too small increases log volume | Tune observability/detail |
+| `SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite busy timeout per connection | `3000-10000` | Too low increases `locked` failures | Increase on lock-heavy hosts |
+| `SQLITE_JOURNAL_MODE` | `WAL` | SQLite journal mode | `WAL` recommended | Non-WAL hurts concurrent read/write | Change only for special constraints |
+| `SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite fsync safety mode | `NORMAL`/`FULL` | `OFF` increases corruption risk on crash | Use `FULL` for stricter durability |
+| `SQLITE_WAL_AUTOCHECKPOINT` | `1000` | WAL auto-checkpoint pages | `500-2000` | Too high grows WAL file | Tune by write volume/disk IO |
+| `LOG_LEVEL` | `INFO` | App log verbosity | `INFO` for prod | `DEBUG` can be very noisy | Use debug only transiently |
+
+## Production Baseline Template
 
 ```dotenv
 FUTU_HOST=127.0.0.1
@@ -84,14 +89,13 @@ SEED_RECENT_DB_DAYS=3
 LOG_LEVEL=INFO
 ```
 
-## 4. 配置变更后验证
+## Change Control
+
+After changing env values in production:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
-bash scripts/healthcheck.sh
-bash scripts/verify_db.sh
+bash scripts/db_health_check.sh
 ```
-
-相关：[`docs/deployment/ubuntu-systemd.md`](deployment/ubuntu-systemd.md)
