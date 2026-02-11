@@ -3,18 +3,25 @@
 ## 1. 关键规则（时间戳与交易日）
 
 - `ticks.ts_ms` 必须是 UTC epoch milliseconds。
+- `ticks.recv_ts_ms` 记录接收时间（UTC epoch milliseconds）用于诊断落库延迟。
 - Futu `time` 字段按港股市场本地时间（`Asia/Hong_Kong`）解释，再转换到 UTC。
 - 若仅有 `HH:MM:SS`，必须与 `trading_day(YYYYMMDD)` 拼接后再做时区转换。
 - `trading_day` 从 `ts_ms` 反推时也使用 `Asia/Hong_Kong`，不依赖服务器系统时区。
 
 ## 2. watchdog 触发条件
 
-watchdog 每分钟在 `health` 周期内检查，满足以下全部条件即触发 `WATCHDOG persistent_stall` 并非 0 退出，交给 systemd 拉起：
+watchdog 每分钟在 `health` 周期内检查，满足以下全部条件即触发自愈：
 
 - 上游近期活跃：`push` 或 `poll` 仍有推进；
-- `persisted_rows_per_min == 0`；
-- `persist_stall_sec >= WATCHDOG_STALL_SEC`；
-- `persist_stall_sec` 以 monotonic 时钟计算，起点是最近一次成功 commit。
+- `queue_size > 0`；
+- `persist_stall_sec >= WATCHDOG_STALL_SEC`，其中 `persist_stall_sec = now_monotonic - last_commit_monotonic`。
+
+触发后动作顺序：
+
+1. 先 `faulthandler` dump 全线程栈；
+2. 同进程重建 sqlite writer 线程/连接；
+3. 记录 `WATCHDOG recovery_triggered`；
+4. 仅当连续恢复失败达到 `WATCHDOG_RECOVERY_MAX_FAILURES` 时，记录 `WATCHDOG persistent_stall` 并以退出码 `1` 退出。
 
 ## 3. 关键可观测字段
 
@@ -41,7 +48,7 @@ TODAY_HK=$(TZ=Asia/Hong_Kong date +%Y%m%d)
 DB=/data/sqlite/HK/${TODAY_HK}.db
 ```
 
-检查 drift：
+检查 drift（`max_minus_now_sec` 应接近 0，建议 `±5s`）：
 
 ```sql
 SELECT
@@ -49,6 +56,12 @@ SELECT
   datetime(MAX(ts_ms)/1000,'unixepoch') AS max_ts_utc,
   (strftime('%s','now') - MAX(ts_ms)/1000.0) AS drift_sec
 FROM ticks;
+```
+
+或直接使用脚本：
+
+```bash
+python3 scripts/check_ts_semantics.py --db "$DB" --tolerance-sec 5
 ```
 
 检查最近 10 分钟窗口：
@@ -106,11 +119,24 @@ WHERE prev IS NOT NULL;
 sudo scripts/redeploy_hk_tick_collector.sh
 ```
 
-可选参数：
+## 7. 一键重启+健康检查
 
-- `TARGET_DIR`（默认 `/opt/futu_tick_downloader`）
-- `BRANCH`（默认 `main`）
+```bash
+sudo ops/restart_and_verify.sh
+```
+
+默认验收规则：
+
+- `stop -> start` 后 30 秒内看到 `persist_ticks`；
+- `max_minus_now_sec` 在 `±5s` 内；
+- 自重启起点到当前窗口无 `WATCHDOG persistent_stall`。
+
+`ops/restart_and_verify.sh` 可选参数：
+
 - `SERVICE_NAME`（默认 `hk-tick-collector`）
-- `ENV_FILE`（默认 `/etc/hk-tick-collector.env`）
-- `LOG_SCAN_SECONDS`（默认 `120`）
-- `REPO_URL`（目标目录不存在时必填）
+- `DATA_ROOT`（默认 `/data/sqlite/HK`）
+- `VERIFY_TIMEOUT_SEC`（默认 `30`）
+- `TS_TOLERANCE_SEC`（默认 `5`）
+- `DAY`（默认 `TZ=Asia/Hong_Kong` 的当天）
+- `DB_PATH`（默认 `${DATA_ROOT}/${DAY}.db`）
+- `CHECK_SCRIPT`（默认 `<repo>/scripts/check_ts_semantics.py`）

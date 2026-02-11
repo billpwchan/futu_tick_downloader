@@ -194,6 +194,7 @@ DATA_ROOT=/data/sqlite/HK
 FUTU_POLL_ENABLED=1
 FUTU_POLL_INTERVAL_SEC=3
 FUTU_POLL_NUM=100
+FUTU_POLL_STALE_SEC=10
 WATCHDOG_STALL_SEC=180
 WATCHDOG_UPSTREAM_WINDOW_SEC=60
 ```
@@ -257,7 +258,7 @@ sudo journalctl -u hk-tick-collector -f | egrep "poll_stats|persist_ticks|health
 
 - 交易时段持续出现 `persist_ticks`
 - `poll_stats` 中 `fetched`、`accepted/enqueued`、`dropped_*`、`last_*_seq` 可见
-- 若出现上游活跃但持续停写，会出现 `WATCHDOG` 并由 systemd 自动重启
+- 若出现上游活跃但持续停写，watchdog 会先自愈（重建 writer）；连续失败后才由 systemd 重启
 
 ### 5.5 DB gap 检查（排查隐形停写）
 

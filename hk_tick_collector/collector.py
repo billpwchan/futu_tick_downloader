@@ -408,7 +408,7 @@ class AsyncTickCollector:
                 writer.reset_connection(trading_day)
 
                 if is_busy_locked:
-                    logger.warning(
+                    logger.exception(
                         "sqlite_busy_backoff trading_day=%s db_path=%s batch=%s attempt=%s "
                         "sleep_sec=%.3f queue=%s/%s last_seq=%s",
                         trading_day,
@@ -419,10 +419,9 @@ class AsyncTickCollector:
                         self._queue.qsize(),
                         self._queue.maxsize,
                         last_seq if last_seq is not None else "none",
-                        exc_info=True,
                     )
                 else:
-                    logger.error(
+                    logger.exception(
                         "persist_flush_failed trading_day=%s db_path=%s batch=%s attempt=%s "
                         "queue=%s/%s last_seq=%s",
                         trading_day,
@@ -432,7 +431,6 @@ class AsyncTickCollector:
                         self._queue.qsize(),
                         self._queue.maxsize,
                         last_seq if last_seq is not None else "none",
-                        exc_info=True,
                     )
 
                 if self._persist_retry_max_attempts > 0 and attempt >= self._persist_retry_max_attempts:

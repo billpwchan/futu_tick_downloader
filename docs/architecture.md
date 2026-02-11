@@ -23,8 +23,8 @@
 - 重连成功后自动重新订阅。
 - 可选回补：`BACKFILL_N > 0` 时，调用 `get_rt_ticker(code, num=N)` 拉取最近 N 笔。
 - SQLite 写入使用唯一索引与 `INSERT OR IGNORE`，可幂等去重。
-- 轮询去重基准使用 `max(last_accepted_seq, last_persisted_seq)`，不会被 `last_seen_seq` 污染。
-- 轮询默认启用：推送短时间内有数据则短暂跳过轮询，避免对 OpenD 造成压力。
+- 轮询去重基准使用 `last_persisted_seq`（已落库进度）。
+- 轮询默认启用：仅在 push 断流/`last_tick_age_sec` 超阈值时才触发，避免重复窗口与 CPU 抖动。
 
 ## 容量规划（粗略估算）
 
@@ -38,4 +38,4 @@
 
 - 采集器已强制使用 `Asia/Hong_Kong` 解析市场时间并转换到 UTC epoch，不再依赖服务器系统时区。
 - OpenD 与采集器都使用 systemd 守护，`Restart=always`。
-- 建议配置 `WATCHDOG_STALL_SEC=120~300`，在持续停写时由进程主动退出并交给 systemd 快速恢复。
+- 建议配置 `WATCHDOG_STALL_SEC=120~300`，watchdog 会先重建 writer 自愈，连续失败才以退出码 `1` 退出交给 systemd 恢复。

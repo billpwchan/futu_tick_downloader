@@ -1,5 +1,28 @@
 # Project Memory
 
+## 2026-02-11: one-shot hardening for watchdog/timestamp semantics
+
+### What changed
+
+- Timestamp semantics:
+  - `ticks.ts_ms` is enforced as UTC epoch milliseconds (absolute event time).
+  - Added `ticks.recv_ts_ms` as UTC epoch milliseconds (collector receive time).
+  - `mapping.parse_time_to_ts_ms` now normalizes numeric epoch seconds/milliseconds and HK local time text via `ZoneInfo("Asia/Hong_Kong")`.
+- Persist stability:
+  - SQLite PRAGMA on each writer connection now includes `temp_store=MEMORY` in addition to `WAL/NORMAL,busy_timeout,wal_autocheckpoint`.
+  - Busy/locked and other sqlite write errors are logged with full traceback (`logger.exception`) + exponential backoff + connection reset.
+  - Commit heartbeat (`last_commit_monotonic`) updates even when batch is fully ignored/duplicate.
+- Watchdog:
+  - Stall condition simplified to durable signal: `queue>0 && (now_monotonic-last_commit_monotonic)>=WATCHDOG_STALL_SEC`.
+  - On stall: stack dump -> in-process writer recovery.
+  - Only exits after repeated recovery failures, exit code switched to `1`.
+- Poll noise reduction:
+  - Poll runs only when push/tick becomes stale (`FUTU_POLL_STALE_SEC`).
+  - Poll dedupe baseline moved to `last_persisted_seq` (durable progress).
+- Ops:
+  - Added `scripts/check_ts_semantics.py` (`max(ts_ms)-now_utc` within tolerance, default `±5s`).
+  - Added `ops/restart_and_verify.sh` (`stop -> start -> persist_ticks <=30s -> drift check -> no WATCHDOG`).
+
 ## 2026-02-10: HK tick pipeline hidden stall fix
 
 ### Incident summary

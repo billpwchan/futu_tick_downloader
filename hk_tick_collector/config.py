@@ -69,6 +69,7 @@ class Config:
     poll_enabled: bool
     poll_interval_sec: int
     poll_num: int
+    poll_stale_sec: int
     watchdog_stall_sec: int
     watchdog_upstream_window_sec: int
     drift_warn_sec: int
@@ -105,6 +106,7 @@ class Config:
             poll_enabled=_get_env_bool("FUTU_POLL_ENABLED", True),
             poll_interval_sec=_get_env_int("FUTU_POLL_INTERVAL_SEC", 3),
             poll_num=_get_env_int("FUTU_POLL_NUM", 100),
+            poll_stale_sec=_get_env_int("FUTU_POLL_STALE_SEC", 10),
             watchdog_stall_sec=_get_env_int("WATCHDOG_STALL_SEC", 180),
             watchdog_upstream_window_sec=_get_env_int("WATCHDOG_UPSTREAM_WINDOW_SEC", 60),
             drift_warn_sec=_get_env_int("DRIFT_WARN_SEC", 120),

@@ -58,6 +58,15 @@ def test_parse_time_to_ts_ms_compact_hhmmss():
     assert parse_time_to_ts_ms("093000", "20240102") == _expected_ts_ms("20240102", "09:30:00")
 
 
+def test_parse_time_to_ts_ms_compact_hhmmss_numeric():
+    assert parse_time_to_ts_ms(93000, "20240102") == _expected_ts_ms("20240102", "09:30:00")
+
+
+def test_parse_time_to_ts_ms_epoch_seconds_numeric():
+    expected = _expected_ts_ms("20240102", "09:30:00")
+    assert parse_time_to_ts_ms(expected // 1000, "20240102") == expected
+
+
 def test_parse_time_to_ts_ms_with_timezone_string():
     value = "2024-01-02T01:30:00+00:00"
     assert parse_time_to_ts_ms(value, "20240102") == _expected_ts_ms("20240102", "09:30:00")
@@ -68,3 +77,25 @@ def test_parse_time_to_ts_ms_corrects_obvious_future_plus_8h(monkeypatch):
     raw_future = expected + (8 * 3600 * 1000)
     monkeypatch.setattr("hk_tick_collector.mapping.time.time", lambda: expected / 1000.0)
     assert parse_time_to_ts_ms(raw_future, "20240102") == expected
+
+
+def test_ticker_mapping_sets_recv_ts_ms(monkeypatch):
+    recv_ts_ms = 1704161400123
+    monkeypatch.setattr("hk_tick_collector.mapping.time.time", lambda: recv_ts_ms / 1000.0)
+    df = pd.DataFrame(
+        [
+            {
+                "code": "HK.00700",
+                "time": "2024-01-02 09:30:00",
+                "price": 300.5,
+                "volume": 100,
+                "turnover": 30050.0,
+                "ticker_direction": "BUY",
+                "sequence": 123,
+                "trading_day": "20240102",
+            }
+        ]
+    )
+    rows = ticker_df_to_rows(df, provider="futu", push_type="push")
+    assert rows[0].recv_ts_ms == recv_ts_ms
+    assert rows[0].inserted_at_ms == recv_ts_ms

@@ -21,6 +21,7 @@ def _row(seq: int, trading_day: str = "20240102") -> TickRow:
         push_type="push",
         provider="futu",
         trading_day=trading_day,
+        recv_ts_ms=1704161400000,
         inserted_at_ms=1704161400000,
     )
 
@@ -152,5 +153,63 @@ def test_sqlite_busy_backoff_and_recovery(tmp_path):
         finally:
             conn.close()
         assert inserted == 1
+
+    asyncio.run(runner())
+
+
+def test_writer_recovery_while_sqlite_temporarily_locked(tmp_path):
+    async def runner():
+        trading_day = "20240102"
+        store = SQLiteTickStore(
+            tmp_path,
+            busy_timeout_ms=50,
+            journal_mode="WAL",
+            synchronous="NORMAL",
+            wal_autocheckpoint=1000,
+        )
+        db_path = store.ensure_db(trading_day)
+
+        locker = sqlite3.connect(db_path)
+        locker.execute("PRAGMA journal_mode=WAL;")
+        locker.execute("BEGIN IMMEDIATE;")
+
+        collector = AsyncTickCollector(
+            store,
+            batch_size=1,
+            max_wait_ms=10,
+            max_queue_size=500,
+            persist_retry_max_attempts=0,
+            persist_retry_backoff_sec=0.01,
+            persist_retry_backoff_max_sec=0.1,
+            heartbeat_interval_sec=0.2,
+        )
+        await collector.start()
+        for seq in range(1, 120):
+            assert collector.enqueue([_row(seq, trading_day=trading_day)])
+
+        await asyncio.sleep(0.3)
+        recovered = await asyncio.to_thread(
+            collector.request_writer_recovery,
+            "test_locked_sqlite",
+            1.0,
+        )
+        assert recovered is True
+
+        locker.commit()
+        locker.close()
+
+        wait_deadline = time.monotonic() + 12.0
+        while collector.queue_size() > 0 and time.monotonic() < wait_deadline:
+            await asyncio.sleep(0.05)
+
+        await collector.stop(timeout_sec=8)
+        assert collector.fatal_error() is None
+
+        conn = sqlite3.connect(db_path_for_trading_day(tmp_path, trading_day))
+        try:
+            inserted = conn.execute("SELECT COUNT(1) FROM ticks WHERE symbol = ?", ("HK.00700",)).fetchone()[0]
+        finally:
+            conn.close()
+        assert inserted >= 100
 
     asyncio.run(runner())

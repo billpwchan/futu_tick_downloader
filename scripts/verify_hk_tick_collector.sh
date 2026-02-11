@@ -5,6 +5,9 @@ SERVICE_NAME="${SERVICE_NAME:-hk-tick-collector}"
 DATA_ROOT="${DATA_ROOT:-/data/sqlite/HK}"
 DAY="${DAY:-$(TZ=Asia/Hong_Kong date +%Y%m%d)}"
 DB_PATH="${DB_PATH:-${DATA_ROOT}/${DAY}.db}"
+TS_TOLERANCE_SEC="${TS_TOLERANCE_SEC:-5}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHECK_SCRIPT="${CHECK_SCRIPT:-${SCRIPT_DIR}/check_ts_semantics.py}"
 
 echo "[INFO] service=${SERVICE_NAME}"
 echo "[INFO] db_path=${DB_PATH}"
@@ -37,6 +40,7 @@ try:
     journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
     synchronous = conn.execute("PRAGMA synchronous;").fetchone()[0]
     busy_timeout = int(conn.execute("PRAGMA busy_timeout;").fetchone()[0])
+    temp_store = conn.execute("PRAGMA temp_store;").fetchone()[0]
     wal_autocheckpoint = conn.execute("PRAGMA wal_autocheckpoint;").fetchone()[0]
 
     print(f"now_utc={now_utc}")
@@ -46,12 +50,15 @@ try:
     print(f"journal_mode={journal_mode}")
     print(f"synchronous={synchronous}")
     print(f"busy_timeout={busy_timeout}")
+    print(f"temp_store={temp_store}")
     print(f"wal_autocheckpoint={wal_autocheckpoint}")
     print(f"busy_timeout_check={'PASS' if busy_timeout >= 1000 else 'FAIL'}")
     print(f"journal_mode_check={'PASS' if str(journal_mode).lower() == 'wal' else 'FAIL'}")
 finally:
     conn.close()
 PY
+
+python3 "${CHECK_SCRIPT}" --db "${DB_PATH}" --tolerance-sec "${TS_TOLERANCE_SEC}"
 
 if command -v journalctl >/dev/null 2>&1; then
   echo "[INFO] recent watchdog logs (last 5 minutes)"

@@ -4,7 +4,7 @@
 
 - OpenD 必须使用富途官方发行包在服务器原生安装运行（禁止第三方 Docker 镜像）。
 - 数据按交易日分库：`/data/sqlite/HK/YYYYMMDD.db`，表结构与索引固定一致。
-- 内置 push/poll/persist 指标日志与 stall watchdog（上游活跃但持久化停滞时主动退出，交给 systemd 拉起）。
+- 内置 push/poll/persist 指标日志与 stall watchdog（优先同进程自愈，连续失败才退出并交给 systemd 拉起）。
 
 ## 快速开始
 

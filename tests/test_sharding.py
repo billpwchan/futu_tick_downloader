@@ -21,6 +21,7 @@ def test_db_path_and_trading_day_switch(tmp_path):
         push_type="push",
         provider="futu",
         trading_day=day1,
+        recv_ts_ms=1704161400000,
         inserted_at_ms=1704161400000,
     )
     row2 = TickRow(
@@ -36,6 +37,7 @@ def test_db_path_and_trading_day_switch(tmp_path):
         push_type="push",
         provider="futu",
         trading_day=day2,
+        recv_ts_ms=1704247800000,
         inserted_at_ms=1704247800000,
     )
 
@@ -65,6 +67,7 @@ def test_fetch_max_seq_by_symbol_recent_across_multiple_days(tmp_path):
                 push_type="push",
                 provider="futu",
                 trading_day="20240102",
+                recv_ts_ms=1704161400000,
                 inserted_at_ms=1704161400000,
             )
         ],
@@ -85,6 +88,7 @@ def test_fetch_max_seq_by_symbol_recent_across_multiple_days(tmp_path):
                 push_type="push",
                 provider="futu",
                 trading_day="20240103",
+                recv_ts_ms=1704247800000,
                 inserted_at_ms=1704247800000,
             )
         ],

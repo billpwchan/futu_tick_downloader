@@ -3,6 +3,7 @@
 ## Time Baseline
 
 - `ticks.ts_ms` is always **UTC epoch milliseconds**.
+- `ticks.recv_ts_ms` is collector receive time in **UTC epoch milliseconds**.
 - When source tick time is HK local market time, collector converts:
   - `Asia/Hong_Kong local time` -> `UTC epoch ms`
 
@@ -24,6 +25,12 @@ SELECT
   (MAX(ts_ms)/1000.0 - strftime('%s','now')) AS max_minus_now_sec,
   COUNT(*) AS rows
 FROM ticks;
+```
+
+Quick command (default tolerance `±5s`):
+
+```bash
+python3 scripts/check_ts_semantics.py --db "$DB" --tolerance-sec 5
 ```
 
 View recent rows in UTC:

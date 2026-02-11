@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from .models import TickRow
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_WAL_AUTOCHECKPOINT = 1000
 
 CREATE_TABLE_SQL = (
@@ -28,6 +29,7 @@ CREATE_TABLE_SQL = (
     "  push_type TEXT,\n"
     "  provider TEXT,\n"
     "  trading_day TEXT NOT NULL,\n"
+    "  recv_ts_ms INTEGER NOT NULL,\n"
     "  inserted_at_ms INTEGER NOT NULL\n"
     ");"
 )
@@ -55,8 +57,8 @@ INDEX_SQLS = [
 INSERT_SQL = (
     "INSERT OR IGNORE INTO ticks ("
     "market, symbol, ts_ms, price, volume, turnover, direction, seq, tick_type, "
-    "push_type, provider, trading_day, inserted_at_ms"
-    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+    "push_type, provider, trading_day, recv_ts_ms, inserted_at_ms"
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
 )
 
 _ALTER_COLUMN_SQL = {
@@ -66,6 +68,7 @@ _ALTER_COLUMN_SQL = {
     "push_type": "ALTER TABLE ticks ADD COLUMN push_type TEXT;",
     "provider": "ALTER TABLE ticks ADD COLUMN provider TEXT;",
     "trading_day": "ALTER TABLE ticks ADD COLUMN trading_day TEXT NOT NULL DEFAULT '';",
+    "recv_ts_ms": "ALTER TABLE ticks ADD COLUMN recv_ts_ms INTEGER NOT NULL DEFAULT 0;",
     "inserted_at_ms": "ALTER TABLE ticks ADD COLUMN inserted_at_ms INTEGER NOT NULL DEFAULT 0;",
 }
 
@@ -128,6 +131,7 @@ def _open_conn(
     conn.execute(f"PRAGMA journal_mode={_sanitize_journal_mode(journal_mode)};")
     conn.execute(f"PRAGMA synchronous={_sanitize_synchronous(synchronous)};")
     conn.execute(f"PRAGMA busy_timeout={max(1, int(busy_timeout_ms))};")
+    conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute(f"PRAGMA wal_autocheckpoint={max(1, int(wal_autocheckpoint))};")
     return conn
 
@@ -196,13 +200,15 @@ def _log_sqlite_pragmas(conn: sqlite3.Connection, db_path: Path) -> None:
     journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
     synchronous = conn.execute("PRAGMA synchronous;").fetchone()[0]
     busy_timeout = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+    temp_store = conn.execute("PRAGMA temp_store;").fetchone()[0]
     wal_autocheckpoint = conn.execute("PRAGMA wal_autocheckpoint;").fetchone()[0]
     logger.info(
-        "sqlite_pragmas db_path=%s journal_mode=%s synchronous=%s busy_timeout=%s wal_autocheckpoint=%s",
+        "sqlite_pragmas db_path=%s journal_mode=%s synchronous=%s busy_timeout=%s temp_store=%s wal_autocheckpoint=%s",
         db_path,
         journal_mode,
         synchronous,
         busy_timeout,
+        temp_store,
         wal_autocheckpoint,
     )
 
@@ -213,8 +219,14 @@ class SQLiteTickWriter:
         self._connections: Dict[str, sqlite3.Connection] = {}
         self._db_paths: Dict[str, Path] = {}
         self._closed = False
+        self._owner_thread_id = threading.get_ident()
+
+    def _assert_owner_thread(self) -> None:
+        if threading.get_ident() != self._owner_thread_id:
+            raise RuntimeError("sqlite writer used from non-owner thread")
 
     def close(self) -> None:
+        self._assert_owner_thread()
         if self._closed:
             return
         self._closed = True
@@ -227,6 +239,7 @@ class SQLiteTickWriter:
         self._db_paths.clear()
 
     def reset_connection(self, trading_day: str) -> None:
+        self._assert_owner_thread()
         conn = self._connections.pop(trading_day, None)
         self._db_paths.pop(trading_day, None)
         if conn is None:
@@ -237,6 +250,7 @@ class SQLiteTickWriter:
             logger.exception("sqlite_writer_reset_failed trading_day=%s", trading_day)
 
     def insert_ticks(self, trading_day: str, rows: Iterable[TickRow]) -> PersistResult:
+        self._assert_owner_thread()
         rows_list = list(rows)
         db_path = db_path_for_trading_day(self._store._data_root, trading_day)
         if not rows_list:
@@ -281,6 +295,7 @@ class SQLiteTickWriter:
             raise
 
     def _ensure_connection(self, trading_day: str) -> sqlite3.Connection:
+        self._assert_owner_thread()
         if self._closed:
             raise RuntimeError("sqlite writer already closed")
 

@@ -18,6 +18,7 @@ def _row(seq: int = 1) -> TickRow:
         push_type="push",
         provider="futu",
         trading_day="20240102",
+        recv_ts_ms=1704161400000,
         inserted_at_ms=1704161400000,
     )
 

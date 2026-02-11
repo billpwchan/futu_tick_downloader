@@ -5,7 +5,7 @@
 Production repeatedly hit:
 
 - `WATCHDOG persistent_stall ... queue>0 persisted_rows_per_min=0`
-- systemd restart with `status=2/INVALIDARGUMENT`
+- systemd restart with non-zero status
 - SQLite `ticks.ts_ms` ahead of UTC `now` by about `+8h` (`max_minus_now_sec ~ 27979~28760`)
 
 and DB row growth stayed low/interrupted.
@@ -68,7 +68,7 @@ and DB row growth stayed low/interrupted.
   - On stall:
     1. dump all thread stacks (`faulthandler.dump_traceback(all_threads=True)`)
     2. attempt collector writer recovery
-    3. only exit `2` after consecutive recovery failures (`WATCHDOG_RECOVERY_MAX_FAILURES`)
+    3. only exit `1` after consecutive recovery failures (`WATCHDOG_RECOVERY_MAX_FAILURES`)
 
 ## 3.5 Fault diagnostics
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import faulthandler
 import logging
-import os
 import sys
 import time
 from collections import deque
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 POLL_SKIP_PUSH_SEC = 2
 POLL_RECENT_KEY_LIMIT = 500
 HEALTH_LOG_INTERVAL_SEC = 60
-WATCHDOG_EXIT_CODE = 2
+WATCHDOG_EXIT_CODE = 1
 
 
 class FutuTickerHandler(TickerHandlerBase):
@@ -94,7 +93,6 @@ class FutuQuoteClient:
         self._dropped_filter_since_report = 0
         self._watchdog_last_queue_size = 0
         self._watchdog_last_check_at = self._started_at
-        self._watchdog_backlog_since: float | None = None
         self._watchdog_heal_failures = 0
         self._watchdog_heal_attempts = 0
         self._watchdog_last_heal_at: float | None = None
@@ -106,22 +104,41 @@ class FutuQuoteClient:
             while not self._stop_event.is_set():
                 poll_task: asyncio.Task | None = None
                 health_task: asyncio.Task | None = None
+                monitor_task: asyncio.Task | None = None
                 try:
                     await self._connect_and_subscribe()
                     backoff.reset()
                     poll_task = asyncio.create_task(self._poll_loop())
                     health_task = asyncio.create_task(self._health_loop())
-                    await self._monitor_connection()
+                    monitor_task = asyncio.create_task(self._monitor_connection())
+
+                    done, pending = await asyncio.wait(
+                        {poll_task, health_task, monitor_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    fatal: BaseException | None = None
+                    for task in done:
+                        if task.cancelled():
+                            continue
+                        exc = task.exception()
+                        if exc is not None:
+                            fatal = exc
+                            break
+
+                    if fatal is None and monitor_task not in done:
+                        fatal = RuntimeError("background task exited unexpectedly")
+                    if fatal is not None:
+                        raise fatal
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.warning("futu connection error: %s", exc)
                 finally:
                     self._connected = False
-                    for task in (poll_task, health_task):
+                    for task in (poll_task, health_task, monitor_task):
                         if task is not None:
                             task.cancel()
-                    for task in (poll_task, health_task):
+                    for task in (poll_task, health_task, monitor_task):
                         if task is not None:
                             await asyncio.gather(task, return_exceptions=True)
                     self._close_ctx()
@@ -546,42 +563,27 @@ class FutuQuoteClient:
             (now - float(last_exception)) if last_exception is not None else None
         )
 
-        min_backlog = max(
-            int(self._config.watchdog_queue_threshold_rows),
-            max(10, max(1, int(queue_maxsize * 0.01))),
-        )
-        if queue_size >= min_backlog:
-            if self._watchdog_backlog_since is None:
-                self._watchdog_backlog_since = now
-        else:
-            self._watchdog_backlog_since = None
+        if queue_size <= 0:
             self._watchdog_heal_failures = 0
             self._watchdog_dumped = False
             return
 
-        backlog_age_sec = (
-            0.0 if self._watchdog_backlog_since is None else max(0.0, now - self._watchdog_backlog_since)
-        )
-        backlog_sustained = backlog_age_sec >= self._config.watchdog_stall_sec
-
         consumer_dead = not worker_alive
-        dequeue_stalled = dequeue_age_sec >= self._config.watchdog_stall_sec
         commit_stalled = commit_age_sec >= self._config.watchdog_stall_sec
-        consumer_stalled = dequeue_stalled or commit_stalled
 
         if not upstream_active:
+            self._watchdog_heal_failures = 0
             self._watchdog_dumped = False
             return
-        if not backlog_sustained:
+        if not (commit_stalled or consumer_dead):
+            self._watchdog_heal_failures = 0
             self._watchdog_dumped = False
-            return
-        if not (consumer_dead or consumer_stalled):
             return
 
         pipeline = self._collector.snapshot_pipeline_counters(reset=False)
         drift_sec = self._drift_sec()
         last_commit_age_sec = self._last_commit_age_sec(now)
-        reason = "worker_dead" if consumer_dead else "dequeue_or_commit_stalled"
+        reason = "worker_dead" if consumer_dead else "commit_stalled_with_backlog"
 
         self._dump_threads_for_watchdog(
             reason=f"{reason}_pre_recovery",
@@ -590,7 +592,6 @@ class FutuQuoteClient:
             queue_maxsize=queue_maxsize,
             queue_growth=queue_growth,
             check_elapsed_sec=check_elapsed_sec,
-            backlog_age_sec=backlog_age_sec,
             dequeue_age_sec=dequeue_age_sec,
             commit_age_sec=commit_age_sec,
             runtime=runtime,
@@ -606,14 +607,13 @@ class FutuQuoteClient:
         if recovered:
             self._watchdog_heal_failures = 0
             logger.warning(
-                "WATCHDOG recovery_triggered reason=%s attempts=%s queue=%s/%s backlog_age_sec=%.1f "
+                "WATCHDOG recovery_triggered reason=%s attempts=%s queue=%s/%s "
                 "dequeue_age_sec=%.1f commit_age_sec=%.1f last_exception_age_sec=%s queue_growth=%s "
                 "check_elapsed_sec=%.1f worker_alive=%s",
                 reason,
                 self._watchdog_heal_attempts,
                 queue_size,
                 queue_maxsize,
-                backlog_age_sec,
                 dequeue_age_sec,
                 commit_age_sec,
                 f"{exception_age_sec:.1f}" if exception_age_sec is not None else "none",
@@ -627,14 +627,13 @@ class FutuQuoteClient:
         self._watchdog_heal_failures += 1
         logger.error(
             "WATCHDOG recovery_failed reason=%s failures=%s max_failures=%s queue=%s/%s "
-            "backlog_age_sec=%.1f dequeue_age_sec=%.1f commit_age_sec=%.1f "
+            "dequeue_age_sec=%.1f commit_age_sec=%.1f "
             "last_exception_type=%s last_exception_count=%s",
             reason,
             self._watchdog_heal_failures,
             self._config.watchdog_recovery_max_failures,
             queue_size,
             queue_maxsize,
-            backlog_age_sec,
             dequeue_age_sec,
             commit_age_sec,
             runtime.get("last_exception_type"),
@@ -650,14 +649,13 @@ class FutuQuoteClient:
             queue_maxsize=queue_maxsize,
             queue_growth=queue_growth,
             check_elapsed_sec=check_elapsed_sec,
-            backlog_age_sec=backlog_age_sec,
             dequeue_age_sec=dequeue_age_sec,
             commit_age_sec=commit_age_sec,
             runtime=runtime,
         )
         logger.error(
             "WATCHDOG persistent_stall reason=%s upstream_active=%s poll_active=%s "
-            "queue=%s/%s queue_growth=%s backlog_age_sec=%.1f check_elapsed_sec=%.1f "
+            "queue=%s/%s queue_growth=%s check_elapsed_sec=%.1f "
             "push_rows_per_min=%s poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
             "queue_in=%s queue_out=%s persisted_rows_per_min=%s "
             "dequeue_age_sec=%.1f commit_age_sec=%.1f last_commit_monotonic_age_sec=%s "
@@ -670,7 +668,6 @@ class FutuQuoteClient:
             queue_size,
             queue_maxsize,
             queue_growth,
-            backlog_age_sec,
             check_elapsed_sec,
             self._push_rows_since_report,
             self._poll_fetched_since_report,
@@ -692,7 +689,7 @@ class FutuQuoteClient:
             f"{drift_sec:.1f}" if drift_sec is not None else "none",
             self._watchdog_heal_failures,
         )
-        os._exit(WATCHDOG_EXIT_CODE)
+        raise SystemExit(WATCHDOG_EXIT_CODE)
 
     def _dump_threads_for_watchdog(
         self,
@@ -703,7 +700,6 @@ class FutuQuoteClient:
         queue_maxsize: int,
         queue_growth: int,
         check_elapsed_sec: float,
-        backlog_age_sec: float,
         dequeue_age_sec: float,
         commit_age_sec: float,
         runtime: Dict[str, object],
@@ -713,7 +709,7 @@ class FutuQuoteClient:
         self._watchdog_dumped = True
         logger.error(
             "WATCHDOG diagnostic_dump reason=%s now=%.1f queue=%s/%s queue_growth=%s "
-            "check_elapsed_sec=%.1f backlog_age_sec=%.1f dequeue_age_sec=%.1f "
+            "check_elapsed_sec=%.1f dequeue_age_sec=%.1f "
             "commit_age_sec=%.1f runtime=%s",
             reason,
             now,
@@ -721,7 +717,6 @@ class FutuQuoteClient:
             queue_maxsize,
             queue_growth,
             check_elapsed_sec,
-            backlog_age_sec,
             dequeue_age_sec,
             commit_age_sec,
             runtime,
@@ -743,13 +738,7 @@ class FutuQuoteClient:
         return max_lag
 
     def _dedupe_baseline_seq(self, symbol: str) -> Optional[int]:
-        accepted = self._last_accepted_seq.get(symbol)
-        persisted = self._last_persisted_seq.get(symbol)
-        if accepted is None:
-            return persisted
-        if persisted is None:
-            return accepted
-        return max(accepted, persisted)
+        return self._last_persisted_seq.get(symbol)
 
     def _update_seq_max(self, target: Dict[str, int], symbol: str, seq: int) -> None:
         current = target.get(symbol)
@@ -775,10 +764,18 @@ class FutuQuoteClient:
         return max(seqs) if seqs else None
 
     def _should_skip_poll(self, symbol: str) -> bool:
+        now = self._loop.time()
+        stale_threshold_sec = max(float(self._config.poll_stale_sec), float(POLL_SKIP_PUSH_SEC))
+        last_tick = self._last_tick_seen_at.get(symbol)
+        if last_tick is None:
+            return False
+        if (now - last_tick) < stale_threshold_sec:
+            return True
+
         last_push = self._last_push_at.get(symbol)
         if last_push is None:
             return False
-        return (self._loop.time() - last_push) < POLL_SKIP_PUSH_SEC
+        return (now - last_push) < stale_threshold_sec
 
     def _last_commit_age_sec(self, now: float) -> float | None:
         last_commit = self._collector.get_last_persist_at()

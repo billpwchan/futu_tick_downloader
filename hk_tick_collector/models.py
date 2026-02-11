@@ -18,6 +18,7 @@ class TickRow:
     push_type: Optional[str]
     provider: Optional[str]
     trading_day: str
+    recv_ts_ms: int
     inserted_at_ms: int
 
     def as_tuple(self) -> tuple:
@@ -34,5 +35,6 @@ class TickRow:
             self.push_type,
             self.provider,
             self.trading_day,
+            self.recv_ts_ms,
             self.inserted_at_ms,
         )

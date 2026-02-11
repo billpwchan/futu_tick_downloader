@@ -1,6 +1,13 @@
 import sqlite3
 
-from hk_tick_collector.db import CREATE_TABLE_SQL, INDEX_SQLS, SCHEMA_VERSION, SQLiteTickStore, ensure_schema
+from hk_tick_collector.db import (
+    CREATE_TABLE_SQL,
+    INDEX_SQLS,
+    SCHEMA_VERSION,
+    SQLiteTickStore,
+    db_path_for_trading_day,
+    ensure_schema,
+)
 
 
 def test_schema_and_indexes(tmp_path):
@@ -50,8 +57,21 @@ def test_schema_migration_drops_legacy_symbol_ts_unique_index(tmp_path):
                 "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
                 (name,),
             ).fetchone()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(ticks);").fetchall()}
+        assert "recv_ts_ms" in columns
     finally:
         conn.close()
+
+
+def test_connect_sets_temp_store_memory(tmp_path):
+    store = SQLiteTickStore(tmp_path)
+    db_path = db_path_for_trading_day(tmp_path, "20240102")
+    conn = store._connect(db_path)  # noqa: SLF001
+    try:
+        temp_store = int(conn.execute("PRAGMA temp_store;").fetchone()[0])
+    finally:
+        conn.close()
+    assert temp_store == 2
 
 
 def _normalize_sql(value: str) -> str:

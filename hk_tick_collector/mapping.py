@@ -98,24 +98,29 @@ def parse_time_to_ts_ms(value: object, trading_day: Optional[str]) -> int:
     if value is None:
         raise ValueError("missing time value")
     if isinstance(value, (int, float)):
-        numeric = float(value)
-        if numeric > 1e12:
-            return _normalize_epoch_ms(int(numeric))
-        if numeric > 1e9:
-            return _normalize_epoch_ms(int(numeric * 1000))
-        return int(numeric)
+        numeric = int(float(value))
+        if numeric > 1_000_000_000_000:
+            return _normalize_epoch_ms(numeric)
+        if numeric > 1_000_000_000:
+            return _normalize_epoch_ms(numeric * 1000)
+        compact = _parse_compact_time_text(f"{numeric:06d}", trading_day)
+        if compact is not None:
+            return compact
+        return _normalize_epoch_ms(numeric * 1000)
 
     text = str(value).strip()
     if text.isdigit():
+        if len(text) < 6:
+            text = text.zfill(6)
         compact = _parse_compact_time_text(text, trading_day)
         if compact is not None:
             return compact
         numeric = int(text)
-        if numeric > 1e12:
+        if numeric > 1_000_000_000_000:
             return _normalize_epoch_ms(numeric)
-        if numeric > 1e9:
+        if numeric > 1_000_000_000:
             return _normalize_epoch_ms(numeric * 1000)
-        return numeric
+        return _normalize_epoch_ms(numeric * 1000)
 
     if any(token in text for token in ("-", "/", " ")):
         dt = _parse_datetime(text)
@@ -150,7 +155,7 @@ def ticker_df_to_rows(
         return []
 
     rows: List[TickRow] = []
-    inserted_at_ms = int(time.time() * 1000)
+    recv_ts_ms = int(time.time() * 1000)
 
     for _, series in df.iterrows():
         item = series.to_dict()
@@ -182,7 +187,8 @@ def ticker_df_to_rows(
                 push_type=push_type,
                 provider=provider,
                 trading_day=day,
-                inserted_at_ms=inserted_at_ms,
+                recv_ts_ms=recv_ts_ms,
+                inserted_at_ms=recv_ts_ms,
             )
         )
 
