@@ -1,5 +1,32 @@
 # Project Memory (Agents)
 
+## 2026-02-11: OSS + release readiness baseline
+
+### Scope
+
+- Documentation structure aligned for public GitHub use:
+  - `README.md`, `README.zh-CN.md`
+  - canonical docs + runbooks under `docs/`
+- Community health files and templates added:
+  - `LICENSE`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `CODEOWNERS`, `MAINTAINERS.md`
+  - `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`
+- Packaging/tooling/CI added:
+  - `pyproject.toml` (PEP 621 + console script)
+  - `.pre-commit-config.yaml`
+  - GitHub Actions CI and release workflows
+  - `CHANGELOG.md`
+- Ops examples added:
+  - `scripts/db_health_check.sh`, `scripts/query_examples.sql`, `scripts/export_csv.py`
+
+### Runtime safety
+
+- No default runtime behavior change.
+- Existing production entrypoint (`python -m hk_tick_collector.main`) intentionally unchanged.
+- New command `hk-tick-collector` is additive.
+- Timestamp semantics documented as:
+  - `ticks.ts_ms` UTC epoch ms
+  - `ticks.recv_ts_ms` UTC epoch ms
+
 ## 2026-02-11: doc/runbook baseline finalized
 
 ### Deliverables

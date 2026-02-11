@@ -1,5 +1,51 @@
 # Project Memory
 
+## 2026-02-11: OSS release hardening (docs/community/packaging/CI)
+
+### What changed
+
+- Repositioned repo for open-source onboarding:
+  - `README.md` (English, production-oriented quickstart + operations)
+  - `README.zh-CN.md` (Chinese quickstart)
+  - `docs/getting-started.md`
+  - `docs/troubleshooting.md`
+  - `docs/faq.md`
+- Added canonical docs layout and runbooks:
+  - `docs/deployment/systemd.md`
+  - `docs/deployment/docker.md`
+  - `docs/runbook/operations.md`
+  - `docs/runbook/incident-watchdog-stall.md`
+  - `docs/runbook/sqlite-wal.md`
+  - `docs/runbook/data-quality.md`
+  - `docs/releasing.md`
+- Kept old doc paths as compatibility pointers to avoid link breaks.
+- Added examples and operational helpers:
+  - `scripts/db_health_check.sh`
+  - `scripts/query_examples.sql`
+  - `scripts/export_csv.py`
+- Added OSS community hygiene files:
+  - `LICENSE`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `CODEOWNERS`, `MAINTAINERS.md`
+  - `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`
+- Added release-ready Python packaging/tooling:
+  - `pyproject.toml` (PEP 621 metadata + console script `hk-tick-collector`)
+  - `.pre-commit-config.yaml`
+  - `.github/workflows/ci.yml`
+  - `.github/workflows/release.yml`
+  - `CHANGELOG.md`
+- Added entrypoint and tests:
+  - `hk_tick_collector/__main__.py`
+  - `tests/test_entrypoint.py`
+  - watchdog fake-time regression test in `tests/test_futu_client.py`
+
+### Behavior compatibility statement
+
+- Default runtime behavior preserved:
+  - systemd `ExecStart=/opt/futu_tick_downloader/.venv/bin/python -m hk_tick_collector.main` remains valid.
+  - New `hk-tick-collector` command is additive alias only.
+- Timestamp semantics unchanged and explicitly documented:
+  - `ts_ms` / `recv_ts_ms` remain UTC epoch milliseconds.
+  - HK-local source timestamps remain interpreted as `Asia/Hong_Kong` then converted to UTC epoch.
+
 ## 2026-02-11: docs/runbook standardization + watchdog threshold fix
 
 ### What changed
