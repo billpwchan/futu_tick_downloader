@@ -118,7 +118,9 @@ class Config:
             persist_heartbeat_interval_sec=_get_env_float("PERSIST_HEARTBEAT_INTERVAL_SEC", 30.0),
             watchdog_queue_threshold_rows=_get_env_int("WATCHDOG_QUEUE_THRESHOLD_ROWS", 100),
             watchdog_recovery_max_failures=_get_env_int("WATCHDOG_RECOVERY_MAX_FAILURES", 3),
-            watchdog_recovery_join_timeout_sec=_get_env_float("WATCHDOG_RECOVERY_JOIN_TIMEOUT_SEC", 3.0),
+            watchdog_recovery_join_timeout_sec=_get_env_float(
+                "WATCHDOG_RECOVERY_JOIN_TIMEOUT_SEC", 3.0
+            ),
             sqlite_busy_timeout_ms=_get_env_int("SQLITE_BUSY_TIMEOUT_MS", 5000),
             sqlite_journal_mode=os.getenv("SQLITE_JOURNAL_MODE", "WAL"),
             sqlite_synchronous=os.getenv("SQLITE_SYNCHRONOUS", "NORMAL"),

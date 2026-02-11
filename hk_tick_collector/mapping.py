@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional
+from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -34,11 +34,7 @@ def normalize_trading_day(value: Optional[str]) -> Optional[str]:
 
 
 def trading_day_from_ts(ts_ms: int) -> str:
-    return (
-        datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC_TZ)
-        .astimezone(HK_TZ)
-        .strftime("%Y%m%d")
-    )
+    return datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC_TZ).astimezone(HK_TZ).strftime("%Y%m%d")
 
 
 def _parse_datetime(value: str) -> datetime:

@@ -6,6 +6,7 @@ import types
 import pytest
 
 if "futu" not in sys.modules:
+
     class _TickerHandlerBase:
         def on_recv_rsp(self, rsp_pb):
             return 0, rsp_pb
@@ -191,7 +192,9 @@ def test_poll_dedup_uses_accepted_not_seen_when_push_enqueue_fails():
         collector.accept = True
         row_old = make_row(10)
         row_new = make_row(11, ts_ms=1704161402000)
-        filtered, dropped_duplicate, dropped_filter = client._filter_polled_rows("HK.00700", [row_old, row_new])
+        filtered, dropped_duplicate, dropped_filter = client._filter_polled_rows(
+            "HK.00700", [row_old, row_new]
+        )
 
         assert [row.seq for row in filtered] == [11]
         assert dropped_duplicate == 1
@@ -424,6 +427,37 @@ def test_watchdog_honors_queue_threshold():
             queue_out_rows_per_min=0,
         )
         assert collector.recovery_calls == 0
+
+    asyncio.run(runner())
+
+
+def test_watchdog_uses_fake_monotonic_time_for_commit_stall_detection():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        client = FutuQuoteClient(
+            build_config(watchdog_stall_sec=30, watchdog_queue_threshold_rows=5),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+
+        fake_now = 10_000.0
+        client._last_upstream_active_at = fake_now
+        collector._runtime["last_dequeue_monotonic"] = fake_now - 80
+        collector._runtime["last_commit_monotonic"] = fake_now - 80
+        collector._runtime["worker_alive"] = True
+        collector.recovery_result = True
+
+        await client._check_watchdog(
+            now=fake_now,
+            queue_size=10,
+            queue_maxsize=100,
+            persisted_rows_per_min=0,
+            queue_in_rows_per_min=200,
+            queue_out_rows_per_min=0,
+        )
+        assert collector.recovery_calls == 1
 
     asyncio.run(runner())
 

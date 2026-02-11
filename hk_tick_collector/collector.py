@@ -9,7 +9,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
-from .db import PersistResult, SQLiteTickStore, SQLiteTickWriter, db_path_for_trading_day, is_sqlite_busy_or_locked
+from .db import (
+    PersistResult,
+    SQLiteTickStore,
+    SQLiteTickWriter,
+    db_path_for_trading_day,
+    is_sqlite_busy_or_locked,
+)
 from .models import TickRow
 
 logger = logging.getLogger(__name__)
@@ -90,7 +96,9 @@ class AsyncTickCollector:
         self._fatal_error = None
         with self._restart_lock:
             self._spawn_worker_locked(reason="startup")
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="tick-persist-heartbeat")
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(), name="tick-persist-heartbeat"
+        )
 
     async def stop(self, timeout_sec: float = 60.0, cancel_on_timeout: bool = False) -> None:
         self._stop_event.set()
@@ -121,7 +129,9 @@ class AsyncTickCollector:
         if self._fatal_error is not None:
             raise RuntimeError("persist worker terminated with fatal error") from self._fatal_error
 
-    def set_persist_observer(self, observer: Optional[Callable[[List[TickRow], PersistResult], None]]) -> None:
+    def set_persist_observer(
+        self, observer: Optional[Callable[[List[TickRow], PersistResult], None]]
+    ) -> None:
         self._persist_observer = observer
 
     def enqueue(self, rows: List[TickRow]) -> bool:
@@ -271,9 +281,8 @@ class AsyncTickCollector:
             while True:
                 now = time.monotonic()
                 should_stop = (
-                    (self._stop_event.is_set() and self._queue.empty() and not buffer)
-                    or (worker_stop_event.is_set() and not buffer)
-                )
+                    self._stop_event.is_set() and self._queue.empty() and not buffer
+                ) or (worker_stop_event.is_set() and not buffer)
                 if should_stop:
                     break
 
@@ -334,7 +343,11 @@ class AsyncTickCollector:
                 self._worker_alive = False
                 self._last_progress_at = time.monotonic()
 
-            if not self._stop_event.is_set() and not worker_stop_event.is_set() and self._fatal_error is None:
+            if (
+                not self._stop_event.is_set()
+                and not worker_stop_event.is_set()
+                and self._fatal_error is None
+            ):
                 self._fatal_error = RuntimeError("persist worker exited unexpectedly")
                 logger.error(
                     "persist_worker_exited_unexpectedly queue=%s/%s",
@@ -370,7 +383,9 @@ class AsyncTickCollector:
         *,
         worker_stop_event: threading.Event,
     ) -> None:
-        db_path = db_path_for_trading_day(Path(getattr(self._store, "_data_root", ".")), trading_day)
+        db_path = db_path_for_trading_day(
+            Path(getattr(self._store, "_data_root", ".")), trading_day
+        )
         last_seq = max((row.seq for row in rows if row.seq is not None), default=None)
         attempt = 0
 
@@ -433,7 +448,10 @@ class AsyncTickCollector:
                         last_seq if last_seq is not None else "none",
                     )
 
-                if self._persist_retry_max_attempts > 0 and attempt >= self._persist_retry_max_attempts:
+                if (
+                    self._persist_retry_max_attempts > 0
+                    and attempt >= self._persist_retry_max_attempts
+                ):
                     logger.error(
                         "persist_retry_budget_exhausted trading_day=%s batch=%s attempts=%s "
                         "queue=%s/%s continuing_with_backoff",
@@ -537,7 +555,9 @@ class AsyncTickCollector:
             commit_latency_ms=0,
         )
 
-    def _record_exception(self, exc: BaseException, *, backoff_sec: float, is_busy_locked: bool) -> None:
+    def _record_exception(
+        self, exc: BaseException, *, backoff_sec: float, is_busy_locked: bool
+    ) -> None:
         now = time.monotonic()
         with self._state_lock:
             exc_type = type(exc).__name__

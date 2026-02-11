@@ -61,7 +61,9 @@ def test_smoke_async_collector_persists_rows(tmp_path):
         conn = sqlite3.connect(db_path)
         try:
             total = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
-            latest = conn.execute("SELECT symbol, MAX(seq) FROM ticks GROUP BY symbol ORDER BY symbol").fetchall()
+            latest = conn.execute(
+                "SELECT symbol, MAX(seq) FROM ticks GROUP BY symbol ORDER BY symbol"
+            ).fetchall()
         finally:
             conn.close()
 

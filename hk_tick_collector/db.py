@@ -164,7 +164,11 @@ def _drop_legacy_unique_indexes(conn: sqlite3.Connection) -> None:
             continue
         columns = _index_columns(conn, index_name)
         if columns[:2] == ["symbol", "ts_ms"] and "seq" not in columns:
-            logger.warning("schema_migration dropping_legacy_unique_index index=%s columns=%s", index_name, columns)
+            logger.warning(
+                "schema_migration dropping_legacy_unique_index index=%s columns=%s",
+                index_name,
+                columns,
+            )
             escaped = index_name.replace('"', '""')
             try:
                 conn.execute(f'DROP INDEX IF EXISTS "{escaped}";')

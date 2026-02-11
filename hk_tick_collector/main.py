@@ -51,7 +51,9 @@ async def run() -> None:
     trading_day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
     await asyncio.to_thread(store.ensure_db, trading_day)
     seed_days = [trading_day]
-    recent_days = await asyncio.to_thread(store.list_recent_trading_days, config.seed_recent_db_days)
+    recent_days = await asyncio.to_thread(
+        store.list_recent_trading_days, config.seed_recent_db_days
+    )
     for day in recent_days:
         if day not in seed_days:
             seed_days.append(day)
@@ -125,7 +127,9 @@ async def run() -> None:
         raise RuntimeError("collector flush timed out during shutdown") from exc
 
     if fatal_error is not None:
-        raise RuntimeError("collector terminated because of fatal background failure") from fatal_error
+        raise RuntimeError(
+            "collector terminated because of fatal background failure"
+        ) from fatal_error
 
 
 def main() -> None:

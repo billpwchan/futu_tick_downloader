@@ -30,9 +30,13 @@ def main() -> int:
         description="Validate ticks.ts_ms as UTC epoch ms by checking max(ts_ms)-now_utc drift.",
     )
     parser.add_argument("--db", help="path to sqlite db file")
-    parser.add_argument("--data-root", default="/data/sqlite/HK", help="sqlite directory, default /data/sqlite/HK")
+    parser.add_argument(
+        "--data-root", default="/data/sqlite/HK", help="sqlite directory, default /data/sqlite/HK"
+    )
     parser.add_argument("--day", help="HK trading day (YYYYMMDD), default today in Asia/Hong_Kong")
-    parser.add_argument("--tolerance-sec", type=float, default=5.0, help="absolute drift tolerance in seconds")
+    parser.add_argument(
+        "--tolerance-sec", type=float, default=5.0, help="absolute drift tolerance in seconds"
+    )
     args = parser.parse_args()
 
     db_path = _resolve_db_path(args)
@@ -61,13 +65,9 @@ def main() -> int:
         print("status=FAIL reason=no_rows")
         return 1
     if abs(max_minus_now_sec) > float(args.tolerance_sec):
-        print(
-            f"status=FAIL reason=ts_drift_exceeded tolerance_sec={float(args.tolerance_sec):.3f}"
-        )
+        print(f"status=FAIL reason=ts_drift_exceeded tolerance_sec={float(args.tolerance_sec):.3f}")
         return 1
-    print(
-        f"status=PASS tolerance_sec={float(args.tolerance_sec):.3f}"
-    )
+    print(f"status=PASS tolerance_sec={float(args.tolerance_sec):.3f}")
     return 0
 
 

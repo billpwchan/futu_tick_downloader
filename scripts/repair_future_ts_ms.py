@@ -17,7 +17,9 @@ def _utc_iso(ts_ms: int | None) -> str:
     return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat()
 
 
-def _iter_target_dbs(data_root: Path, days: list[str], db_paths: list[Path], all_days: bool) -> Iterable[Path]:
+def _iter_target_dbs(
+    data_root: Path, days: list[str], db_paths: list[Path], all_days: bool
+) -> Iterable[Path]:
     yielded: set[Path] = set()
     for path in db_paths:
         resolved = path.resolve()
@@ -143,8 +145,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Repair clearly-future ticks.ts_ms values (default: subtract 8 hours)."
     )
-    parser.add_argument("--data-root", default="/data/sqlite/HK", help="SQLite directory, default /data/sqlite/HK")
-    parser.add_argument("--day", action="append", default=[], help="Trading day YYYYMMDD (repeatable)")
+    parser.add_argument(
+        "--data-root", default="/data/sqlite/HK", help="SQLite directory, default /data/sqlite/HK"
+    )
+    parser.add_argument(
+        "--day", action="append", default=[], help="Trading day YYYYMMDD (repeatable)"
+    )
     parser.add_argument("--db", action="append", default=[], help="Explicit DB path (repeatable)")
     parser.add_argument("--all-days", action="store_true", help="Scan all *.db under data root")
     parser.add_argument(
@@ -159,7 +165,9 @@ def _parse_args() -> argparse.Namespace:
         default=8.0,
         help="Subtract this many hours from future ts_ms rows (default 8)",
     )
-    parser.add_argument("--sample-size", type=int, default=5, help="Sample rows before/after (default 5)")
+    parser.add_argument(
+        "--sample-size", type=int, default=5, help="Sample rows before/after (default 5)"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Only print plan/samples, no UPDATE")
     return parser.parse_args()
 

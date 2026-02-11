@@ -149,7 +149,9 @@ def test_sqlite_busy_backoff_and_recovery(tmp_path):
 
         conn = sqlite3.connect(db_path_for_trading_day(tmp_path, trading_day))
         try:
-            inserted = conn.execute("SELECT COUNT(1) FROM ticks WHERE symbol = ? AND seq = 1", ("HK.00700",)).fetchone()[0]
+            inserted = conn.execute(
+                "SELECT COUNT(1) FROM ticks WHERE symbol = ? AND seq = 1", ("HK.00700",)
+            ).fetchone()[0]
         finally:
             conn.close()
         assert inserted == 1
@@ -207,7 +209,9 @@ def test_writer_recovery_while_sqlite_temporarily_locked(tmp_path):
 
         conn = sqlite3.connect(db_path_for_trading_day(tmp_path, trading_day))
         try:
-            inserted = conn.execute("SELECT COUNT(1) FROM ticks WHERE symbol = ?", ("HK.00700",)).fetchone()[0]
+            inserted = conn.execute(
+                "SELECT COUNT(1) FROM ticks WHERE symbol = ?", ("HK.00700",)
+            ).fetchone()[0]
         finally:
             conn.close()
         assert inserted >= 100

@@ -27,7 +27,9 @@ WATCHDOG_EXIT_CODE = 1
 
 
 class FutuTickerHandler(TickerHandlerBase):
-    def __init__(self, on_rows: Callable[[List[TickRow]], None], loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self, on_rows: Callable[[List[TickRow]], None], loop: asyncio.AbstractEventLoop
+    ) -> None:
         super().__init__()
         self._on_rows = on_rows
         self._loop = loop
@@ -99,7 +101,9 @@ class FutuQuoteClient:
         self._watchdog_dumped = False
 
     async def run_forever(self) -> None:
-        backoff = ExponentialBackoff(self._config.reconnect_min_delay, self._config.reconnect_max_delay)
+        backoff = ExponentialBackoff(
+            self._config.reconnect_min_delay, self._config.reconnect_max_delay
+        )
         try:
             while not self._stop_event.is_set():
                 poll_task: asyncio.Task | None = None
@@ -174,7 +178,9 @@ class FutuQuoteClient:
         self._ctx = self._context_factory(host=self._config.futu_host, port=self._config.futu_port)
         self._ctx.set_handler(self._handler)
 
-        logger.info("futu_connecting host=%s port=%s", self._config.futu_host, self._config.futu_port)
+        logger.info(
+            "futu_connecting host=%s port=%s", self._config.futu_host, self._config.futu_port
+        )
         ret, data = self._ctx.subscribe(
             self._config.symbols,
             [SubType.TICKER],
@@ -186,7 +192,9 @@ class FutuQuoteClient:
             raise RuntimeError(f"subscribe failed: {data}")
 
         self._connected = True
-        logger.info("futu_connected host=%s port=%s", self._config.futu_host, self._config.futu_port)
+        logger.info(
+            "futu_connected host=%s port=%s", self._config.futu_host, self._config.futu_port
+        )
 
         if self._config.backfill_n > 0:
             await self._backfill_recent()
@@ -265,7 +273,9 @@ class FutuQuoteClient:
                     enqueued, accepted_max = 0, {}
 
                 for accepted_symbol, accepted_last_seq in accepted_max.items():
-                    self._update_seq_max(self._last_accepted_seq, accepted_symbol, accepted_last_seq)
+                    self._update_seq_max(
+                        self._last_accepted_seq, accepted_symbol, accepted_last_seq
+                    )
 
                 dropped_queue_full = max(0, accepted - enqueued)
                 self._poll_enqueued_since_report += enqueued
@@ -401,12 +411,16 @@ class FutuQuoteClient:
             if ret != RET_OK:
                 logger.warning("backfill failed for %s: %s", symbol, data)
                 continue
-            rows = ticker_df_to_rows(data, provider="futu", push_type="backfill", default_symbol=symbol)
+            rows = ticker_df_to_rows(
+                data, provider="futu", push_type="backfill", default_symbol=symbol
+            )
             self._record_seen_rows(rows, source="backfill")
             if rows:
                 accepted, accepted_max = self._handle_rows(rows, source="backfill")
                 for accepted_symbol, accepted_last_seq in accepted_max.items():
-                    self._update_seq_max(self._last_accepted_seq, accepted_symbol, accepted_last_seq)
+                    self._update_seq_max(
+                        self._last_accepted_seq, accepted_symbol, accepted_last_seq
+                    )
                 logger.info(
                     "backfill_stats symbol=%s fetched=%s enqueued=%s queue_size=%s queue_maxsize=%s",
                     symbol,
@@ -416,7 +430,9 @@ class FutuQuoteClient:
                     self._collector.queue_maxsize(),
                 )
 
-    def _filter_polled_rows(self, symbol: str, rows: Sequence[TickRow]) -> tuple[List[TickRow], int, int]:
+    def _filter_polled_rows(
+        self, symbol: str, rows: Sequence[TickRow]
+    ) -> tuple[List[TickRow], int, int]:
         if not rows:
             return [], 0, 0
 
@@ -504,8 +520,12 @@ class FutuQuoteClient:
         for row in rows:
             symbol = row.symbol
             self._last_tick_seen_at[symbol] = now
-            self._last_ts_ms_by_symbol[symbol] = max(self._last_ts_ms_by_symbol.get(symbol, row.ts_ms), row.ts_ms)
-            self._max_ts_ms_seen = row.ts_ms if self._max_ts_ms_seen is None else max(self._max_ts_ms_seen, row.ts_ms)
+            self._last_ts_ms_by_symbol[symbol] = max(
+                self._last_ts_ms_by_symbol.get(symbol, row.ts_ms), row.ts_ms
+            )
+            self._max_ts_ms_seen = (
+                row.ts_ms if self._max_ts_ms_seen is None else max(self._max_ts_ms_seen, row.ts_ms)
+            )
             if source == "push":
                 self._last_push_at[symbol] = now
             if row.seq is not None:
@@ -539,7 +559,9 @@ class FutuQuoteClient:
         self._watchdog_last_queue_size = queue_size
         self._watchdog_last_check_at = now
 
-        poll_active = self._poll_fetched_since_report > 0 and self._poll_seq_advanced_since_report > 0
+        poll_active = (
+            self._poll_fetched_since_report > 0 and self._poll_seq_advanced_since_report > 0
+        )
         recent_upstream = (
             self._last_upstream_active_at is not None
             and (now - self._last_upstream_active_at) <= self._config.watchdog_upstream_window_sec
@@ -557,11 +579,13 @@ class FutuQuoteClient:
         last_commit = runtime.get("last_commit_monotonic")
         last_exception = runtime.get("last_exception_monotonic")
 
-        dequeue_age_sec = (now - float(last_dequeue)) if last_dequeue is not None else (now - self._started_at)
-        commit_age_sec = (now - float(last_commit)) if last_commit is not None else (now - self._started_at)
-        exception_age_sec = (
-            (now - float(last_exception)) if last_exception is not None else None
+        dequeue_age_sec = (
+            (now - float(last_dequeue)) if last_dequeue is not None else (now - self._started_at)
         )
+        commit_age_sec = (
+            (now - float(last_commit)) if last_commit is not None else (now - self._started_at)
+        )
+        exception_age_sec = (now - float(last_exception)) if last_exception is not None else None
         queue_threshold = max(1, int(self._config.watchdog_queue_threshold_rows))
 
         if queue_size < queue_threshold:
