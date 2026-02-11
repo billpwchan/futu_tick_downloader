@@ -1,0 +1,12 @@
+# Default owners
+* @billpwchan
+
+# Python runtime
+/hk_tick_collector/ @billpwchan
+
+# Ops and deployment
+/deploy/ @billpwchan
+/scripts/ @billpwchan
+
+# Docs
+/docs/ @billpwchan

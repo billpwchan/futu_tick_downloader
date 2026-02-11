@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an improvement for hk-tick-collector
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What production or developer pain does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should change?
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Backward compatibility
+      description: Any runtime behavior changes? Default-safe path?
+      placeholder: No behavior change by default / additive only
+    validations:
+      required: true
+
+  - type: textarea
+    id: ops
+    attributes:
+      label: Operational impact
+      description: Effects on systemd deployment, logs, runbooks, or troubleshooting.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

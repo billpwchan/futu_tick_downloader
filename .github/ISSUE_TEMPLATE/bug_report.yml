@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a reproducible problem in hk-tick-collector
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please redact secrets from logs and env values.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened and what did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Step-by-step commands/config used.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: Ubuntu 22.04
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: 3.11.8
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Redacted env config
+      description: Include relevant `.env` keys only (remove secrets).
+      placeholder: |
+        FUTU_HOST=127.0.0.1
+        FUTU_PORT=11111
+        FUTU_SYMBOLS=HK.00700
+        DATA_ROOT=/data/sqlite/HK
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Recent logs (journalctl snippet)
+      description: Include output from the last 10-30 minutes.
+      placeholder: sudo journalctl -u hk-tick-collector --since "30 minutes ago" --no-pager
+    validations:
+      required: true
+
+  - type: textarea
+    id: db
+    attributes:
+      label: DB diagnostics
+      description: Include DB size and PRAGMA outputs.
+      placeholder: |
+        sqlite3 "file:/data/sqlite/HK/20260211.db?mode=ro" "PRAGMA journal_mode; PRAGMA synchronous; PRAGMA wal_autocheckpoint;"
+        ls -lh /data/sqlite/HK/20260211.db*
+    validations:
+      required: true

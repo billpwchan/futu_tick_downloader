@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support Questions
+    url: https://github.com/billpwchan/futu_tick_downloader/discussions
+    about: Ask usage and troubleshooting questions here.
+  - name: Security Reports
+    url: mailto:security@hk-tick-collector.example.com
+    about: Report vulnerabilities privately.
