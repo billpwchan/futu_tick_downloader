@@ -15,6 +15,10 @@ from .models import TickRow
 logger = logging.getLogger(__name__)
 
 
+class _WorkerRestartRequested(RuntimeError):
+    pass
+
+
 class AsyncTickCollector:
     def __init__(
         self,
@@ -25,7 +29,7 @@ class AsyncTickCollector:
         persist_retry_max_attempts: int = 0,
         persist_retry_backoff_sec: float = 0.05,
         persist_retry_backoff_max_sec: float = 2.0,
-        heartbeat_interval_sec: float = 15.0,
+        heartbeat_interval_sec: float = 30.0,
     ) -> None:
         self._store = store
         self._batch_size = max(1, batch_size)
@@ -44,6 +48,9 @@ class AsyncTickCollector:
         self._fatal_error: BaseException | None = None
 
         self._worker: threading.Thread | None = None
+        self._worker_stop_event: threading.Event | None = None
+        self._worker_generation = 0
+        self._restart_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._persist_observer: Optional[Callable[[List[TickRow], PersistResult], None]] = None
@@ -61,9 +68,15 @@ class AsyncTickCollector:
         self._last_progress_at: float | None = None
         self._last_drain_at: float | None = None
         self._last_commit_at: float | None = None
+        self._last_dequeue_monotonic: float | None = None
+        self._last_commit_monotonic: float | None = None
+        self._last_commit_rows = 0
         self._last_exception_type = "none"
         self._last_exception_count = 0
         self._last_exception_at: float | None = None
+        self._last_exception_monotonic: float | None = None
+        self._last_recovery_monotonic: float | None = None
+        self._recovery_count = 0
         self._busy_locked_count = 0
         self._busy_backoff_count = 0
         self._last_backoff_sec = 0.0
@@ -75,12 +88,15 @@ class AsyncTickCollector:
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
         self._fatal_error = None
-        self._worker = threading.Thread(target=self._worker_loop, name="tick-persist-worker", daemon=True)
-        self._worker.start()
+        with self._restart_lock:
+            self._spawn_worker_locked(reason="startup")
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="tick-persist-heartbeat")
 
     async def stop(self, timeout_sec: float = 60.0, cancel_on_timeout: bool = False) -> None:
         self._stop_event.set()
+        worker_stop_event = self._worker_stop_event
+        if worker_stop_event is not None:
+            worker_stop_event.set()
 
         worker = self._worker
         if worker is not None:
@@ -95,6 +111,7 @@ class AsyncTickCollector:
                 )
                 raise asyncio.TimeoutError("persist worker thread did not stop within timeout")
             self._worker = None
+            self._worker_stop_event = None
 
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
@@ -153,9 +170,15 @@ class AsyncTickCollector:
                 "last_progress_at": self._last_progress_at,
                 "last_drain_at": self._last_drain_at,
                 "last_commit_at": self._last_commit_at,
+                "last_dequeue_monotonic": self._last_dequeue_monotonic,
+                "last_commit_monotonic": self._last_commit_monotonic,
+                "last_commit_rows": self._last_commit_rows,
                 "last_exception_type": self._last_exception_type,
                 "last_exception_count": self._last_exception_count,
                 "last_exception_at": self._last_exception_at,
+                "last_exception_monotonic": self._last_exception_monotonic,
+                "last_recovery_monotonic": self._last_recovery_monotonic,
+                "recovery_count": self._recovery_count,
                 "busy_locked_count": self._busy_locked_count,
                 "busy_backoff_count": self._busy_backoff_count,
                 "last_backoff_sec": self._last_backoff_sec,
@@ -164,13 +187,78 @@ class AsyncTickCollector:
                 "total_commits": self._total_commits,
             }
 
+    def request_writer_recovery(self, reason: str, join_timeout_sec: float = 3.0) -> bool:
+        if self._stop_event.is_set():
+            return False
+
+        wait_sec = max(0.1, float(join_timeout_sec))
+        with self._restart_lock:
+            worker = self._worker
+            worker_stop_event = self._worker_stop_event
+
+            if worker is not None and worker.is_alive() and worker_stop_event is not None:
+                logger.warning(
+                    "persist_recovery_request reason=%s queue=%s/%s generation=%s",
+                    reason,
+                    self._queue.qsize(),
+                    self._queue.maxsize,
+                    self._worker_generation,
+                )
+                worker_stop_event.set()
+                worker.join(wait_sec)
+                if worker.is_alive():
+                    logger.error(
+                        "persist_recovery_failed reason=%s queue=%s/%s generation=%s",
+                        reason,
+                        self._queue.qsize(),
+                        self._queue.maxsize,
+                        self._worker_generation,
+                    )
+                    return False
+
+            self._fatal_error = None
+            self._spawn_worker_locked(reason=f"recovery:{reason}")
+            now = time.monotonic()
+            with self._state_lock:
+                self._last_recovery_monotonic = now
+                self._recovery_count += 1
+                self._last_progress_at = now
+            logger.warning(
+                "persist_recovery_success reason=%s queue=%s/%s generation=%s",
+                reason,
+                self._queue.qsize(),
+                self._queue.maxsize,
+                self._worker_generation,
+            )
+            return True
+
     def fatal_error(self) -> BaseException | None:
         return self._fatal_error
 
     async def wait_fatal(self) -> None:
         await self._fatal_event.wait()
 
-    def _worker_loop(self) -> None:
+    def _spawn_worker_locked(self, *, reason: str) -> None:
+        self._worker_generation += 1
+        worker_stop_event = threading.Event()
+        worker = threading.Thread(
+            target=self._worker_loop,
+            args=(worker_stop_event, self._worker_generation),
+            name=f"tick-persist-worker-{self._worker_generation}",
+            daemon=True,
+        )
+        self._worker_stop_event = worker_stop_event
+        self._worker = worker
+        worker.start()
+        logger.info(
+            "persist_worker_started reason=%s generation=%s queue=%s/%s",
+            reason,
+            self._worker_generation,
+            self._queue.qsize(),
+            self._queue.maxsize,
+        )
+
+    def _worker_loop(self, worker_stop_event: threading.Event, generation: int) -> None:
         writer = self._store.open_writer()
         buffer: List[TickRow] = []
         last_flush = time.monotonic()
@@ -182,31 +270,38 @@ class AsyncTickCollector:
         try:
             while True:
                 now = time.monotonic()
-                should_stop = self._stop_event.is_set() and self._queue.empty() and not buffer
+                should_stop = (
+                    (self._stop_event.is_set() and self._queue.empty() and not buffer)
+                    or (worker_stop_event.is_set() and not buffer)
+                )
                 if should_stop:
                     break
 
-                timeout = min(0.25, max(0.01, self._max_wait))
-                try:
-                    batch = self._queue.get(timeout=timeout)
-                    if batch:
-                        buffer.extend(batch)
-                        with self._state_lock:
-                            self._queue_out_since_report += len(batch)
-                            self._total_rows_dequeued += len(batch)
-                            self._last_drain_at = time.monotonic()
-                            self._last_progress_at = self._last_drain_at
-                except queue.Empty:
-                    pass
+                if not worker_stop_event.is_set():
+                    timeout = min(0.25, max(0.01, self._max_wait))
+                    try:
+                        batch = self._queue.get(timeout=timeout)
+                        if batch:
+                            buffer.extend(batch)
+                            now = time.monotonic()
+                            with self._state_lock:
+                                self._queue_out_since_report += len(batch)
+                                self._total_rows_dequeued += len(batch)
+                                self._last_drain_at = now
+                                self._last_dequeue_monotonic = now
+                                self._last_progress_at = now
+                    except queue.Empty:
+                        pass
 
                 now = time.monotonic()
                 should_flush = bool(buffer) and (
                     len(buffer) >= self._batch_size
                     or (now - last_flush) >= self._max_wait
                     or (self._stop_event.is_set() and self._queue.empty())
+                    or worker_stop_event.is_set()
                 )
                 if should_flush:
-                    self._flush_buffer(writer, buffer)
+                    self._flush_buffer(writer, buffer, worker_stop_event=worker_stop_event)
                     buffer = []
                     last_flush = time.monotonic()
 
@@ -214,14 +309,23 @@ class AsyncTickCollector:
                     self._last_progress_at = time.monotonic()
 
             if buffer:
-                self._flush_buffer(writer, buffer)
+                self._flush_buffer(writer, buffer, worker_stop_event=worker_stop_event)
+        except _WorkerRestartRequested:
+            self._requeue_rows(buffer)
+            logger.warning(
+                "persist_worker_restart_requested queue=%s/%s generation=%s",
+                self._queue.qsize(),
+                self._queue.maxsize,
+                generation,
+            )
         except Exception as exc:
             self._fatal_error = exc
             self._record_exception(exc, backoff_sec=0.0, is_busy_locked=False)
-            logger.exception(
+            logger.error(
                 "persist_worker_fatal queue=%s/%s",
                 self._queue.qsize(),
                 self._queue.maxsize,
+                exc_info=True,
             )
             self._signal_fatal()
         finally:
@@ -230,7 +334,7 @@ class AsyncTickCollector:
                 self._worker_alive = False
                 self._last_progress_at = time.monotonic()
 
-            if not self._stop_event.is_set() and self._fatal_error is None:
+            if not self._stop_event.is_set() and not worker_stop_event.is_set() and self._fatal_error is None:
                 self._fatal_error = RuntimeError("persist worker exited unexpectedly")
                 logger.error(
                     "persist_worker_exited_unexpectedly queue=%s/%s",
@@ -239,20 +343,41 @@ class AsyncTickCollector:
                 )
                 self._signal_fatal()
 
-    def _flush_buffer(self, writer: SQLiteTickWriter, rows: Iterable[TickRow]) -> None:
+    def _flush_buffer(
+        self,
+        writer: SQLiteTickWriter,
+        rows: Iterable[TickRow],
+        *,
+        worker_stop_event: threading.Event,
+    ) -> None:
         grouped: dict[str, List[TickRow]] = defaultdict(list)
         for row in rows:
             grouped[row.trading_day].append(row)
 
         for trading_day, day_rows in grouped.items():
-            self._flush_day_rows_with_retry(writer, trading_day, day_rows)
+            self._flush_day_rows_with_retry(
+                writer,
+                trading_day,
+                day_rows,
+                worker_stop_event=worker_stop_event,
+            )
 
-    def _flush_day_rows_with_retry(self, writer: SQLiteTickWriter, trading_day: str, rows: List[TickRow]) -> None:
+    def _flush_day_rows_with_retry(
+        self,
+        writer: SQLiteTickWriter,
+        trading_day: str,
+        rows: List[TickRow],
+        *,
+        worker_stop_event: threading.Event,
+    ) -> None:
         db_path = db_path_for_trading_day(Path(getattr(self._store, "_data_root", ".")), trading_day)
         last_seq = max((row.seq for row in rows if row.seq is not None), default=None)
         attempt = 0
 
         while True:
+            if worker_stop_event.is_set() and not self._stop_event.is_set():
+                raise _WorkerRestartRequested("writer recovery requested")
+
             attempt += 1
             with self._state_lock:
                 self._last_progress_at = time.monotonic()
@@ -268,6 +393,8 @@ class AsyncTickCollector:
                     self._total_rows_committed += persist_result.inserted
                     self._total_commits += 1
                     self._last_commit_at = now
+                    self._last_commit_monotonic = now
+                    self._last_commit_rows = persist_result.inserted
                     self._last_progress_at = now
                 self._notify_observer(rows, persist_result)
                 return
@@ -278,6 +405,7 @@ class AsyncTickCollector:
                     self._persist_retry_backoff_max_sec,
                 )
                 self._record_exception(exc, backoff_sec=backoff_sec, is_busy_locked=is_busy_locked)
+                writer.reset_connection(trading_day)
 
                 if is_busy_locked:
                     logger.warning(
@@ -291,9 +419,10 @@ class AsyncTickCollector:
                         self._queue.qsize(),
                         self._queue.maxsize,
                         last_seq if last_seq is not None else "none",
+                        exc_info=True,
                     )
                 else:
-                    logger.exception(
+                    logger.error(
                         "persist_flush_failed trading_day=%s db_path=%s batch=%s attempt=%s "
                         "queue=%s/%s last_seq=%s",
                         trading_day,
@@ -303,8 +432,8 @@ class AsyncTickCollector:
                         self._queue.qsize(),
                         self._queue.maxsize,
                         last_seq if last_seq is not None else "none",
+                        exc_info=True,
                     )
-                    writer.reset_connection(trading_day)
 
                 if self._persist_retry_max_attempts > 0 and attempt >= self._persist_retry_max_attempts:
                     logger.error(
@@ -318,6 +447,8 @@ class AsyncTickCollector:
                     )
                     attempt = 0
 
+                if worker_stop_event.is_set() and not self._stop_event.is_set():
+                    raise _WorkerRestartRequested("writer recovery requested") from exc
                 self._sleep_backoff(backoff_sec)
 
     def _notify_observer(self, rows: List[TickRow], result: PersistResult) -> None:
@@ -361,12 +492,13 @@ class AsyncTickCollector:
             last_commit_at = runtime["last_commit_at"]
             drain_age = None if last_drain_at is None else max(0.0, now - float(last_drain_at))
             commit_age = None if last_commit_at is None else max(0.0, now - float(last_commit_at))
+            wal_size_bytes = self._wal_size_bytes()
 
             logger.info(
                 "persist_loop_heartbeat worker_alive=%s queue=%s/%s drain_rate_rows_per_sec=%.2f "
                 "commit_rate_rows_per_sec=%.2f last_drain_ts_age_sec=%s last_commit_ts_age_sec=%s "
                 "last_exception_type=%s last_exception_count=%s busy_locked_count=%s "
-                "busy_backoff_count=%s last_backoff_sec=%.3f",
+                "busy_backoff_count=%s last_backoff_sec=%.3f last_commit_rows=%s wal_bytes=%s recovery_count=%s",
                 runtime["worker_alive"],
                 self._queue.qsize(),
                 self._queue.maxsize,
@@ -379,6 +511,9 @@ class AsyncTickCollector:
                 runtime["busy_locked_count"],
                 runtime["busy_backoff_count"],
                 float(runtime["last_backoff_sec"]),
+                runtime["last_commit_rows"],
+                wal_size_bytes,
+                runtime["recovery_count"],
             )
 
             prev_dequeued = dequeued
@@ -414,11 +549,41 @@ class AsyncTickCollector:
                 self._last_exception_type = exc_type
                 self._last_exception_count = 1
             self._last_exception_at = now
+            self._last_exception_monotonic = now
             self._last_backoff_sec = backoff_sec
             self._last_progress_at = now
             if is_busy_locked:
                 self._busy_locked_count += 1
                 self._busy_backoff_count += 1
+
+    def _requeue_rows(self, rows: List[TickRow]) -> None:
+        if not rows:
+            return
+        payload = list(rows)
+        while not self._stop_event.is_set():
+            try:
+                self._queue.put(payload, timeout=0.1)
+                logger.warning(
+                    "persist_requeue_rows rows=%s queue=%s/%s",
+                    len(payload),
+                    self._queue.qsize(),
+                    self._queue.maxsize,
+                )
+                return
+            except queue.Full:
+                continue
+
+    def _wal_size_bytes(self) -> int:
+        data_root = Path(getattr(self._store, "_data_root", "."))
+        if not data_root.exists():
+            return 0
+        total = 0
+        for wal_path in data_root.glob("*.db-wal"):
+            try:
+                total += wal_path.stat().st_size
+            except OSError:
+                continue
+        return total
 
     def _sleep_backoff(self, delay_sec: float) -> None:
         if delay_sec <= 0:

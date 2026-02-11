@@ -363,3 +363,48 @@ class SQLiteTickStore:
             return {symbol: seq for symbol, seq in rows if seq is not None}
         finally:
             conn.close()
+
+    def list_recent_trading_days(self, limit: int = 3) -> list[str]:
+        capped = max(0, int(limit))
+        if capped == 0 or not self._data_root.exists():
+            return []
+
+        days: list[str] = []
+        for db_path in sorted(self._data_root.glob("*.db"), reverse=True):
+            trading_day = db_path.stem
+            if len(trading_day) != 8 or not trading_day.isdigit():
+                continue
+            days.append(trading_day)
+            if len(days) >= capped:
+                break
+        return days
+
+    def fetch_max_seq_by_symbol_recent(
+        self,
+        symbols: Sequence[str],
+        trading_days: Sequence[str] | None = None,
+        max_db_files: int = 3,
+    ) -> Dict[str, int]:
+        if not symbols:
+            return {}
+
+        ordered_days: list[str] = []
+        seen_days: set[str] = set()
+        if trading_days:
+            for value in trading_days:
+                day = str(value).strip()
+                if len(day) != 8 or not day.isdigit() or day in seen_days:
+                    continue
+                ordered_days.append(day)
+                seen_days.add(day)
+        else:
+            ordered_days.extend(self.list_recent_trading_days(limit=max_db_files))
+
+        result: Dict[str, int] = {}
+        for trading_day in ordered_days:
+            day_result = self.fetch_max_seq_by_symbol(trading_day, symbols)
+            for symbol, seq in day_result.items():
+                current = result.get(symbol)
+                if current is None or seq > current:
+                    result[symbol] = seq
+        return result

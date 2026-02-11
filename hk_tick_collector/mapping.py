@@ -13,6 +13,9 @@ from .models import TickRow
 logger = logging.getLogger(__name__)
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
 UTC_TZ = timezone.utc
+HK_OFFSET_MS = 8 * 3600 * 1000
+FUTURE_GUARD_MS = 2 * 3600 * 1000
+FUTURE_CORRECTION_TOLERANCE_MS = 30 * 60 * 1000
 
 
 def normalize_trading_day(value: Optional[str]) -> Optional[str]:
@@ -56,7 +59,39 @@ def _parse_datetime(value: str) -> datetime:
 def _to_utc_epoch_ms(dt: datetime, *, default_tz: ZoneInfo = HK_TZ) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=default_tz)
-    return int(dt.astimezone(UTC_TZ).timestamp() * 1000)
+    return _normalize_epoch_ms(int(dt.astimezone(UTC_TZ).timestamp() * 1000))
+
+
+def _normalize_epoch_ms(value: int) -> int:
+    ts_ms = int(value)
+    now_ms = int(time.time() * 1000)
+    if ts_ms <= now_ms + FUTURE_GUARD_MS:
+        return ts_ms
+
+    drift_ms = ts_ms - now_ms
+    if abs(drift_ms - HK_OFFSET_MS) <= FUTURE_CORRECTION_TOLERANCE_MS:
+        corrected = ts_ms - HK_OFFSET_MS
+        logger.warning(
+            "ts_ms_future_offset_corrected raw_ts_ms=%s corrected_ts_ms=%s drift_ms=%s",
+            ts_ms,
+            corrected,
+            drift_ms,
+        )
+        return corrected
+    return ts_ms
+
+
+def _parse_compact_time_text(text: str, trading_day: Optional[str]) -> int | None:
+    if len(text) == 6:
+        day = normalize_trading_day(trading_day)
+        if day is None:
+            day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
+        dt = datetime.strptime(f"{day} {text}", "%Y%m%d %H%M%S")
+        return _to_utc_epoch_ms(dt)
+    if len(text) == 14:
+        dt = datetime.strptime(text, "%Y%m%d%H%M%S")
+        return _to_utc_epoch_ms(dt)
+    return None
 
 
 def parse_time_to_ts_ms(value: object, trading_day: Optional[str]) -> int:
@@ -65,18 +100,21 @@ def parse_time_to_ts_ms(value: object, trading_day: Optional[str]) -> int:
     if isinstance(value, (int, float)):
         numeric = float(value)
         if numeric > 1e12:
-            return int(numeric)
+            return _normalize_epoch_ms(int(numeric))
         if numeric > 1e9:
-            return int(numeric * 1000)
+            return _normalize_epoch_ms(int(numeric * 1000))
         return int(numeric)
 
     text = str(value).strip()
     if text.isdigit():
+        compact = _parse_compact_time_text(text, trading_day)
+        if compact is not None:
+            return compact
         numeric = int(text)
         if numeric > 1e12:
-            return numeric
+            return _normalize_epoch_ms(numeric)
         if numeric > 1e9:
-            return numeric * 1000
+            return _normalize_epoch_ms(numeric * 1000)
         return numeric
 
     if any(token in text for token in ("-", "/", " ")):

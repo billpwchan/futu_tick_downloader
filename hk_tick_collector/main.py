@@ -50,15 +50,21 @@ async def run() -> None:
     )
     trading_day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
     await asyncio.to_thread(store.ensure_db, trading_day)
+    seed_days = [trading_day]
+    recent_days = await asyncio.to_thread(store.list_recent_trading_days, config.seed_recent_db_days)
+    for day in recent_days:
+        if day not in seed_days:
+            seed_days.append(day)
     initial_last_seq = await asyncio.to_thread(
-        store.fetch_max_seq_by_symbol,
-        trading_day,
+        store.fetch_max_seq_by_symbol_recent,
         config.symbols,
+        seed_days,
+        config.seed_recent_db_days,
     )
     if initial_last_seq:
-        logger.info("seed_last_seq trading_day=%s values=%s", trading_day, initial_last_seq)
+        logger.info("seed_last_seq seed_days=%s values=%s", ",".join(seed_days), initial_last_seq)
     else:
-        logger.info("seed_last_seq trading_day=%s values=none", trading_day)
+        logger.info("seed_last_seq seed_days=%s values=none", ",".join(seed_days))
 
     collector = AsyncTickCollector(
         store,

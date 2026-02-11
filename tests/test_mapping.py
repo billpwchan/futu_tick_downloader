@@ -54,6 +54,17 @@ def test_parse_time_to_ts_ms_cross_day_midnight():
     assert parse_time_to_ts_ms("00:05:00", "20240103") == _expected_ts_ms("20240103", "00:05:00")
 
 
+def test_parse_time_to_ts_ms_compact_hhmmss():
+    assert parse_time_to_ts_ms("093000", "20240102") == _expected_ts_ms("20240102", "09:30:00")
+
+
 def test_parse_time_to_ts_ms_with_timezone_string():
     value = "2024-01-02T01:30:00+00:00"
     assert parse_time_to_ts_ms(value, "20240102") == _expected_ts_ms("20240102", "09:30:00")
+
+
+def test_parse_time_to_ts_ms_corrects_obvious_future_plus_8h(monkeypatch):
+    expected = _expected_ts_ms("20240102", "09:30:00")
+    raw_future = expected + (8 * 3600 * 1000)
+    monkeypatch.setattr("hk_tick_collector.mapping.time.time", lambda: expected / 1000.0)
+    assert parse_time_to_ts_ms(raw_future, "20240102") == expected

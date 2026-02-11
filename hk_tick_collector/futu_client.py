@@ -94,6 +94,10 @@ class FutuQuoteClient:
         self._dropped_filter_since_report = 0
         self._watchdog_last_queue_size = 0
         self._watchdog_last_check_at = self._started_at
+        self._watchdog_backlog_since: float | None = None
+        self._watchdog_heal_failures = 0
+        self._watchdog_heal_attempts = 0
+        self._watchdog_last_heal_at: float | None = None
         self._watchdog_dumped = False
 
     async def run_forever(self) -> None:
@@ -354,7 +358,7 @@ class FutuQuoteClient:
                 " | ".join(parts),
             )
 
-            self._check_watchdog(
+            await self._check_watchdog(
                 now=now,
                 queue_size=queue_size,
                 queue_maxsize=queue_maxsize,
@@ -500,7 +504,7 @@ class FutuQuoteClient:
             self._poll_seq_advanced_since_report += 1
             self._last_upstream_active_at = self._loop.time()
 
-    def _check_watchdog(
+    async def _check_watchdog(
         self,
         *,
         now: float,
@@ -523,76 +527,150 @@ class FutuQuoteClient:
             self._last_upstream_active_at is not None
             and (now - self._last_upstream_active_at) <= self._config.watchdog_upstream_window_sec
         )
-        upstream_active = recent_upstream and (self._push_rows_since_report > 0 or poll_active)
+        upstream_active = recent_upstream and (
+            self._push_rows_since_report > 0
+            or poll_active
+            or queue_in_rows_per_min > 0
+            or queue_out_rows_per_min > 0
+        )
 
         runtime = self._collector.snapshot_runtime_state()
         worker_alive = bool(runtime.get("worker_alive", False))
-        last_progress_at = runtime.get("last_progress_at")
-        last_drain_at = runtime.get("last_drain_at")
-        progress_stall_sec = (
-            (now - float(last_progress_at)) if last_progress_at is not None else (now - self._started_at)
+        last_dequeue = runtime.get("last_dequeue_monotonic")
+        last_commit = runtime.get("last_commit_monotonic")
+        last_exception = runtime.get("last_exception_monotonic")
+
+        dequeue_age_sec = (now - float(last_dequeue)) if last_dequeue is not None else (now - self._started_at)
+        commit_age_sec = (now - float(last_commit)) if last_commit is not None else (now - self._started_at)
+        exception_age_sec = (
+            (now - float(last_exception)) if last_exception is not None else None
         )
-        drain_stall_sec = (now - float(last_drain_at)) if last_drain_at is not None else (now - self._started_at)
 
-        last_persist_at = self._collector.get_last_persist_at()
-        if last_persist_at is None:
-            last_persist_at = self._started_at
-        persist_stall_sec = now - last_persist_at
+        min_backlog = max(
+            int(self._config.watchdog_queue_threshold_rows),
+            max(10, max(1, int(queue_maxsize * 0.01))),
+        )
+        if queue_size >= min_backlog:
+            if self._watchdog_backlog_since is None:
+                self._watchdog_backlog_since = now
+        else:
+            self._watchdog_backlog_since = None
+            self._watchdog_heal_failures = 0
+            self._watchdog_dumped = False
+            return
 
-        if not upstream_active:
-            return
-        if queue_size <= 0:
-            return
-        if persisted_rows_per_min > 0 or queue_out_rows_per_min > 0:
-            return
-
-        min_backlog = max(10, max(1, int(queue_maxsize * 0.01)))
-        backlog_pressure = queue_size >= min_backlog
-        backlog_not_draining = queue_growth >= 0
-        progress_stalled = progress_stall_sec >= self._config.watchdog_stall_sec
-        commit_stalled = persist_stall_sec >= self._config.watchdog_stall_sec
-        drain_stalled = drain_stall_sec >= self._config.watchdog_stall_sec
+        backlog_age_sec = (
+            0.0 if self._watchdog_backlog_since is None else max(0.0, now - self._watchdog_backlog_since)
+        )
+        backlog_sustained = backlog_age_sec >= self._config.watchdog_stall_sec
 
         consumer_dead = not worker_alive
-        consumer_not_progressing = backlog_pressure and backlog_not_draining and (progress_stalled or drain_stalled)
-        if not (consumer_dead or (consumer_not_progressing and commit_stalled)):
+        dequeue_stalled = dequeue_age_sec >= self._config.watchdog_stall_sec
+        commit_stalled = commit_age_sec >= self._config.watchdog_stall_sec
+        consumer_stalled = dequeue_stalled or commit_stalled
+
+        if not upstream_active:
+            self._watchdog_dumped = False
+            return
+        if not backlog_sustained:
+            self._watchdog_dumped = False
+            return
+        if not (consumer_dead or consumer_stalled):
             return
 
         pipeline = self._collector.snapshot_pipeline_counters(reset=False)
         drift_sec = self._drift_sec()
         last_commit_age_sec = self._last_commit_age_sec(now)
-        reason = "worker_dead" if consumer_dead else "no_drain_progress"
+        reason = "worker_dead" if consumer_dead else "dequeue_or_commit_stalled"
 
-        self._dump_threads_before_exit(
-            reason=reason,
+        self._dump_threads_for_watchdog(
+            reason=f"{reason}_pre_recovery",
             now=now,
             queue_size=queue_size,
             queue_maxsize=queue_maxsize,
             queue_growth=queue_growth,
             check_elapsed_sec=check_elapsed_sec,
-            persist_stall_sec=persist_stall_sec,
-            progress_stall_sec=progress_stall_sec,
-            drain_stall_sec=drain_stall_sec,
+            backlog_age_sec=backlog_age_sec,
+            dequeue_age_sec=dequeue_age_sec,
+            commit_age_sec=commit_age_sec,
+            runtime=runtime,
+        )
+
+        self._watchdog_heal_attempts += 1
+        self._watchdog_last_heal_at = now
+        recovered = await asyncio.to_thread(
+            self._collector.request_writer_recovery,
+            f"watchdog_{reason}",
+            float(self._config.watchdog_recovery_join_timeout_sec),
+        )
+        if recovered:
+            self._watchdog_heal_failures = 0
+            logger.warning(
+                "WATCHDOG recovery_triggered reason=%s attempts=%s queue=%s/%s backlog_age_sec=%.1f "
+                "dequeue_age_sec=%.1f commit_age_sec=%.1f last_exception_age_sec=%s queue_growth=%s "
+                "check_elapsed_sec=%.1f worker_alive=%s",
+                reason,
+                self._watchdog_heal_attempts,
+                queue_size,
+                queue_maxsize,
+                backlog_age_sec,
+                dequeue_age_sec,
+                commit_age_sec,
+                f"{exception_age_sec:.1f}" if exception_age_sec is not None else "none",
+                queue_growth,
+                check_elapsed_sec,
+                worker_alive,
+            )
+            self._watchdog_dumped = False
+            return
+
+        self._watchdog_heal_failures += 1
+        logger.error(
+            "WATCHDOG recovery_failed reason=%s failures=%s max_failures=%s queue=%s/%s "
+            "backlog_age_sec=%.1f dequeue_age_sec=%.1f commit_age_sec=%.1f "
+            "last_exception_type=%s last_exception_count=%s",
+            reason,
+            self._watchdog_heal_failures,
+            self._config.watchdog_recovery_max_failures,
+            queue_size,
+            queue_maxsize,
+            backlog_age_sec,
+            dequeue_age_sec,
+            commit_age_sec,
+            runtime.get("last_exception_type"),
+            runtime.get("last_exception_count"),
+        )
+        if self._watchdog_heal_failures < self._config.watchdog_recovery_max_failures:
+            return
+
+        self._dump_threads_for_watchdog(
+            reason=f"{reason}_exit",
+            now=now,
+            queue_size=queue_size,
+            queue_maxsize=queue_maxsize,
+            queue_growth=queue_growth,
+            check_elapsed_sec=check_elapsed_sec,
+            backlog_age_sec=backlog_age_sec,
+            dequeue_age_sec=dequeue_age_sec,
+            commit_age_sec=commit_age_sec,
             runtime=runtime,
         )
         logger.error(
             "WATCHDOG persistent_stall reason=%s upstream_active=%s poll_active=%s "
-            "persist_stall_sec=%.1f progress_stall_sec=%.1f drain_stall_sec=%.1f "
-            "queue=%s/%s queue_growth=%s check_elapsed_sec=%.1f push_rows_per_min=%s "
-            "poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
-            "queue_in=%s queue_out=%s last_commit_monotonic_age_sec=%s db_write_rate=%s "
+            "queue=%s/%s queue_growth=%s backlog_age_sec=%.1f check_elapsed_sec=%.1f "
+            "push_rows_per_min=%s poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
+            "queue_in=%s queue_out=%s persisted_rows_per_min=%s "
+            "dequeue_age_sec=%.1f commit_age_sec=%.1f last_commit_monotonic_age_sec=%s "
             "worker_alive=%s last_exception_type=%s last_exception_count=%s "
             "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
-            "max_seq_lag=%s ts_drift_sec=%s",
+            "max_seq_lag=%s ts_drift_sec=%s recovery_failures=%s",
             reason,
             upstream_active,
             poll_active,
-            persist_stall_sec,
-            progress_stall_sec,
-            drain_stall_sec,
             queue_size,
             queue_maxsize,
             queue_growth,
+            backlog_age_sec,
             check_elapsed_sec,
             self._push_rows_since_report,
             self._poll_fetched_since_report,
@@ -600,8 +678,10 @@ class FutuQuoteClient:
             self._poll_enqueued_since_report,
             pipeline["queue_in_rows"],
             pipeline["queue_out_rows"],
+            persisted_rows_per_min,
+            dequeue_age_sec,
+            commit_age_sec,
             f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
-            pipeline["persisted_rows"],
             worker_alive,
             runtime.get("last_exception_type"),
             runtime.get("last_exception_count"),
@@ -610,10 +690,11 @@ class FutuQuoteClient:
             self._dropped_filter_since_report,
             self._max_seq_lag(),
             f"{drift_sec:.1f}" if drift_sec is not None else "none",
+            self._watchdog_heal_failures,
         )
         os._exit(WATCHDOG_EXIT_CODE)
 
-    def _dump_threads_before_exit(
+    def _dump_threads_for_watchdog(
         self,
         *,
         reason: str,
@@ -622,9 +703,9 @@ class FutuQuoteClient:
         queue_maxsize: int,
         queue_growth: int,
         check_elapsed_sec: float,
-        persist_stall_sec: float,
-        progress_stall_sec: float,
-        drain_stall_sec: float,
+        backlog_age_sec: float,
+        dequeue_age_sec: float,
+        commit_age_sec: float,
         runtime: Dict[str, object],
     ) -> None:
         if self._watchdog_dumped:
@@ -632,17 +713,17 @@ class FutuQuoteClient:
         self._watchdog_dumped = True
         logger.error(
             "WATCHDOG diagnostic_dump reason=%s now=%.1f queue=%s/%s queue_growth=%s "
-            "check_elapsed_sec=%.1f persist_stall_sec=%.1f progress_stall_sec=%.1f "
-            "drain_stall_sec=%.1f runtime=%s",
+            "check_elapsed_sec=%.1f backlog_age_sec=%.1f dequeue_age_sec=%.1f "
+            "commit_age_sec=%.1f runtime=%s",
             reason,
             now,
             queue_size,
             queue_maxsize,
             queue_growth,
             check_elapsed_sec,
-            persist_stall_sec,
-            progress_stall_sec,
-            drain_stall_sec,
+            backlog_age_sec,
+            dequeue_age_sec,
+            commit_age_sec,
             runtime,
         )
         try:

@@ -31,6 +31,8 @@ class DummyCollector:
         self.accept = accept
         self._queue_maxsize = queue_maxsize
         self._last_persist_at = None
+        self.recovery_calls = 0
+        self.recovery_result = True
         self._pipeline = {
             "persisted_rows": 0,
             "ignored_rows": 0,
@@ -43,9 +45,15 @@ class DummyCollector:
             "last_progress_at": 0.0,
             "last_drain_at": 0.0,
             "last_commit_at": None,
+            "last_dequeue_monotonic": None,
+            "last_commit_monotonic": None,
+            "last_commit_rows": 0,
             "last_exception_type": "none",
             "last_exception_count": 0,
             "last_exception_at": None,
+            "last_exception_monotonic": None,
+            "last_recovery_monotonic": None,
+            "recovery_count": 0,
             "busy_locked_count": 0,
             "busy_backoff_count": 0,
             "last_backoff_sec": 0.0,
@@ -80,6 +88,10 @@ class DummyCollector:
     def snapshot_runtime_state(self):
         return dict(self._runtime)
 
+    def request_writer_recovery(self, reason: str, join_timeout_sec: float = 3.0) -> bool:
+        self.recovery_calls += 1
+        return self.recovery_result
+
 
 def build_config(**overrides) -> Config:
     data = dict(
@@ -101,10 +113,14 @@ def build_config(**overrides) -> Config:
         watchdog_upstream_window_sec=60,
         drift_warn_sec=120,
         stop_flush_timeout_sec=60,
+        seed_recent_db_days=3,
         persist_retry_max_attempts=5,
         persist_retry_backoff_sec=1.0,
         persist_retry_backoff_max_sec=2.0,
-        persist_heartbeat_interval_sec=15.0,
+        persist_heartbeat_interval_sec=30.0,
+        watchdog_queue_threshold_rows=1,
+        watchdog_recovery_max_failures=3,
+        watchdog_recovery_join_timeout_sec=0.1,
         sqlite_busy_timeout_ms=5000,
         sqlite_journal_mode="WAL",
         sqlite_synchronous="NORMAL",
@@ -209,7 +225,7 @@ def test_enqueue_failure_does_not_advance_accepted_or_persisted_seq():
     asyncio.run(runner())
 
 
-def test_watchdog_exits_on_upstream_active_and_persist_stalled(monkeypatch):
+def test_watchdog_recovers_before_exit(monkeypatch):
     async def runner():
         loop = asyncio.get_running_loop()
         collector = DummyCollector()
@@ -222,14 +238,15 @@ def test_watchdog_exits_on_upstream_active_and_persist_stalled(monkeypatch):
 
         client._push_rows_since_report = 5
         client._poll_fetched_since_report = 10
+        client._poll_seq_advanced_since_report = 10
         client._poll_accepted_since_report = 10
         client._poll_enqueued_since_report = 0
         client._dropped_queue_full_since_report = 10
-        collector._last_persist_at = loop.time() - 5
+        collector._runtime["last_dequeue_monotonic"] = loop.time() - 5
+        collector._runtime["last_commit_monotonic"] = loop.time() - 5
         collector._runtime["worker_alive"] = False
-        collector._runtime["last_progress_at"] = loop.time() - 5
-        collector._runtime["last_drain_at"] = loop.time() - 5
         client._last_upstream_active_at = loop.time()
+        client._watchdog_backlog_since = loop.time() - 5
 
         class ExitTriggered(Exception):
             pass
@@ -238,21 +255,73 @@ def test_watchdog_exits_on_upstream_active_and_persist_stalled(monkeypatch):
             raise ExitTriggered(code)
 
         monkeypatch.setattr("hk_tick_collector.futu_client.os._exit", fake_exit)
+        collector.recovery_result = True
+
+        await client._check_watchdog(
+            now=loop.time(),
+            queue_size=10,
+            queue_maxsize=10,
+            persisted_rows_per_min=0,
+            queue_in_rows_per_min=10,
+            queue_out_rows_per_min=0,
+        )
+        assert collector.recovery_calls == 1
+
+    asyncio.run(runner())
+
+
+def test_watchdog_exits_after_recovery_failures(monkeypatch):
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        client = FutuQuoteClient(
+            build_config(watchdog_stall_sec=1, watchdog_recovery_max_failures=2),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+
+        client._push_rows_since_report = 10
+        client._poll_fetched_since_report = 10
+        client._poll_seq_advanced_since_report = 10
+        client._last_upstream_active_at = loop.time()
+        collector._runtime["last_dequeue_monotonic"] = loop.time() - 10
+        collector._runtime["last_commit_monotonic"] = loop.time() - 10
+        collector._runtime["worker_alive"] = True
+        client._watchdog_backlog_since = loop.time() - 10
+        collector.recovery_result = False
+
+        class ExitTriggered(Exception):
+            pass
+
+        def fake_exit(code: int):
+            raise ExitTriggered(code)
+
+        monkeypatch.setattr("hk_tick_collector.futu_client.os._exit", fake_exit)
+        await client._check_watchdog(
+            now=loop.time(),
+            queue_size=12,
+            queue_maxsize=100,
+            persisted_rows_per_min=0,
+            queue_in_rows_per_min=200,
+            queue_out_rows_per_min=0,
+        )
+        assert collector.recovery_calls == 1
 
         with pytest.raises(ExitTriggered):
-            client._check_watchdog(
-                now=loop.time(),
-                queue_size=10,
-                queue_maxsize=10,
+            await client._check_watchdog(
+                now=loop.time() + 1.1,
+                queue_size=12,
+                queue_maxsize=100,
                 persisted_rows_per_min=0,
-                queue_in_rows_per_min=10,
+                queue_in_rows_per_min=200,
                 queue_out_rows_per_min=0,
             )
 
     asyncio.run(runner())
 
 
-def test_watchdog_does_not_exit_when_consumer_is_draining(monkeypatch):
+def test_watchdog_does_not_recover_when_consumer_is_draining(monkeypatch):
     async def runner():
         loop = asyncio.get_running_loop()
         collector = DummyCollector()
@@ -267,16 +336,15 @@ def test_watchdog_does_not_exit_when_consumer_is_draining(monkeypatch):
         client._poll_fetched_since_report = 10
         client._poll_seq_advanced_since_report = 10
         client._last_upstream_active_at = loop.time()
-        collector._last_persist_at = loop.time() - 10
+        collector._runtime["last_dequeue_monotonic"] = loop.time()
+        collector._runtime["last_commit_monotonic"] = loop.time()
         collector._runtime["worker_alive"] = True
-        collector._runtime["last_progress_at"] = loop.time()
-        collector._runtime["last_drain_at"] = loop.time()
 
         def fail_exit(code: int):
             raise AssertionError(f"watchdog should not exit, got code={code}")
 
         monkeypatch.setattr("hk_tick_collector.futu_client.os._exit", fail_exit)
-        client._check_watchdog(
+        await client._check_watchdog(
             now=loop.time(),
             queue_size=12,
             queue_maxsize=100,
@@ -284,6 +352,7 @@ def test_watchdog_does_not_exit_when_consumer_is_draining(monkeypatch):
             queue_in_rows_per_min=200,
             queue_out_rows_per_min=180,
         )
+        assert collector.recovery_calls == 0
 
     asyncio.run(runner())
 

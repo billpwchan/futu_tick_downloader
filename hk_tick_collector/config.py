@@ -73,10 +73,14 @@ class Config:
     watchdog_upstream_window_sec: int
     drift_warn_sec: int
     stop_flush_timeout_sec: int
+    seed_recent_db_days: int
     persist_retry_max_attempts: int
     persist_retry_backoff_sec: float
     persist_retry_backoff_max_sec: float
     persist_heartbeat_interval_sec: float
+    watchdog_queue_threshold_rows: int
+    watchdog_recovery_max_failures: int
+    watchdog_recovery_join_timeout_sec: float
     sqlite_busy_timeout_ms: int
     sqlite_journal_mode: str
     sqlite_synchronous: str
@@ -105,10 +109,14 @@ class Config:
             watchdog_upstream_window_sec=_get_env_int("WATCHDOG_UPSTREAM_WINDOW_SEC", 60),
             drift_warn_sec=_get_env_int("DRIFT_WARN_SEC", 120),
             stop_flush_timeout_sec=_get_env_int("STOP_FLUSH_TIMEOUT_SEC", 60),
+            seed_recent_db_days=_get_env_int("SEED_RECENT_DB_DAYS", 3),
             persist_retry_max_attempts=_get_env_int("PERSIST_RETRY_MAX_ATTEMPTS", 0),
             persist_retry_backoff_sec=_get_env_float("PERSIST_RETRY_BACKOFF_SEC", 1.0),
             persist_retry_backoff_max_sec=_get_env_float("PERSIST_RETRY_BACKOFF_MAX_SEC", 2.0),
-            persist_heartbeat_interval_sec=_get_env_float("PERSIST_HEARTBEAT_INTERVAL_SEC", 15.0),
+            persist_heartbeat_interval_sec=_get_env_float("PERSIST_HEARTBEAT_INTERVAL_SEC", 30.0),
+            watchdog_queue_threshold_rows=_get_env_int("WATCHDOG_QUEUE_THRESHOLD_ROWS", 100),
+            watchdog_recovery_max_failures=_get_env_int("WATCHDOG_RECOVERY_MAX_FAILURES", 3),
+            watchdog_recovery_join_timeout_sec=_get_env_float("WATCHDOG_RECOVERY_JOIN_TIMEOUT_SEC", 3.0),
             sqlite_busy_timeout_ms=_get_env_int("SQLITE_BUSY_TIMEOUT_MS", 5000),
             sqlite_journal_mode=os.getenv("SQLITE_JOURNAL_MODE", "WAL"),
             sqlite_synchronous=os.getenv("SQLITE_SYNCHRONOUS", "NORMAL"),
