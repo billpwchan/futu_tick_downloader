@@ -75,9 +75,12 @@ class Config:
     stop_flush_timeout_sec: int
     persist_retry_max_attempts: int
     persist_retry_backoff_sec: float
+    persist_retry_backoff_max_sec: float
+    persist_heartbeat_interval_sec: float
     sqlite_busy_timeout_ms: int
     sqlite_journal_mode: str
     sqlite_synchronous: str
+    sqlite_wal_autocheckpoint: int
     log_level: str
 
     @classmethod
@@ -102,10 +105,13 @@ class Config:
             watchdog_upstream_window_sec=_get_env_int("WATCHDOG_UPSTREAM_WINDOW_SEC", 60),
             drift_warn_sec=_get_env_int("DRIFT_WARN_SEC", 120),
             stop_flush_timeout_sec=_get_env_int("STOP_FLUSH_TIMEOUT_SEC", 60),
-            persist_retry_max_attempts=_get_env_int("PERSIST_RETRY_MAX_ATTEMPTS", 5),
+            persist_retry_max_attempts=_get_env_int("PERSIST_RETRY_MAX_ATTEMPTS", 0),
             persist_retry_backoff_sec=_get_env_float("PERSIST_RETRY_BACKOFF_SEC", 1.0),
+            persist_retry_backoff_max_sec=_get_env_float("PERSIST_RETRY_BACKOFF_MAX_SEC", 2.0),
+            persist_heartbeat_interval_sec=_get_env_float("PERSIST_HEARTBEAT_INTERVAL_SEC", 15.0),
             sqlite_busy_timeout_ms=_get_env_int("SQLITE_BUSY_TIMEOUT_MS", 5000),
             sqlite_journal_mode=os.getenv("SQLITE_JOURNAL_MODE", "WAL"),
             sqlite_synchronous=os.getenv("SQLITE_SYNCHRONOUS", "NORMAL"),
+            sqlite_wal_autocheckpoint=_get_env_int("SQLITE_WAL_AUTOCHECKPOINT", 1000),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

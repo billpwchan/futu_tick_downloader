@@ -5,13 +5,14 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, Sequence
 
 from .models import TickRow
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
+DEFAULT_WAL_AUTOCHECKPOINT = 1000
 
 CREATE_TABLE_SQL = (
     "CREATE TABLE ticks (\n"
@@ -72,6 +73,11 @@ _ALLOWED_UNIQUE_INDEXES = {"uniq_ticks_symbol_seq", "uniq_ticks_symbol_ts_price_
 _VALID_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
 _VALID_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
 
+_SQLITE_BUSY_CODES = {
+    getattr(sqlite3, "SQLITE_BUSY", -1),
+    getattr(sqlite3, "SQLITE_LOCKED", -1),
+}
+
 
 @dataclass(frozen=True)
 class PersistResult:
@@ -97,18 +103,32 @@ def _sanitize_synchronous(value: str) -> str:
     return level if level in _VALID_SYNCHRONOUS else "NORMAL"
 
 
+def is_sqlite_busy_or_locked(error: BaseException) -> bool:
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+
+    code = getattr(error, "sqlite_errorcode", None)
+    if code in _SQLITE_BUSY_CODES:
+        return True
+
+    text = str(error).lower()
+    return "locked" in text or "busy" in text
+
+
 def _open_conn(
     db_path: Path,
     *,
     busy_timeout_ms: int,
     journal_mode: str,
     synchronous: str,
+    wal_autocheckpoint: int,
 ) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute(f"PRAGMA journal_mode={_sanitize_journal_mode(journal_mode)};")
     conn.execute(f"PRAGMA synchronous={_sanitize_synchronous(synchronous)};")
     conn.execute(f"PRAGMA busy_timeout={max(1, int(busy_timeout_ms))};")
+    conn.execute(f"PRAGMA wal_autocheckpoint={max(1, int(wal_autocheckpoint))};")
     return conn
 
 
@@ -172,41 +192,54 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-class SQLiteTickStore:
-    def __init__(
-        self,
-        data_root: Path,
-        *,
-        busy_timeout_ms: int = 5000,
-        journal_mode: str = "WAL",
-        synchronous: str = "NORMAL",
-    ) -> None:
-        self._data_root = Path(data_root)
-        self._busy_timeout_ms = max(1, int(busy_timeout_ms))
-        self._journal_mode = _sanitize_journal_mode(journal_mode)
-        self._synchronous = _sanitize_synchronous(synchronous)
+def _log_sqlite_pragmas(conn: sqlite3.Connection, db_path: Path) -> None:
+    journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+    synchronous = conn.execute("PRAGMA synchronous;").fetchone()[0]
+    busy_timeout = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+    wal_autocheckpoint = conn.execute("PRAGMA wal_autocheckpoint;").fetchone()[0]
+    logger.info(
+        "sqlite_pragmas db_path=%s journal_mode=%s synchronous=%s busy_timeout=%s wal_autocheckpoint=%s",
+        db_path,
+        journal_mode,
+        synchronous,
+        busy_timeout,
+        wal_autocheckpoint,
+    )
 
-    def _connect(self, db_path: Path) -> sqlite3.Connection:
-        return _open_conn(
-            db_path,
-            busy_timeout_ms=self._busy_timeout_ms,
-            journal_mode=self._journal_mode,
-            synchronous=self._synchronous,
-        )
 
-    def ensure_db(self, trading_day: str) -> Path:
-        db_path = db_path_for_trading_day(self._data_root, trading_day)
-        conn = self._connect(db_path)
+class SQLiteTickWriter:
+    def __init__(self, store: "SQLiteTickStore") -> None:
+        self._store = store
+        self._connections: Dict[str, sqlite3.Connection] = {}
+        self._db_paths: Dict[str, Path] = {}
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for conn in self._connections.values():
+            try:
+                conn.close()
+            except Exception:
+                logger.exception("sqlite_writer_close_failed")
+        self._connections.clear()
+        self._db_paths.clear()
+
+    def reset_connection(self, trading_day: str) -> None:
+        conn = self._connections.pop(trading_day, None)
+        self._db_paths.pop(trading_day, None)
+        if conn is None:
+            return
         try:
-            ensure_schema(conn)
-        finally:
             conn.close()
-        return db_path
+        except Exception:
+            logger.exception("sqlite_writer_reset_failed trading_day=%s", trading_day)
 
     def insert_ticks(self, trading_day: str, rows: Iterable[TickRow]) -> PersistResult:
         rows_list = list(rows)
+        db_path = db_path_for_trading_day(self._store._data_root, trading_day)
         if not rows_list:
-            db_path = db_path_for_trading_day(self._data_root, trading_day)
             return PersistResult(
                 db_path=db_path,
                 batch=0,
@@ -215,10 +248,8 @@ class SQLiteTickStore:
                 commit_latency_ms=0,
             )
 
-        db_path = db_path_for_trading_day(self._data_root, trading_day)
-        conn = self._connect(db_path)
+        conn = self._ensure_connection(trading_day)
         try:
-            ensure_schema(conn)
             before = conn.total_changes
             start = time.perf_counter()
             conn.executemany(INSERT_SQL, [row.as_tuple() for row in rows_list])
@@ -242,8 +273,74 @@ class SQLiteTickStore:
                 ignored=ignored,
                 commit_latency_ms=latency_ms,
             )
+        except sqlite3.DatabaseError:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+
+    def _ensure_connection(self, trading_day: str) -> sqlite3.Connection:
+        if self._closed:
+            raise RuntimeError("sqlite writer already closed")
+
+        conn = self._connections.get(trading_day)
+        if conn is not None:
+            return conn
+
+        db_path = db_path_for_trading_day(self._store._data_root, trading_day)
+        conn = self._store._connect(db_path)
+        ensure_schema(conn)
+        _log_sqlite_pragmas(conn, db_path)
+        self._connections[trading_day] = conn
+        self._db_paths[trading_day] = db_path
+        return conn
+
+
+class SQLiteTickStore:
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        busy_timeout_ms: int = 5000,
+        journal_mode: str = "WAL",
+        synchronous: str = "NORMAL",
+        wal_autocheckpoint: int = DEFAULT_WAL_AUTOCHECKPOINT,
+    ) -> None:
+        self._data_root = Path(data_root)
+        self._busy_timeout_ms = max(1, int(busy_timeout_ms))
+        self._journal_mode = _sanitize_journal_mode(journal_mode)
+        self._synchronous = _sanitize_synchronous(synchronous)
+        self._wal_autocheckpoint = max(1, int(wal_autocheckpoint))
+
+    def _connect(self, db_path: Path) -> sqlite3.Connection:
+        return _open_conn(
+            db_path,
+            busy_timeout_ms=self._busy_timeout_ms,
+            journal_mode=self._journal_mode,
+            synchronous=self._synchronous,
+            wal_autocheckpoint=self._wal_autocheckpoint,
+        )
+
+    def open_writer(self) -> SQLiteTickWriter:
+        return SQLiteTickWriter(self)
+
+    def ensure_db(self, trading_day: str) -> Path:
+        db_path = db_path_for_trading_day(self._data_root, trading_day)
+        conn = self._connect(db_path)
+        try:
+            ensure_schema(conn)
+            _log_sqlite_pragmas(conn, db_path)
         finally:
             conn.close()
+        return db_path
+
+    def insert_ticks(self, trading_day: str, rows: Iterable[TickRow]) -> PersistResult:
+        writer = self.open_writer()
+        try:
+            return writer.insert_ticks(trading_day, rows)
+        finally:
+            writer.close()
 
     def fetch_max_seq_by_symbol(self, trading_day: str, symbols: Sequence[str]) -> Dict[str, int]:
         if not symbols:

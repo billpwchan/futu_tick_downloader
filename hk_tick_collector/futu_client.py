@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import os
+import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -90,6 +92,9 @@ class FutuQuoteClient:
         self._dropped_queue_full_since_report = 0
         self._dropped_duplicate_since_report = 0
         self._dropped_filter_since_report = 0
+        self._watchdog_last_queue_size = 0
+        self._watchdog_last_check_at = self._started_at
+        self._watchdog_dumped = False
 
     async def run_forever(self) -> None:
         backoff = ExponentialBackoff(self._config.reconnect_min_delay, self._config.reconnect_max_delay)
@@ -354,6 +359,8 @@ class FutuQuoteClient:
                 queue_size=queue_size,
                 queue_maxsize=queue_maxsize,
                 persisted_rows_per_min=persisted_rows_per_min,
+                queue_in_rows_per_min=queue_in_rows_per_min,
+                queue_out_rows_per_min=queue_out_rows_per_min,
             )
 
             self._push_rows_since_report = 0
@@ -500,9 +507,16 @@ class FutuQuoteClient:
         queue_size: int,
         queue_maxsize: int,
         persisted_rows_per_min: int,
+        queue_in_rows_per_min: int,
+        queue_out_rows_per_min: int,
     ) -> None:
         if self._stop_event.is_set():
             return
+
+        queue_growth = queue_size - self._watchdog_last_queue_size
+        check_elapsed_sec = max(0.0, now - self._watchdog_last_check_at)
+        self._watchdog_last_queue_size = queue_size
+        self._watchdog_last_check_at = now
 
         poll_active = self._poll_fetched_since_report > 0 and self._poll_seq_advanced_since_report > 0
         recent_upstream = (
@@ -510,6 +524,16 @@ class FutuQuoteClient:
             and (now - self._last_upstream_active_at) <= self._config.watchdog_upstream_window_sec
         )
         upstream_active = recent_upstream and (self._push_rows_since_report > 0 or poll_active)
+
+        runtime = self._collector.snapshot_runtime_state()
+        worker_alive = bool(runtime.get("worker_alive", False))
+        last_progress_at = runtime.get("last_progress_at")
+        last_drain_at = runtime.get("last_drain_at")
+        progress_stall_sec = (
+            (now - float(last_progress_at)) if last_progress_at is not None else (now - self._started_at)
+        )
+        drain_stall_sec = (now - float(last_drain_at)) if last_drain_at is not None else (now - self._started_at)
+
         last_persist_at = self._collector.get_last_persist_at()
         if last_persist_at is None:
             last_persist_at = self._started_at
@@ -517,26 +541,59 @@ class FutuQuoteClient:
 
         if not upstream_active:
             return
-        if persisted_rows_per_min > 0:
+        if queue_size <= 0:
             return
-        if persist_stall_sec < self._config.watchdog_stall_sec:
+        if persisted_rows_per_min > 0 or queue_out_rows_per_min > 0:
+            return
+
+        min_backlog = max(10, max(1, int(queue_maxsize * 0.01)))
+        backlog_pressure = queue_size >= min_backlog
+        backlog_not_draining = queue_growth >= 0
+        progress_stalled = progress_stall_sec >= self._config.watchdog_stall_sec
+        commit_stalled = persist_stall_sec >= self._config.watchdog_stall_sec
+        drain_stalled = drain_stall_sec >= self._config.watchdog_stall_sec
+
+        consumer_dead = not worker_alive
+        consumer_not_progressing = backlog_pressure and backlog_not_draining and (progress_stalled or drain_stalled)
+        if not (consumer_dead or (consumer_not_progressing and commit_stalled)):
             return
 
         pipeline = self._collector.snapshot_pipeline_counters(reset=False)
         drift_sec = self._drift_sec()
         last_commit_age_sec = self._last_commit_age_sec(now)
+        reason = "worker_dead" if consumer_dead else "no_drain_progress"
+
+        self._dump_threads_before_exit(
+            reason=reason,
+            now=now,
+            queue_size=queue_size,
+            queue_maxsize=queue_maxsize,
+            queue_growth=queue_growth,
+            check_elapsed_sec=check_elapsed_sec,
+            persist_stall_sec=persist_stall_sec,
+            progress_stall_sec=progress_stall_sec,
+            drain_stall_sec=drain_stall_sec,
+            runtime=runtime,
+        )
         logger.error(
-            "WATCHDOG persistent_stall upstream_active=%s poll_active=%s "
-            "persist_stall_sec=%.1f queue=%s/%s push_rows_per_min=%s "
+            "WATCHDOG persistent_stall reason=%s upstream_active=%s poll_active=%s "
+            "persist_stall_sec=%.1f progress_stall_sec=%.1f drain_stall_sec=%.1f "
+            "queue=%s/%s queue_growth=%s check_elapsed_sec=%.1f push_rows_per_min=%s "
             "poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
             "queue_in=%s queue_out=%s last_commit_monotonic_age_sec=%s db_write_rate=%s "
+            "worker_alive=%s last_exception_type=%s last_exception_count=%s "
             "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
             "max_seq_lag=%s ts_drift_sec=%s",
+            reason,
             upstream_active,
             poll_active,
             persist_stall_sec,
+            progress_stall_sec,
+            drain_stall_sec,
             queue_size,
             queue_maxsize,
+            queue_growth,
+            check_elapsed_sec,
             self._push_rows_since_report,
             self._poll_fetched_since_report,
             self._poll_accepted_since_report,
@@ -545,6 +602,9 @@ class FutuQuoteClient:
             pipeline["queue_out_rows"],
             f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
             pipeline["persisted_rows"],
+            worker_alive,
+            runtime.get("last_exception_type"),
+            runtime.get("last_exception_count"),
             self._dropped_queue_full_since_report,
             self._dropped_duplicate_since_report,
             self._dropped_filter_since_report,
@@ -552,6 +612,43 @@ class FutuQuoteClient:
             f"{drift_sec:.1f}" if drift_sec is not None else "none",
         )
         os._exit(WATCHDOG_EXIT_CODE)
+
+    def _dump_threads_before_exit(
+        self,
+        *,
+        reason: str,
+        now: float,
+        queue_size: int,
+        queue_maxsize: int,
+        queue_growth: int,
+        check_elapsed_sec: float,
+        persist_stall_sec: float,
+        progress_stall_sec: float,
+        drain_stall_sec: float,
+        runtime: Dict[str, object],
+    ) -> None:
+        if self._watchdog_dumped:
+            return
+        self._watchdog_dumped = True
+        logger.error(
+            "WATCHDOG diagnostic_dump reason=%s now=%.1f queue=%s/%s queue_growth=%s "
+            "check_elapsed_sec=%.1f persist_stall_sec=%.1f progress_stall_sec=%.1f "
+            "drain_stall_sec=%.1f runtime=%s",
+            reason,
+            now,
+            queue_size,
+            queue_maxsize,
+            queue_growth,
+            check_elapsed_sec,
+            persist_stall_sec,
+            progress_stall_sec,
+            drain_stall_sec,
+            runtime,
+        )
+        try:
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        except Exception:
+            logger.exception("watchdog_thread_dump_failed")
 
     def _max_seq_lag(self) -> int:
         max_lag = 0

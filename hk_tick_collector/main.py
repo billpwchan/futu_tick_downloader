@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import signal
+import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,17 +27,29 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
             signal.signal(sig, lambda *_: stop_event.set())
 
 
+def _install_fault_diagnostics() -> None:
+    # Keep crash diagnostics in journald/stderr and allow on-demand thread dumps via SIGUSR1.
+    faulthandler.enable(file=sys.stderr, all_threads=True)
+    try:
+        faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=True)
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        logger.warning("faulthandler_sigusr1_register_failed")
+
+
 async def run() -> None:
     config = Config.from_env()
     setup_logging(config.log_level)
+    _install_fault_diagnostics()
 
     store = SQLiteTickStore(
         config.data_root,
         busy_timeout_ms=config.sqlite_busy_timeout_ms,
         journal_mode=config.sqlite_journal_mode,
         synchronous=config.sqlite_synchronous,
+        wal_autocheckpoint=config.sqlite_wal_autocheckpoint,
     )
     trading_day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
+    await asyncio.to_thread(store.ensure_db, trading_day)
     initial_last_seq = await asyncio.to_thread(
         store.fetch_max_seq_by_symbol,
         trading_day,
@@ -53,6 +67,8 @@ async def run() -> None:
         max_queue_size=config.max_queue_size,
         persist_retry_max_attempts=config.persist_retry_max_attempts,
         persist_retry_backoff_sec=config.persist_retry_backoff_sec,
+        persist_retry_backoff_max_sec=config.persist_retry_backoff_max_sec,
+        heartbeat_interval_sec=config.persist_heartbeat_interval_sec,
     )
     await collector.start()
 
