@@ -33,9 +33,9 @@
 
 - Added canonical docs:
   - `docs/configuration.md`
-  - `docs/deployment/ubuntu-systemd.md`
-  - `docs/operations/runbook-hk-tick-collector.md`
-- Reworked `README.md` with quickstart + command cookbook + compatibility.
+  - `docs/deployment/systemd.md`
+  - `docs/runbook/operations.md`
+- Reworked `README.md` with quickstart + command cookbook.
 - Added ops helper scripts:
   - `scripts/verify_db.sh`
   - `scripts/tail_logs.sh`

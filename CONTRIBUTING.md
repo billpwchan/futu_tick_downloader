@@ -4,7 +4,7 @@ Thanks for contributing to `hk-tick-collector`.
 
 ## Scope
 
-This is a production-oriented collector service. Stability and backward compatibility are prioritized.
+This is a production-oriented collector service. Stability and runtime safety are prioritized.
 
 ## Development Setup
 

@@ -18,7 +18,6 @@
   - `docs/runbook/sqlite-wal.md`
   - `docs/runbook/data-quality.md`
   - `docs/releasing.md`
-- Kept old doc paths as compatibility pointers to avoid link breaks.
 - Added examples and operational helpers:
   - `scripts/db_health_check.sh`
   - `scripts/query_examples.sql`
@@ -54,8 +53,8 @@
   - `README.md`
   - `docs/architecture.md`
   - `docs/configuration.md`
-  - `docs/deployment/ubuntu-systemd.md`
-  - `docs/operations/runbook-hk-tick-collector.md`
+  - `docs/deployment/systemd.md`
+  - `docs/runbook/operations.md`
 - Added ops scripts:
   - `scripts/verify_db.sh`
   - `scripts/tail_logs.sh`
@@ -162,7 +161,7 @@
 ### Ops assets
 
 - 新增 `scripts/redeploy_hk_tick_collector.sh`（拉代码/装依赖/重启/SQL+日志验收）。
-- 新增 runbook（当前路径：`docs/operations/runbook-hk-tick-collector.md`，旧路径保留跳转兼容）。
+- 新增 runbook（`docs/runbook/operations.md`）。
 
 ## 2026-02-11: watchdog self-heal first + future-ts repair toolkit
 

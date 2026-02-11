@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `README.md` rewritten for English-first open-source onboarding and production operations guidance.
-- Legacy docs paths retained as compatibility pointers to new canonical docs.
 
 ### Compatibility
 
