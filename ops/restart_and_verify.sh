@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Legacy entrypoint kept for compatibility.
+# For day-to-day checks prefer: scripts/healthcheck.sh + scripts/verify_db.sh
+
 SERVICE_NAME="${SERVICE_NAME:-hk-tick-collector}"
 DATA_ROOT="${DATA_ROOT:-/data/sqlite/HK}"
 VERIFY_TIMEOUT_SEC="${VERIFY_TIMEOUT_SEC:-30}"

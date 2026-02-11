@@ -89,9 +89,9 @@ bash scripts/verify_db.sh
 hk_tick_collector/           # 核心采集代码（main/config/futu_client/collector/db）
 docs/                        # 架构、配置、部署、运维文档
 scripts/                     # 运维脚本（healthcheck/verify_db/tail_logs/...）
-deploy/systemd/              # 推荐 systemd unit 模板
+deploy/systemd/              # 推荐 systemd unit 模板（单一来源）
 tests/                       # 单元/回归/smoke 测试
-ops/                         # 兼容旧流程的部署脚本与 unit 文件
+ops/                         # 兼容旧流程入口（已收敛到 scripts/deploy）
 ```
 
 ## 版本与兼容性

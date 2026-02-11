@@ -1,43 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "please run as root"
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "[FAIL] please run as root" >&2
   exit 1
 fi
 
-APP_DIR=${APP_DIR:-/opt/futu_tick_downloader}
-PYTHON_BIN=${PYTHON_BIN:-python3.11}
-DATA_ROOT=${DATA_ROOT:-/data/sqlite/HK}
-ENV_FILE=${ENV_FILE:-/etc/hk-tick-collector.env}
-SERVICE_FILE=/etc/systemd/system/hk-tick-collector.service
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_DIR="${APP_DIR:-/opt/futu_tick_downloader}"
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+DATA_ROOT="${DATA_ROOT:-/data/sqlite/HK}"
+ENV_FILE="${ENV_FILE:-/etc/hk-tick-collector.env}"
+SERVICE_NAME="${SERVICE_NAME:-hk-tick-collector}"
+RUN_USER="${RUN_USER:-hkcollector}"
+RUN_GROUP="${RUN_GROUP:-hkcollector}"
+INSTALL_DEPS="${INSTALL_DEPS:-1}"
 
-if [ ! -d "$APP_DIR" ]; then
-  echo "repo not found at $APP_DIR"
-  echo "copy this repo to $APP_DIR before running"
+INSTALL_SCRIPT="${ROOT_DIR}/scripts/install_systemd.sh"
+if [[ ! -f "${INSTALL_SCRIPT}" ]]; then
+  echo "[FAIL] missing installer: ${INSTALL_SCRIPT}" >&2
   exit 1
 fi
 
-if ! id -u hkcollector >/dev/null 2>&1; then
-  useradd --system --home /opt/futu_tick_downloader --shell /usr/sbin/nologin hkcollector
-fi
+echo "[INFO] ops/install_collector.sh is a compatibility wrapper."
+echo "[INFO] canonical installer: scripts/install_systemd.sh"
 
-$PYTHON_BIN -m venv "$APP_DIR/.venv"
-"$APP_DIR/.venv/bin/pip" install --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
-
-chown -R hkcollector:hkcollector "$APP_DIR"
-
-install -d -m 0755 "$DATA_ROOT"
-chown -R hkcollector:hkcollector "$DATA_ROOT"
-
-if [ ! -f "$ENV_FILE" ]; then
-  install -m 0640 "$APP_DIR/.env.example" "$ENV_FILE"
-  chown root:hkcollector "$ENV_FILE"
-fi
-
-install -m 0644 "$APP_DIR/ops/hk-tick-collector.service" "$SERVICE_FILE"
-systemctl daemon-reload
-systemctl enable --now hk-tick-collector.service
-
-echo "install complete"
+APP_DIR="${APP_DIR}" \
+PYTHON_BIN="${PYTHON_BIN}" \
+DATA_ROOT="${DATA_ROOT}" \
+ENV_FILE="${ENV_FILE}" \
+SERVICE_NAME="${SERVICE_NAME}" \
+RUN_USER="${RUN_USER}" \
+RUN_GROUP="${RUN_GROUP}" \
+INSTALL_DEPS="${INSTALL_DEPS}" \
+bash "${INSTALL_SCRIPT}"

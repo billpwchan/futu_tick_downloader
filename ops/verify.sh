@@ -13,6 +13,12 @@ HOST=${FUTU_HOST:-127.0.0.1}
 PORT=${FUTU_PORT:-11111}
 DATA_ROOT=${DATA_ROOT:-/data/sqlite/HK}
 SYMBOLS=${FUTU_SYMBOLS:-}
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+  PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv/bin/python}"
+else
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+fi
 
 if command -v ss >/dev/null 2>&1; then
   if ! ss -lnt | grep -q "${HOST}:${PORT}"; then
@@ -28,7 +34,7 @@ fi
 
 echo "port check ok: ${HOST}:${PORT}"
 
-PY_OUT=$(python3 - <<'PY'
+PY_OUT=$("${PYTHON_BIN}" - <<'PY'
 import os
 from futu import OpenQuoteContext, RET_OK, Session, SubType
 
@@ -81,14 +87,14 @@ PY
 echo "$PY_OUT"
 MARKET_OPEN=$(echo "$PY_OUT" | tail -n 1 | cut -d= -f2)
 
-today=$(date +%Y%m%d)
+today=$(TZ=Asia/Hong_Kong date +%Y%m%d)
 db_file="$DATA_ROOT/${today}.db"
 if [ ! -f "$db_file" ]; then
   echo "db not found: $db_file"
   exit 1
 fi
 
-python3 - <<PY
+"${PYTHON_BIN}" - <<PY
 import sqlite3
 import time
 

@@ -116,13 +116,13 @@
 ### Ops assets
 
 - 新增 `scripts/redeploy_hk_tick_collector.sh`（拉代码/装依赖/重启/SQL+日志验收）。
-- 新增 `docs/ops/hk_tick_collector_runbook.md`（时间规则、watchdog、排障 SQL）。
+- 新增 runbook（当前路径：`docs/operations/runbook-hk-tick-collector.md`，旧路径保留跳转兼容）。
 
 ## 2026-02-11: watchdog self-heal first + future-ts repair toolkit
 
 ### Incident pattern
 
-- 仍出现 `WATCHDOG persistent_stall` + `status=2/INVALIDARGUMENT` 循环重启。
+- （历史现象）曾出现 `WATCHDOG persistent_stall` + `status=2/INVALIDARGUMENT` 循环重启。
 - 核验 SQL 发现 `MAX(ts_ms)` 超前 `now_utc` 约 +8h。
 - `lsof` 未稳定复现 DB 锁，说明“仅以锁冲突解释”不充分，watchdog 判据与恢复路径需要加强。
 
@@ -141,7 +141,7 @@
 - watchdog:
   - 基于 `last_dequeue_monotonic`/`last_commit_monotonic` + 持续 backlog 判定 stall。
   - 触发时先 dump 全线程栈并执行 writer 自愈。
-  - 连续自愈失败 N 次后才 `exit(2)` 交给 systemd。
+  - 连续自愈失败 N 次后才非零退出交给 systemd（当前实现为 `exit(1)`）。
 
 ### New Ops scripts
 

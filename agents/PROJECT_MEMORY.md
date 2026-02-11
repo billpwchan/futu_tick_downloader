@@ -34,7 +34,7 @@
 
 ### Failure signature
 
-- `WATCHDOG persistent_stall` recurring with systemd restart (`exit code 2`).
+- （历史阶段）`WATCHDOG persistent_stall` recurring with systemd restart（旧版本曾为 `exit code 2`；当前实现为 `exit code 1`）。
 - SQLite `MAX(ts_ms)` ahead of UTC now by about `+8h` (`~28800s`).
 - Queue backlog persists while `persisted_rows_per_min=0`.
 
