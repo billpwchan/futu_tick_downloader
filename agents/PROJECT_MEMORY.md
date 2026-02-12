@@ -1,5 +1,29 @@
 # 專案記憶（Agents）
 
+## 2026-02-12：Telegram notify v2（雙層訊息 + 狀態機）
+
+### 範圍
+
+- notifier 架構升級：
+  - `TelegramClient`
+  - `MessageRenderer`（HTML `blockquote expandable`）
+  - `AlertStateMachine`（`OK/WARN/ALERT`）
+  - `DedupeStore`（fingerprint + cooldown + escalation）
+- HEALTH/ALERT 改為 human-friendly 第一層 + 可展開技術細節第二層。
+- 補 `DISCONNECT` / `RESTART` 事件通知，並保留 `PERSIST_STALL` / `SQLITE_BUSY`。
+- 設定主軸改為 `TG_*` + `HEALTH_*` + `ALERT_*`，舊 `TELEGRAM_*` 保持相容。
+
+### 驗證面
+
+- 測試新增/更新：
+  - `tests/test_telegram_notifier.py`
+  - `tests/test_config.py`
+- 文檔新增/更新：
+  - `docs/telegram-notify.md`
+  - `docs/deployment.md`
+  - `docs/runbook.md`
+  - `README.md`
+
 ## 2026-02-12：Telegram notifier 整合
 
 ### 範圍

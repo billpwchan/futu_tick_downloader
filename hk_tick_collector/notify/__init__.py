@@ -1,4 +1,4 @@
-from .telegram import (
+from hk_tick_collector.notifiers.telegram import (
     AlertEvent,
     AlertStateMachine,
     DedupeStore,
@@ -12,6 +12,7 @@ from .telegram import (
     TelegramClient,
     TelegramNotifier,
     TelegramSendResult,
+    truncate_rendered_message,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "TelegramClient",
     "TelegramNotifier",
     "TelegramSendResult",
+    "truncate_rendered_message",
 ]

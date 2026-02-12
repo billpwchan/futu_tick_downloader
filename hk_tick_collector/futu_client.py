@@ -20,7 +20,13 @@ from .config import Config
 from .db import PersistResult, SQLiteTickStore, db_path_for_trading_day
 from .mapping import ticker_df_to_rows
 from .models import TickRow
-from .notifiers.telegram import AlertEvent, HealthSnapshot, SymbolSnapshot, TelegramNotifier
+from .notifiers.telegram import (
+    AlertEvent,
+    HealthSnapshot,
+    NotifySeverity,
+    SymbolSnapshot,
+    TelegramNotifier,
+)
 from .utils import ExponentialBackoff
 
 logger = logging.getLogger(__name__)
@@ -148,6 +154,30 @@ class FutuQuoteClient:
                     raise
                 except Exception as exc:
                     logger.warning("futu connection error: %s", exc)
+                    if self._notifier is not None:
+                        trading_day = self._current_trading_day()
+                        err_name = type(exc).__name__
+                        self._notifier.submit_alert(
+                            AlertEvent(
+                                created_at=datetime.now(tz=timezone.utc),
+                                code="DISCONNECT",
+                                key=f"DISCONNECT:{err_name}",
+                                fingerprint=f"DISCONNECT:{err_name}",
+                                trading_day=trading_day,
+                                severity=NotifySeverity.WARN.value,
+                                headline="注意：與 OpenD 連線中斷，系統正在嘗試重連",
+                                impact="短時間內可能有資料缺口，重連成功後可恢復",
+                                summary_lines=[
+                                    f"error_type={err_name}",
+                                    f"error={str(exc)[:200] if str(exc) else 'n/a'}",
+                                    f"host={self._config.futu_host}:{self._config.futu_port}",
+                                ],
+                                suggestions=[
+                                    "journalctl -u hk-tick-collector -n 120 --no-pager",
+                                    "systemctl status futu-opend --no-pager",
+                                ],
+                            )
+                        )
                 finally:
                     self._connected = False
                     for task in (poll_task, health_task, monitor_task):
@@ -410,7 +440,11 @@ class FutuQuoteClient:
                         created_at=datetime.now(tz=timezone.utc),
                         code="SQLITE_BUSY",
                         key=f"SQLITE_BUSY:{trading_day}",
+                        fingerprint=f"SQLITE_BUSY:{trading_day}",
                         trading_day=trading_day,
+                        severity=NotifySeverity.WARN.value,
+                        headline="注意：SQLite 鎖競爭升高",
+                        impact="目前仍可能持續寫入，但吞吐與延遲有退化風險",
                         summary_lines=[
                             f"busy_backoff_delta={busy_backoff_delta}/min threshold={self._config.telegram_sqlite_busy_alert_threshold}",
                             f"queue={queue_size}/{queue_maxsize} persisted_per_min={persisted_rows_per_min}",
@@ -784,7 +818,11 @@ class FutuQuoteClient:
                     created_at=datetime.now(tz=timezone.utc),
                     code="PERSIST_STALL",
                     key=f"PERSIST_STALL:{trading_day}:{','.join(self._config.symbols)}",
+                    fingerprint=f"PERSIST_STALL:{trading_day}:{','.join(self._config.symbols)}",
                     trading_day=trading_day,
+                    severity=NotifySeverity.ALERT.value,
+                    headline="異常：持久化停滯，疑似停止寫入",
+                    impact="新資料可能未落庫，延遲與積壓將持續上升",
                     summary_lines=[
                         f"stall_sec={commit_age_sec:.1f}/{self._config.watchdog_stall_sec}",
                         f"queue={queue_size}/{queue_maxsize} max_seq_lag={self._max_seq_lag()} persisted_per_min={persisted_rows_per_min}",

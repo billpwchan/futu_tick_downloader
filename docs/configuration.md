@@ -59,21 +59,30 @@
 | `SQLITE_JOURNAL_MODE` | `WAL` | SQLite journal 模式 | 建議 `WAL` | 非 WAL 會影響讀寫併發 | 特殊限制下才改 |
 | `SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite fsync 安全模式 | `NORMAL`/`FULL` | `OFF` 會提高崩潰毀損風險 | 高耐久需求用 `FULL` |
 | `SQLITE_WAL_AUTOCHECKPOINT` | `1000` | WAL 自動 checkpoint 頁數 | `500-2000` | 太高會導致 WAL 膨脹 | 依寫入量與磁碟 IO 調整 |
-| `TELEGRAM_ENABLED` | `false` | 是否啟用 Telegram notifier worker | `0/1` | 關閉時不改變主流程行為 | Bot/chat 驗證完成後再開 |
-| `TELEGRAM_BOT_TOKEN` | 空 | Telegram bot token | secret | 缺失或錯誤會停用 notifier | 存於私密 env／secret manager |
-| `TELEGRAM_CHAT_ID` | 空 | 目標群組/頻道 chat id | 群組 id（常為負數） | 設錯會觸發 `400/403` | 需填真實目標 |
-| `TELEGRAM_THREAD_ID` | 空 | 可選群組 topic id | 正整數 | 設錯會觸發 `400` | 使用 forum topics 時填寫 |
-| `TELEGRAM_DIGEST_INTERVAL_SEC` | `600` | 摘要評估間隔 | `300-1800` | 太小會增加噪音 | 依值班偏好調整 |
-| `TELEGRAM_ALERT_COOLDOWN_SEC` | `600` | 同 alert-key 冷卻時間窗 | `300-1800` | 太小會重複刷告警 | 依事件頻率調整 |
-| `TELEGRAM_RATE_LIMIT_PER_MIN` | `18` | 本地 sender 每分鐘上限 | `1-20` | 太高可能觸發 Telegram 限流 | 建議低於軟上限 |
-| `TELEGRAM_INCLUDE_SYSTEM_METRICS` | `true` | 摘要是否附 `load1/rss/disk` | `0/1` | 關閉可縮短訊息 | 需精簡訊息時關閉 |
-| `TELEGRAM_DIGEST_QUEUE_CHANGE_PCT` | `20` | 判定「有意義變化」的 queue 變化門檻 | `5-50` | 太低會增加摘要頻率 | 依噪音容忍度調整 |
-| `TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC` | `60` | `last_tick_age` 變化門檻 | `30-300` | 太低會增加摘要 churn | 依 symbol 活躍度調整 |
-| `TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC` | `60` | `|drift_sec|` 變化門檻 | `30-300` | 太低會增加摘要 churn | 依 drift 策略調整 |
-| `TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE` | `false` | 無顯著變化時是否送精簡 alive | `0/1` | 開啟會增加背景訊息 | 低噪音模式建議關閉 |
-| `TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD` | `3` | 每分鐘 busy/locked 告警門檻 | `1-20` | 太低可能對暫時鎖也告警 | 依儲存競爭程度調整 |
+| `TG_ENABLED` | `false` | 是否啟用 Telegram notifier worker | `0/1` | 關閉時不改變主流程行為 | Bot/chat 驗證完成後再開 |
+| `TG_BOT_TOKEN` | 空 | Telegram bot token | secret | 缺失或錯誤會停用 notifier | 存於私密 env／secret manager |
+| `TG_CHAT_ID` | 空 | 目標群組/頻道 chat id | 群組 id（常為負數） | 設錯會觸發 `400/403` | 需填真實目標 |
+| `TG_MESSAGE_THREAD_ID` | 空 | 可選群組 topic id | 正整數 | 設錯會觸發 `400` | 使用 forum topics 時填寫 |
+| `TG_PARSE_MODE` | `HTML` | Telegram parse mode | `HTML` | 非 HTML 會失去 expandable 區塊 | 建議保持 `HTML` |
+| `HEALTH_INTERVAL_SEC` | `600` | HEALTH 固定節奏（共用基線） | `300-1800` | 太小會增加噪音 | 依值班偏好調整 |
+| `HEALTH_TRADING_INTERVAL_SEC` | `600` | 交易時段 HEALTH 週期 | `300-1200` | 太小會增加噪音 | 盤中節奏調整 |
+| `HEALTH_OFFHOURS_INTERVAL_SEC` | `1800` | 非交易時段 HEALTH 週期 | `900-3600` | 太小會造成夜間噪音 | 夜間建議拉長 |
+| `ALERT_COOLDOWN_SEC` | `600` | 同 fingerprint 冷卻時間窗 | `300-1800` | 太小會重複刷告警 | 依事件頻率調整 |
+| `ALERT_ESCALATION_STEPS` | `0,600,1800` | 告警升級補發時間點（秒） | 逗號整數 | 設太密會增加噪音 | 依值班策略調整 |
+| `TG_RATE_LIMIT_PER_MIN` | `18` | 本地 sender 每分鐘上限 | `1-20` | 太高可能觸發 Telegram 限流 | 建議低於軟上限 |
+| `TG_INCLUDE_SYSTEM_METRICS` | `true` | 摘要是否附 `load1/rss/disk` | `0/1` | 關閉可縮短訊息 | 需精簡訊息時關閉 |
+| `TG_DIGEST_QUEUE_CHANGE_PCT` | `20` | 判定「有意義變化」的 queue 變化門檻 | `5-50` | 太低會增加摘要頻率 | 依噪音容忍度調整 |
+| `TG_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC` | `60` | `last_tick_age` 變化門檻 | `30-300` | 太低會增加摘要 churn | 依 symbol 活躍度調整 |
+| `TG_DIGEST_DRIFT_THRESHOLD_SEC` | `60` | `|drift_sec|` 變化門檻 | `30-300` | 太低會增加摘要 churn | 依 drift 策略調整 |
+| `TG_DIGEST_SEND_ALIVE_WHEN_IDLE` | `false` | 無顯著變化時是否送精簡 alive | `0/1` | 開啟會增加背景訊息 | 低噪音模式建議關閉 |
+| `TG_SQLITE_BUSY_ALERT_THRESHOLD` | `3` | 每分鐘 busy/locked 告警門檻 | `1-20` | 太低可能對暫時鎖也告警 | 依儲存競爭程度調整 |
 | `INSTANCE_ID` | 空 | 訊息中的可讀 instance 標籤 | 短字串 | 空值時退回 hostname | 多節點建議填寫 |
 | `LOG_LEVEL` | `INFO` | 應用程式日誌層級 | 生產建議 `INFO` | `DEBUG` 可能非常吵 | 僅短期除錯使用 |
+
+相容性說明：
+
+- 舊版 `TELEGRAM_*` 仍可使用（向後相容）。
+- 新增部署建議改用 `TG_*` + `HEALTH_*` + `ALERT_*`。
 
 ## 生產基線範本
 
@@ -109,19 +118,23 @@ SQLITE_JOURNAL_MODE=WAL
 SQLITE_SYNCHRONOUS=NORMAL
 SQLITE_WAL_AUTOCHECKPOINT=1000
 
-TELEGRAM_ENABLED=1
-TELEGRAM_BOT_TOKEN=<secret>
-TELEGRAM_CHAT_ID=-1001234567890
-TELEGRAM_THREAD_ID=
-TELEGRAM_DIGEST_INTERVAL_SEC=600
-TELEGRAM_ALERT_COOLDOWN_SEC=600
-TELEGRAM_RATE_LIMIT_PER_MIN=18
-TELEGRAM_INCLUDE_SYSTEM_METRICS=1
-TELEGRAM_DIGEST_QUEUE_CHANGE_PCT=20
-TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC=60
-TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC=60
-TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE=0
-TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD=3
+TG_ENABLED=1
+TG_BOT_TOKEN=<secret>
+TG_CHAT_ID=-1001234567890
+TG_MESSAGE_THREAD_ID=
+TG_PARSE_MODE=HTML
+HEALTH_INTERVAL_SEC=600
+HEALTH_TRADING_INTERVAL_SEC=600
+HEALTH_OFFHOURS_INTERVAL_SEC=1800
+ALERT_COOLDOWN_SEC=600
+ALERT_ESCALATION_STEPS=0,600,1800
+TG_RATE_LIMIT_PER_MIN=18
+TG_INCLUDE_SYSTEM_METRICS=1
+TG_DIGEST_QUEUE_CHANGE_PCT=20
+TG_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC=60
+TG_DIGEST_DRIFT_THRESHOLD_SEC=60
+TG_DIGEST_SEND_ALIVE_WHEN_IDLE=0
+TG_SQLITE_BUSY_ALERT_THRESHOLD=3
 INSTANCE_ID=hk-a1
 
 DRIFT_WARN_SEC=120
@@ -149,4 +162,4 @@ bash scripts/db_health_check.sh
 ## 常見問題
 
 - 啟動即 `ValueError`：通常是數值型 env 格式不合法。
-- 開啟 Telegram 後沒訊息：先確認 `TELEGRAM_CHAT_ID`、權限與 `429/403/400` 錯誤日誌。
+- 開啟 Telegram 後沒訊息：先確認 `TG_CHAT_ID`、權限與 `429/403/400` 錯誤日誌。

@@ -51,14 +51,18 @@ sudo chmod 640 /opt/futu_tick_downloader/.env
 編輯 `/opt/futu_tick_downloader/.env`：
 
 ```dotenv
-TELEGRAM_ENABLED=1
-TELEGRAM_BOT_TOKEN=<secret>
-TELEGRAM_CHAT_ID=-1001234567890
-TELEGRAM_THREAD_ID=
-TELEGRAM_DIGEST_INTERVAL_SEC=600
-TELEGRAM_ALERT_COOLDOWN_SEC=600
-TELEGRAM_RATE_LIMIT_PER_MIN=18
-TELEGRAM_INCLUDE_SYSTEM_METRICS=1
+TG_ENABLED=1
+TG_BOT_TOKEN=<secret>
+TG_CHAT_ID=-1001234567890
+TG_MESSAGE_THREAD_ID=
+TG_PARSE_MODE=HTML
+HEALTH_INTERVAL_SEC=600
+HEALTH_TRADING_INTERVAL_SEC=600
+HEALTH_OFFHOURS_INTERVAL_SEC=1800
+ALERT_COOLDOWN_SEC=600
+ALERT_ESCALATION_STEPS=0,600,1800
+TG_RATE_LIMIT_PER_MIN=18
+TG_INCLUDE_SYSTEM_METRICS=1
 INSTANCE_ID=hk-prod-a1
 ```
 
@@ -78,7 +82,7 @@ sudo systemctl status hk-tick-collector --no-pager
 
 ### 5) 滾動更新 env
 
-當僅調整環境變數時：
+當僅調整環境變數時，`restart` 是必需（`EnvironmentFile` 不會自動熱載）：
 
 ```bash
 sudo vim /opt/futu_tick_downloader/.env
@@ -112,10 +116,10 @@ sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
 ## 常見問題
 
 - 啟動後立即退出：優先檢查 `.env` 格式錯誤與 `FUTU_SYMBOLS` 是否為空。
-- Telegram 無訊息：檢查 bot 是否在群組內，並確認 `TELEGRAM_CHAT_ID` 正確。
+- Telegram 無訊息：檢查 bot 是否在群組內，並確認 `TG_CHAT_ID` 正確。
 
 ## 相關文件
 
-- Telegram 設定細節：[`docs/telegram.md`](telegram.md)
+- Telegram 設定細節：[`docs/telegram-notify.md`](telegram-notify.md)
 - 維運 SOP：[`docs/runbook.md`](runbook.md)
 - 完整 systemd 強化配置：[`docs/deployment/systemd.md`](deployment/systemd.md)

@@ -25,6 +25,9 @@ def _clear_env(monkeypatch):
                 "PERSIST_",
                 "SQLITE_",
                 "TELEGRAM_",
+                "TG_",
+                "HEALTH_",
+                "ALERT_",
                 "INSTANCE_ID",
                 "LOG_LEVEL",
             )
@@ -50,6 +53,9 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.telegram_enabled is False
     assert cfg.telegram_rate_limit_per_min == 18
     assert cfg.telegram_thread_id is None
+    assert cfg.telegram_parse_mode == "HTML"
+    assert cfg.telegram_health_interval_sec == 600
+    assert cfg.telegram_alert_escalation_steps == [0, 600, 1800]
 
 
 def test_config_bool_and_list_parsing(monkeypatch):
@@ -63,6 +69,33 @@ def test_config_bool_and_list_parsing(monkeypatch):
     assert cfg.poll_enabled is False
     assert cfg.symbols == ["HK.00700", "HK.00981"]
     assert cfg.watchdog_stall_sec == 240
+
+
+def test_config_supports_tg_aliases(monkeypatch):
+    monkeypatch.setattr(config_module, "_load_dotenv", lambda: None)
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("TG_ENABLED", "1")
+    monkeypatch.setenv("TG_BOT_TOKEN", "token")
+    monkeypatch.setenv("TG_CHAT_ID", "-1001")
+    monkeypatch.setenv("TG_MESSAGE_THREAD_ID", "9")
+    monkeypatch.setenv("TG_PARSE_MODE", "HTML")
+    monkeypatch.setenv("HEALTH_INTERVAL_SEC", "700")
+    monkeypatch.setenv("HEALTH_TRADING_INTERVAL_SEC", "500")
+    monkeypatch.setenv("HEALTH_OFFHOURS_INTERVAL_SEC", "1800")
+    monkeypatch.setenv("ALERT_COOLDOWN_SEC", "900")
+    monkeypatch.setenv("ALERT_ESCALATION_STEPS", "0,300,900")
+
+    cfg = Config.from_env()
+    assert cfg.telegram_enabled is True
+    assert cfg.telegram_bot_token == "token"
+    assert cfg.telegram_chat_id == "-1001"
+    assert cfg.telegram_thread_id == 9
+    assert cfg.telegram_parse_mode == "HTML"
+    assert cfg.telegram_health_interval_sec == 700
+    assert cfg.telegram_health_trading_interval_sec == 500
+    assert cfg.telegram_health_offhours_interval_sec == 1800
+    assert cfg.telegram_alert_cooldown_sec == 900
+    assert cfg.telegram_alert_escalation_steps == [0, 300, 900]
 
 
 @pytest.mark.parametrize(

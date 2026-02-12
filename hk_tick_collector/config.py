@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Sequence
 
 
 def _load_dotenv() -> None:
@@ -60,6 +60,62 @@ def _get_env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _first_env_value(names: Sequence[str]) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip() != "":
+            return value
+    return None
+
+
+def _get_env_int_alias(names: Sequence[str], default: int) -> int:
+    value = _first_env_value(names)
+    if value is None:
+        return default
+    return int(value)
+
+
+def _get_env_float_alias(names: Sequence[str], default: float) -> float:
+    value = _first_env_value(names)
+    if value is None:
+        return default
+    return float(value)
+
+
+def _get_env_optional_int_alias(names: Sequence[str]) -> int | None:
+    value = _first_env_value(names)
+    if value is None:
+        return None
+    return int(value)
+
+
+def _get_env_bool_alias(names: Sequence[str], default: bool) -> bool:
+    value = _first_env_value(names)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _get_env_text_alias(names: Sequence[str], default: str) -> str:
+    value = _first_env_value(names)
+    if value is None:
+        return default
+    return value.strip()
+
+
+def _get_env_int_list_alias(names: Sequence[str], default: list[int]) -> list[int]:
+    value = _first_env_value(names)
+    if value is None:
+        return list(default)
+    items = [part.strip() for part in value.split(",") if part.strip()]
+    return [int(item) for item in items] if items else list(default)
+
+
 @dataclass(frozen=True)
 class Config:
     futu_host: str
@@ -97,8 +153,12 @@ class Config:
     telegram_bot_token: str
     telegram_chat_id: str
     telegram_thread_id: int | None
-    telegram_digest_interval_sec: int
+    telegram_parse_mode: str
+    telegram_health_interval_sec: int
+    telegram_health_trading_interval_sec: int
+    telegram_health_offhours_interval_sec: int
     telegram_alert_cooldown_sec: int
+    telegram_alert_escalation_steps: List[int]
     telegram_rate_limit_per_min: int
     telegram_include_system_metrics: bool
     telegram_digest_queue_change_pct: float
@@ -146,28 +206,77 @@ class Config:
             sqlite_journal_mode=os.getenv("SQLITE_JOURNAL_MODE", "WAL"),
             sqlite_synchronous=os.getenv("SQLITE_SYNCHRONOUS", "NORMAL"),
             sqlite_wal_autocheckpoint=_get_env_int("SQLITE_WAL_AUTOCHECKPOINT", 1000),
-            telegram_enabled=_get_env_bool("TELEGRAM_ENABLED", False),
-            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
-            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
-            telegram_thread_id=_get_env_optional_int("TELEGRAM_THREAD_ID"),
-            telegram_digest_interval_sec=_get_env_int("TELEGRAM_DIGEST_INTERVAL_SEC", 600),
-            telegram_alert_cooldown_sec=_get_env_int("TELEGRAM_ALERT_COOLDOWN_SEC", 600),
-            telegram_rate_limit_per_min=_get_env_int("TELEGRAM_RATE_LIMIT_PER_MIN", 18),
-            telegram_include_system_metrics=_get_env_bool("TELEGRAM_INCLUDE_SYSTEM_METRICS", True),
-            telegram_digest_queue_change_pct=_get_env_float(
-                "TELEGRAM_DIGEST_QUEUE_CHANGE_PCT", 20.0
+            telegram_enabled=_get_env_bool_alias(("TG_ENABLED", "TELEGRAM_ENABLED"), False),
+            telegram_bot_token=_get_env_text_alias(("TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"), ""),
+            telegram_chat_id=_get_env_text_alias(("TG_CHAT_ID", "TELEGRAM_CHAT_ID"), ""),
+            telegram_thread_id=_get_env_optional_int_alias(
+                ("TG_MESSAGE_THREAD_ID", "TELEGRAM_THREAD_ID")
             ),
-            telegram_digest_last_tick_age_threshold_sec=_get_env_int(
-                "TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC", 60
+            telegram_parse_mode=_get_env_text_alias(
+                ("TG_PARSE_MODE", "TELEGRAM_PARSE_MODE"), "HTML"
             ),
-            telegram_digest_drift_threshold_sec=_get_env_int(
-                "TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC", 60
+            telegram_health_interval_sec=_get_env_int_alias(
+                ("TG_HEALTH_INTERVAL_SEC", "HEALTH_INTERVAL_SEC", "TELEGRAM_DIGEST_INTERVAL_SEC"),
+                600,
             ),
-            telegram_digest_send_alive_when_idle=_get_env_bool(
-                "TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE", False
+            telegram_health_trading_interval_sec=_get_env_int_alias(
+                ("TG_HEALTH_TRADING_INTERVAL_SEC", "HEALTH_TRADING_INTERVAL_SEC"),
+                _get_env_int_alias(
+                    (
+                        "TG_HEALTH_INTERVAL_SEC",
+                        "HEALTH_INTERVAL_SEC",
+                        "TELEGRAM_DIGEST_INTERVAL_SEC",
+                    ),
+                    600,
+                ),
             ),
-            telegram_sqlite_busy_alert_threshold=_get_env_int(
-                "TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD", 3
+            telegram_health_offhours_interval_sec=_get_env_int_alias(
+                ("TG_HEALTH_OFFHOURS_INTERVAL_SEC", "HEALTH_OFFHOURS_INTERVAL_SEC"),
+                _get_env_int_alias(
+                    (
+                        "TG_HEALTH_INTERVAL_SEC",
+                        "HEALTH_INTERVAL_SEC",
+                        "TELEGRAM_DIGEST_INTERVAL_SEC",
+                    ),
+                    600,
+                ),
+            ),
+            telegram_alert_cooldown_sec=_get_env_int_alias(
+                ("TG_ALERT_COOLDOWN_SEC", "ALERT_COOLDOWN_SEC", "TELEGRAM_ALERT_COOLDOWN_SEC"),
+                600,
+            ),
+            telegram_alert_escalation_steps=_get_env_int_list_alias(
+                ("TG_ALERT_ESCALATION_STEPS", "ALERT_ESCALATION_STEPS"),
+                [0, 600, 1800],
+            ),
+            telegram_rate_limit_per_min=_get_env_int_alias(
+                ("TG_RATE_LIMIT_PER_MIN", "TELEGRAM_RATE_LIMIT_PER_MIN"), 18
+            ),
+            telegram_include_system_metrics=_get_env_bool_alias(
+                ("TG_INCLUDE_SYSTEM_METRICS", "TELEGRAM_INCLUDE_SYSTEM_METRICS"),
+                True,
+            ),
+            telegram_digest_queue_change_pct=_get_env_float_alias(
+                ("TG_DIGEST_QUEUE_CHANGE_PCT", "TELEGRAM_DIGEST_QUEUE_CHANGE_PCT"), 20.0
+            ),
+            telegram_digest_last_tick_age_threshold_sec=_get_env_int_alias(
+                (
+                    "TG_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC",
+                    "TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC",
+                ),
+                60,
+            ),
+            telegram_digest_drift_threshold_sec=_get_env_int_alias(
+                ("TG_DIGEST_DRIFT_THRESHOLD_SEC", "TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC"),
+                60,
+            ),
+            telegram_digest_send_alive_when_idle=_get_env_bool_alias(
+                ("TG_DIGEST_SEND_ALIVE_WHEN_IDLE", "TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE"),
+                False,
+            ),
+            telegram_sqlite_busy_alert_threshold=_get_env_int_alias(
+                ("TG_SQLITE_BUSY_ALERT_THRESHOLD", "TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD"),
+                3,
             ),
             instance_id=os.getenv("INSTANCE_ID", "").strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO"),

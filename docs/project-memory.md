@@ -1,5 +1,44 @@
 # 專案記憶（Project Memory）
 
+## 2026-02-12：Telegram 通知 v2（human-friendly + 狀態機 + 升級）
+
+### 變更內容
+
+- 通知模組重構為可維運結構：
+  - `TelegramClient`
+  - `MessageRenderer`（HTML + `<blockquote expandable>`）
+  - `AlertStateMachine`（`OK/WARN/ALERT`）
+  - `DedupeStore`（fingerprint 去重 + cooldown + escalation）
+- HEALTH/ALERT 訊息改為兩層：
+  - 第一層 6-10 行：結論、影響、是否需要處理、最小關鍵數字
+  - 第二層可展開：技術細節、建議命令（2-3 條）
+- 事件通知補強：
+  - `DISCONNECT`（重連期）
+  - `RESTART`（致命退出後重啟風險）
+  - `PERSIST_STALL` / `SQLITE_BUSY` 分級文案
+- 噪音控制：
+  - HEALTH：狀態變化 + 交易/非交易不同 cadence
+  - ALERT：fingerprint 去重，僅 cooldown / escalation / severity 升級時補發
+
+### 配置與相容性
+
+- 新配置主軸：
+  - `TG_*`
+  - `HEALTH_*`
+  - `ALERT_*`
+- 舊 `TELEGRAM_*` 仍可用（向後相容），既有部署不會被破壞。
+
+### 測試與文件
+
+- 測試：
+  - `tests/test_telegram_notifier.py`（HTML expandable、截斷、狀態機、去重/升級、429）
+  - `tests/test_config.py`（`TG_*` alias + backward compatibility）
+- 文件：
+  - `docs/telegram-notify.md`（新）
+  - `docs/deployment.md`（env 變更需 restart）
+  - `docs/runbook.md`（狀態定義 + SOP）
+  - `README.md` Notifications 章節更新
+
 ## 2026-02-12：Telegram 群組通知（低噪音摘要 + 關鍵告警）
 
 ### 變更內容

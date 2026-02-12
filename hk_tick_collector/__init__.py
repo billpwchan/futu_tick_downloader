@@ -7,6 +7,7 @@ __all__ = [
     "futu_client",
     "mapping",
     "models",
+    "notify",
     "notifiers",
     "__version__",
 ]

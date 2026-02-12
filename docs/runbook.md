@@ -10,6 +10,17 @@
 - 可使用 `sudo` 讀取服務狀態與日誌
 - 可存取當日資料庫路徑（預設 `/data/sqlite/HK`）
 
+## 通知狀態定義
+
+- `OK`：`freshness/drift` 在門檻內、`persisted_per_min > 0`、queue 無明顯積壓。
+- `WARN`：`drift` 超過 `DRIFT_WARN_SEC`，或吞吐明顯下降但尚未歸零，或 queue 壓力升高。
+- `ALERT`：疑似停寫（例如 `persisted_per_min = 0` 且 backlog/lag 上升，並超過 `WATCHDOG_STALL_SEC`）。
+
+值班判讀原則：
+
+- 第一層看「結論 + 影響 + 是否需要處理」。
+- 第二層（expandable）再看技術細節與命令。
+
 ## 步驟
 
 ### 1) 健康檢查清單
@@ -77,14 +88,20 @@ DB=/data/sqlite/HK/${DAY}.db
 sqlite3 "file:${DB}?mode=ro" "SELECT COUNT(*), MAX(ts_ms) FROM ticks;"
 ```
 
-4. 若仍停滯，重啟：
+4. 檢查檔案鎖（若懷疑 busy/locked）：
+
+```bash
+lslocks | grep -E \"$(basename \"$DB\")|sqlite\" || true
+```
+
+5. 若仍停滯，重啟：
 
 ```bash
 sudo systemctl restart hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
 
-5. 在 5 分鐘內確認恢復：
+6. 在 5 分鐘內確認恢復：
 
 - `persist_ticks` 已恢復
 - `persisted_rows_per_min` 回升
@@ -153,7 +170,7 @@ df -h /data/sqlite/HK
 - Process RSS（`rss_mb`）
 - 磁碟剩餘（`disk_free_gb`）
 
-當 `TELEGRAM_INCLUDE_SYSTEM_METRICS=1` 時，以上指標已包含在摘要訊息。
+當 `TG_INCLUDE_SYSTEM_METRICS=1` 時，以上指標已包含在摘要訊息。
 
 ## 如何驗證
 
@@ -163,10 +180,11 @@ df -h /data/sqlite/HK
 ## 常見問題
 
 - 一重啟就恢復但很快再發：需追根因（磁碟延遲、權限、鎖競爭、OpenD 穩定性），不要只做重啟。
-- 告警太多：先調整 `TELEGRAM_*` 噪音門檻，再檢查實際系統壓力。
+- 告警太多：先調整 `ALERT_COOLDOWN_SEC` 與 `ALERT_ESCALATION_STEPS`，再檢查實際系統壓力。
+- 摘要太密：調大 `HEALTH_TRADING_INTERVAL_SEC` / `HEALTH_OFFHOURS_INTERVAL_SEC`。
 
 ## 參考文件
 
 - 部署：[`docs/deployment.md`](deployment.md)
-- Telegram 設定：[`docs/telegram.md`](telegram.md)
+- Telegram 設定：[`docs/telegram-notify.md`](telegram-notify.md)
 - 詳細維運：[`docs/runbook/operations.md`](runbook/operations.md)

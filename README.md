@@ -125,50 +125,55 @@ sudo systemctl status hk-tick-collector --no-pager
 請在環境設定檔啟用（本機 `.env` 或生產 `systemd` `EnvironmentFile=`）：
 
 ```dotenv
-TELEGRAM_ENABLED=1
-TELEGRAM_BOT_TOKEN=<secret>
-TELEGRAM_CHAT_ID=-1001234567890
-TELEGRAM_THREAD_ID=
-TELEGRAM_DIGEST_INTERVAL_SEC=600
-TELEGRAM_ALERT_COOLDOWN_SEC=600
-TELEGRAM_RATE_LIMIT_PER_MIN=18
-TELEGRAM_INCLUDE_SYSTEM_METRICS=1
+TG_ENABLED=1
+TG_BOT_TOKEN=<secret>
+TG_CHAT_ID=-1001234567890
+TG_MESSAGE_THREAD_ID=
+TG_PARSE_MODE=HTML
+HEALTH_INTERVAL_SEC=600
+HEALTH_TRADING_INTERVAL_SEC=600
+HEALTH_OFFHOURS_INTERVAL_SEC=1800
+ALERT_COOLDOWN_SEC=600
+ALERT_ESCALATION_STEPS=0,600,1800
+TG_RATE_LIMIT_PER_MIN=18
+TG_INCLUDE_SYSTEM_METRICS=1
 INSTANCE_ID=hk-prod-a1
 ```
 
 設計目標：
 
-- 訊息可讀：包含 hostname 與 instance 上下文。
-- 低噪音：摘要週期 + 變更抑制 + 告警 cooldown。
-- 高可靠：非同步佇列 worker、Telegram `429 retry_after` 處理、本地送信 rate limit。
-- 安全降級：通知失敗不會阻塞匯入與落盤流程。
+- human-friendly：第一層 6-10 行可快速判讀是否需處理。
+- 低噪音：狀態變化 + 固定節奏、fingerprint 去重、冷卻與升級提醒。
+- 高可靠：非同步佇列 worker、Telegram `429 retry_after`、本地 sender rate limit。
+- 安全降級：通知失敗不會阻塞匯入與落盤流程（可完全關閉）。
 
 摘要樣例：
 
 ```text
-📈 HK Tick Collector · HEALTH
-host=ip-10-0-1-12 instance=hk-prod-a1 pid=7821 uptime=06:12:05 day=20260212 tz=UTC+8
-db=/data/sqlite/HK/20260212.db rows=2843001 max_ts=2026-02-12T03:15:59+00:00 drift_sec=1.0
-queue=0/50000 push_per_min=24100 poll_fetched=300 accepted=220 persisted_per_min=24310 dup_drop=80
+✅ HK Tick Collector · HEALTH · OK
+結論：正常，資料採集與寫入穩定
+影響：目前不需人工介入
+關鍵：freshness=1.0s persisted/min=24310 queue=0/50000
+主機：ip-10-0-1-12 (hk-prod-a1) day=20260212 mode=open
 symbols:
-- HK.00700 age=0.8 last_persisted_seq=884102 max_seq_lag=0
-- HK.00981 age=1.0 last_persisted_seq=553011 max_seq_lag=0
-sys: load1=0.42 rss_mb=186.5 disk_free_gb=327.44
+ - HK.00700 age=0.8s lag=0
+ - HK.00981 age=1.0s lag=0
+<blockquote expandable>tech: ... suggest: ...</blockquote>
 ```
 
 告警樣例：
 
 ```text
-🚨 HK Tick Collector · PERSIST STALL
-host=ip-10-0-1-12 instance=hk-prod-a1 day=20260212
-stall_sec=242.3/180
-queue=8542/50000 max_seq_lag=812 persisted_per_min=0
-last_persisted_seq: HK.00700=884102 HK.00981=553011
-suggest: journalctl -u hk-tick-collector -n 200 --no-pager
-suggest: sqlite3 /data/sqlite/HK/20260212.db 'select count(*) from ticks;'
+🚨 HK Tick Collector · PERSIST_STALL · ALERT
+結論：異常，疑似停止寫入
+影響：新資料可能未落庫，延遲持續擴大
+需要處理：是
+關鍵：stall_sec=242.3/180 queue=8542/50000 persisted/min=0
+主機：ip-10-0-1-12 (hk-prod-a1) day=20260212 mode=open
+<blockquote expandable>tech: ... suggest: journalctl ... sqlite3 ...</blockquote>
 ```
 
-設定細節請見：[`docs/telegram.md`](docs/telegram.md)
+設定細節請見：[`docs/telegram-notify.md`](docs/telegram-notify.md)
 
 <a id="data-model-and-guarantees"></a>
 ## 資料模型與保證
@@ -251,7 +256,7 @@ sqlite3 "file:${DB}?mode=ro" \
 - 架構：[`docs/architecture.md`](docs/architecture.md)
 - 部署（systemd）：[`docs/deployment/systemd.md`](docs/deployment/systemd.md)
 - 部署速覽：[`docs/deployment.md`](docs/deployment.md)
-- Telegram 設定：[`docs/telegram.md`](docs/telegram.md)
+- Telegram 設定：[`docs/telegram-notify.md`](docs/telegram-notify.md)
 - 維運操作手冊：[`docs/runbook.md`](docs/runbook.md)
 - 延伸維運操作手冊：[`docs/runbook/operations.md`](docs/runbook/operations.md)
 - 一頁式 Runbook：[`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)

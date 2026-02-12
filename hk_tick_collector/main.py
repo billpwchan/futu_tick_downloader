@@ -13,7 +13,7 @@ from .config import Config
 from .db import SQLiteTickStore
 from .futu_client import FutuQuoteClient
 from .logging_config import setup_logging
-from .notifiers.telegram import AlertEvent, TelegramNotifier
+from .notifiers.telegram import AlertEvent, NotifySeverity, TelegramNotifier
 
 logger = logging.getLogger(__name__)
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
@@ -49,15 +49,19 @@ async def run() -> None:
                 bot_token=config.telegram_bot_token,
                 chat_id=config.telegram_chat_id,
                 thread_id=config.telegram_thread_id,
-                digest_interval_sec=config.telegram_digest_interval_sec,
+                parse_mode=config.telegram_parse_mode,
+                health_interval_sec=config.telegram_health_interval_sec,
+                health_trading_interval_sec=config.telegram_health_trading_interval_sec,
+                health_offhours_interval_sec=config.telegram_health_offhours_interval_sec,
                 alert_cooldown_sec=config.telegram_alert_cooldown_sec,
+                alert_escalation_steps=config.telegram_alert_escalation_steps,
                 rate_limit_per_min=config.telegram_rate_limit_per_min,
                 include_system_metrics=config.telegram_include_system_metrics,
                 instance_id=config.instance_id,
+                drift_warn_sec=config.drift_warn_sec,
                 digest_queue_change_pct=config.telegram_digest_queue_change_pct,
                 digest_last_tick_age_threshold_sec=config.telegram_digest_last_tick_age_threshold_sec,
                 digest_drift_threshold_sec=config.telegram_digest_drift_threshold_sec,
-                digest_send_alive_when_idle=config.telegram_digest_send_alive_when_idle,
             )
             await notifier.start()
         except Exception:
@@ -152,9 +156,13 @@ async def run() -> None:
             notifier.submit_alert(
                 AlertEvent(
                     created_at=datetime.now(tz=timezone.utc),
-                    code="SERVICE_EXIT",
-                    key="SERVICE_EXIT",
+                    code="RESTART",
+                    key="RESTART",
+                    fingerprint="RESTART",
                     trading_day=datetime.now(tz=HK_TZ).strftime("%Y%m%d"),
+                    severity=NotifySeverity.ALERT.value,
+                    headline="異常：服務出現致命錯誤，systemd 可能觸發重啟",
+                    impact="若反覆重啟，資料連續性可能受影響",
                     summary_lines=[
                         f"reason={type(fatal_error).__name__}",
                         "service_exit=unexpected",
