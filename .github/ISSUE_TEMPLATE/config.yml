@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Support Questions
+  - name: 使用與維運問題
     url: https://github.com/billpwchan/futu_tick_downloader/discussions
-    about: Ask usage and troubleshooting questions here.
-  - name: Security Reports
+    about: 一般使用、設定與故障排除問題請在此提問。
+  - name: 安全性通報
     url: mailto:security@hk-tick-collector.example.com
-    about: Report vulnerabilities privately.
+    about: 安全弱點請透過私下管道通報。

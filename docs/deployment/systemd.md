@@ -1,15 +1,19 @@
-# Deployment: Linux + systemd
+# 部署：Linux + systemd
 
-This is the primary production deployment target.
+## 目的
 
-## Prerequisites
+說明 `hk-tick-collector` 在 Linux + `systemd` 的標準生產部署流程。
 
-- Linux host (Ubuntu recommended)
-- Futu OpenD installed and running
+## 前置條件
+
+- Linux 主機（建議 Ubuntu）
+- Futu OpenD 已安裝且可運行
 - Python 3.10+
-- writable data directory (default `/data/sqlite/HK`)
+- 可寫入資料目錄（預設 `/data/sqlite/HK`）
 
-## Install Service
+## 步驟
+
+### 1) 安裝服務
 
 ```bash
 sudo useradd --system --home /opt/futu_tick_downloader --shell /usr/sbin/nologin hkcollector || true
@@ -24,9 +28,9 @@ sudo -u hkcollector /opt/futu_tick_downloader/.venv/bin/pip install -U pip
 sudo -u hkcollector /opt/futu_tick_downloader/.venv/bin/pip install -e /opt/futu_tick_downloader
 ```
 
-## Sample Unit File
+### 2) 準備 unit 檔
 
-Use `deploy/systemd/hk-tick-collector.service` as source of truth.
+以 `deploy/systemd/hk-tick-collector.service` 為唯一來源。
 
 ```ini
 [Unit]
@@ -57,15 +61,15 @@ ReadWritePaths=/data/sqlite/HK /opt/futu_tick_downloader
 WantedBy=multi-user.target
 ```
 
-### Why these lines matter
+關鍵行為說明：
 
-- `Requires=futu-opend.service`: collector lifecycle tied to OpenD availability.
-- `EnvironmentFile=`: env-driven config update without code changes.
-- `Restart=always`: watchdog exits can be recovered by systemd.
-- `KillSignal=SIGINT` + `TimeoutStopSec`: allows graceful queue flush.
-- hardening flags (`NoNewPrivileges`, `ProtectSystem`, etc.) reduce blast radius.
+- `Requires=futu-opend.service`：讓 collector 生命週期依附 OpenD。
+- `EnvironmentFile=`：可透過 env 更新設定而不改程式碼。
+- `Restart=always`：Watchdog 非零退出時可由 systemd 自動拉起。
+- `KillSignal=SIGINT` + `TimeoutStopSec`：保障優雅停機與佇列排空。
+- 強化旗標（`NoNewPrivileges`、`ProtectSystem` 等）可降低風險面。
 
-## Activate
+### 3) 啟用服務
 
 ```bash
 sudo cp /opt/futu_tick_downloader/deploy/systemd/hk-tick-collector.service /etc/systemd/system/hk-tick-collector.service
@@ -78,17 +82,17 @@ sudo systemctl enable --now hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
 
-## Updating Env Safely
+### 4) 安全更新 env
 
-1. Edit `/opt/futu_tick_downloader/.env`.
-2. If only env changed, `daemon-reload` is optional but safe.
-3. Restart service:
+1. 編輯 `/opt/futu_tick_downloader/.env`。
+2. 若僅 env 變更，`daemon-reload` 可省略（執行也安全）。
+3. 重啟服務：
 
 ```bash
 sudo systemctl restart hk-tick-collector
 ```
 
-4. Verify:
+4. 驗證：
 
 ```bash
 sudo journalctl -u hk-tick-collector --since "5 minutes ago" --no-pager | tail -n 100
@@ -97,25 +101,25 @@ DB=/data/sqlite/HK/${DAY}.db
 bash /opt/futu_tick_downloader/scripts/db_health_check.sh "$DB"
 ```
 
-## Safe Restart and Stop
+### 5) 安全重啟與停機
 
-Safe restart:
+安全重啟：
 
 ```bash
 sudo systemctl restart hk-tick-collector
 ```
 
-Safe stop (for maintenance):
+維護停機：
 
 ```bash
 sudo systemctl stop hk-tick-collector
 ```
 
-Graceful flush occurs during `TimeoutStopSec` window.
+服務會在 `TimeoutStopSec` 視窗內進行優雅排空。
 
-## Health Verification
+## 如何驗證
 
-System checks:
+系統檢查：
 
 ```bash
 sudo systemctl is-active hk-tick-collector
@@ -123,7 +127,7 @@ sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
   | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG"
 ```
 
-DB freshness query:
+DB 新鮮度查詢：
 
 ```bash
 DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)
@@ -131,16 +135,21 @@ DB=/data/sqlite/HK/${DAY}.db
 sqlite3 "file:${DB}?mode=ro" "SELECT ROUND(strftime('%s','now') - MAX(ts_ms)/1000.0,3) AS lag_sec, COUNT(*) AS rows FROM ticks;"
 ```
 
-## Log and Disk Management Tips
+## 常見問題
 
-- keep journald retention bounded (`SystemMaxUse=` in `journald.conf`).
-- monitor DB and WAL growth:
+- 服務頻繁重啟：優先檢查 Watchdog 門檻、OpenD 穩定性與磁碟權限。
+- `database is locked`：參考 [`docs/runbook/sqlite-wal.md`](../runbook/sqlite-wal.md)。
+
+## 日誌與磁碟管理建議
+
+- 控制 journald 保留量（`journald.conf` 的 `SystemMaxUse=`）。
+- 定期監控 DB 與 WAL 成長：
 
 ```bash
 sudo du -sh /data/sqlite/HK/* | sort -h | tail -n 20
 ```
 
-- checkpoint WAL only during controlled operations if needed:
+- 僅在受控維護時段需要時執行 WAL checkpoint：
 
 ```bash
 sqlite3 /data/sqlite/HK/$(TZ=Asia/Hong_Kong date +%Y%m%d).db "PRAGMA wal_checkpoint(TRUNCATE);"

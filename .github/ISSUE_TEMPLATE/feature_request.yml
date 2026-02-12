@@ -1,40 +1,40 @@
-name: Feature request
-description: Suggest an improvement for hk-tick-collector
+name: 功能建議
+description: 提出 hk-tick-collector 的改進想法
 title: "[Feature] "
 labels: [enhancement]
 body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem statement
-      description: What production or developer pain does this solve?
+      label: 問題陳述
+      description: 這要解決哪個生產或開發痛點？
     validations:
       required: true
 
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed solution
-      description: What should change?
+      label: 建議方案
+      description: 你希望調整什麼？
     validations:
       required: true
 
   - type: textarea
     id: compatibility
     attributes:
-      label: Backward compatibility
-      description: Any runtime behavior changes? Default-safe path?
-      placeholder: No behavior change by default / additive only
+      label: 向後相容
+      description: 是否有執行期行為變更？是否有預設安全路徑？
+      placeholder: 預設行為不變／僅新增不破壞
     validations:
       required: true
 
   - type: textarea
     id: ops
     attributes:
-      label: Operational impact
-      description: Effects on systemd deployment, logs, runbooks, or troubleshooting.
+      label: 維運影響
+      description: 對 systemd 部署、日誌、runbook 或故障排除的影響。
 
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives considered
+      label: 其他替代方案

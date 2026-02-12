@@ -1,10 +1,10 @@
-# Architecture
+# 架構說明
 
-## Purpose
+## 目的
 
-`hk-tick-collector` ingests HK tick data from Futu OpenD and persists it into SQLite per trading day, with idempotent writes and operational guardrails for long-running `systemd` services.
+`hk-tick-collector` 從 Futu OpenD 匯入港股 tick 資料，按交易日落盤到 SQLite，並透過冪等寫入與維運護欄支援長時間 `systemd` 執行。
 
-## Data Flow
+## 資料流
 
 ```mermaid
 flowchart LR
@@ -19,52 +19,52 @@ flowchart LR
     H --> I["watchdog\nrecover/exit"]
 ```
 
-## Core Components
+## 核心元件
 
-- `hk_tick_collector/main.py`: app bootstrap, signal wiring, lifecycle orchestration.
-- `hk_tick_collector/futu_client.py`: OpenD connection, push/poll, health and watchdog.
-- `hk_tick_collector/collector.py`: async queue + dedicated persist worker thread.
-- `hk_tick_collector/db.py`: schema creation/migration, PRAGMA setup, writer abstraction.
-- `hk_tick_collector/mapping.py`: converts upstream rows to internal `TickRow`.
+- `hk_tick_collector/main.py`：啟動流程、signal 掛載、生命週期協調。
+- `hk_tick_collector/futu_client.py`：OpenD 連線、push/poll、健康檢查與 Watchdog。
+- `hk_tick_collector/collector.py`：非同步佇列 + 專用落盤 worker thread。
+- `hk_tick_collector/db.py`：schema 建立／遷移、PRAGMA 設定、writer 抽象。
+- `hk_tick_collector/mapping.py`：將上游資料列轉為內部 `TickRow`。
 
-## Storage and Dedupe
+## 儲存與去重
 
-- Daily DB: `DATA_ROOT/YYYYMMDD.db`
-- Table: `ticks`
-- Unique indexes:
-  - `uniq_ticks_symbol_seq` where `seq IS NOT NULL`
-  - `uniq_ticks_symbol_ts_price_vol_turnover` where `seq IS NULL`
-- Insert mode: `INSERT OR IGNORE`
+- 每日 DB：`DATA_ROOT/YYYYMMDD.db`
+- 資料表：`ticks`
+- 唯一索引：
+  - `uniq_ticks_symbol_seq`（`seq IS NOT NULL`）
+  - `uniq_ticks_symbol_ts_price_vol_turnover`（`seq IS NULL`）
+- 寫入模式：`INSERT OR IGNORE`
 
-This yields idempotent persistence under retries and overlapping push/poll windows.
+此設計可在重試與 push/poll 重疊期間維持冪等落盤。
 
-## Timestamp Semantics
+## 時間戳語義
 
-`ts_ms` and `recv_ts_ms` semantics are intentionally strict:
+`ts_ms` 與 `recv_ts_ms` 採嚴格語義：
 
-- `ts_ms`: event time in UTC epoch milliseconds.
-- `recv_ts_ms`: collector receive time in UTC epoch milliseconds.
-- HK market local timestamps (without timezone) are interpreted as `Asia/Hong_Kong`, then converted to UTC epoch.
+- `ts_ms`：事件時間，UTC epoch 毫秒。
+- `recv_ts_ms`：採集器接收時間，UTC epoch 毫秒。
+- 港股本地時間（無時區）一律先按 `Asia/Hong_Kong` 解讀，再轉 UTC epoch。
 
-No runtime behavior should change unless fixing correctness bugs.
+除修正正確性 bug 外，不應任意改變執行期行為。
 
-## Watchdog Design
+## Watchdog 設計
 
-Watchdog checks happen from health loop and rely on durable signals:
+Watchdog 由健康檢查迴圈觸發，依賴可持續訊號：
 
-- upstream still active recently,
-- queue backlog above `WATCHDOG_QUEUE_THRESHOLD_ROWS`,
-- commit progress stalled (`commit_age >= WATCHDOG_STALL_SEC`) or worker dead.
+- 上游近期仍有活動，
+- 佇列 backlog 超過 `WATCHDOG_QUEUE_THRESHOLD_ROWS`，
+- commit 進度停滯（`commit_age >= WATCHDOG_STALL_SEC`）或 worker 已失效。
 
-Recovery path:
+恢復路徑：
 
-1. emit diagnostics/thread dump,
-2. attempt writer recovery in-process,
-3. if repeated failures exceed threshold, exit non-zero and let `systemd` restart.
+1. 輸出診斷與 thread dump。
+2. 嘗試程序內 writer recovery。
+3. 若連續失敗超過門檻，非零退出交由 `systemd` 重啟。
 
-## Reliability Notes
+## 可靠性補充
 
-- WAL mode enables concurrent read while writing.
-- `busy_timeout` and backoff protect against transient lock contention.
-- Heartbeat logs provide queue/drain/commit visibility.
-- Graceful stop drains queue within `STOP_FLUSH_TIMEOUT_SEC`.
+- WAL 模式可在寫入時維持讀取併發。
+- `busy_timeout` 與 backoff 降低暫時鎖衝突影響。
+- 心跳日誌提供佇列／排空／commit 可觀測性。
+- 優雅停止會在 `STOP_FLUSH_TIMEOUT_SEC` 內盡量排空佇列。

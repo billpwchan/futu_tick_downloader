@@ -1,58 +1,79 @@
-# Troubleshooting
+# 故障排除
 
-## Service Not Starting
+## 目的
 
-Checks:
+快速定位 `hk-tick-collector` 在生產環境常見異常，並提供最短修復路徑。
+
+## 前置條件
+
+- 可使用 `sudo` 查看 `systemd` 與 `journalctl`
+- 可讀取當日 SQLite 檔案
+
+## 步驟
+
+### 1) 服務無法啟動
+
+檢查命令：
 
 ```bash
 sudo systemctl status hk-tick-collector --no-pager
 sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager
 ```
 
-Common causes:
+常見原因：
 
-- `FUTU_SYMBOLS` empty
-- invalid numeric env value
-- data directory permission denied
+- `FUTU_SYMBOLS` 為空
+- 數值型環境變數格式錯誤
+- 資料目錄權限不足
 
-## OpenD Connectivity Fails
+### 2) OpenD 連線失敗
 
-Symptoms:
+症狀：
 
-- subscribe failures
-- reconnect loop logs
+- subscribe 失敗
+- 日誌持續重連
 
-Actions:
+處理：
 
 ```bash
 sudo systemctl status futu-opend --no-pager
 nc -vz 127.0.0.1 11111
 ```
 
-Verify `FUTU_HOST/FUTU_PORT` match OpenD settings.
+確認 `FUTU_HOST/FUTU_PORT` 與 OpenD 設定一致。
 
-## `WATCHDOG persistent_stall`
+### 3) `WATCHDOG persistent_stall`
 
-Use dedicated incident runbook:
+請使用專用事件操作手冊：
 
 - [`docs/runbook/incident-watchdog-stall.md`](runbook/incident-watchdog-stall.md)
 
-## SQLite Busy / Locked
+### 4) SQLite Busy / Locked
 
-- check lock holders and retries
-- inspect `sqlite_busy_backoff` frequency
-- see [`docs/runbook/sqlite-wal.md`](runbook/sqlite-wal.md)
+- 檢查鎖持有者與重試狀況
+- 觀察 `sqlite_busy_backoff` 頻率
+- 參考 [`docs/runbook/sqlite-wal.md`](runbook/sqlite-wal.md)
 
-## WAL File Keeps Growing
+### 5) WAL 檔案持續膨脹
 
-- verify auto-checkpoint setting
-- verify writer is still progressing
-- run controlled checkpoint if required
+- 確認 auto-checkpoint 設定
+- 確認 writer 是否持續推進
+- 必要時在受控維護時段手動 checkpoint
 
-## Timezone / Timestamp Confusion
+### 6) 時區／時間戳看起來不一致
 
-- `ts_ms` is UTC epoch ms
-- SQLite `datetime(...,'unixepoch')` renders UTC
-- convert at query or visualization layer when local-time display is needed
+- `ts_ms` 為 UTC epoch ms
+- SQLite `datetime(...,'unixepoch')` 預設為 UTC
+- 若要顯示本地時間，應在查詢層或視覺化層轉換
 
-See [`docs/runbook/data-quality.md`](runbook/data-quality.md).
+詳見 [`docs/runbook/data-quality.md`](runbook/data-quality.md)。
+
+## 如何驗證
+
+- `health`、`persist_ticks` 日誌恢復連續輸出。
+- DB 查詢的 `MAX(ts_ms)` 持續前進。
+
+## 常見問題
+
+- 重啟後仍異常：先確認 OpenD 與磁碟權限，再看 Watchdog 事件手冊。
+- SQL 顯示時間差 8 小時：多半是展示層時區轉換方式不一致。

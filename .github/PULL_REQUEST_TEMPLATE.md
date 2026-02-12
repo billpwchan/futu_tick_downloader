@@ -1,28 +1,28 @@
-## Summary
+## 摘要
 
-- 
+-
 
-## What Changed
+## 變更內容
 
-- 
+-
 
-## Backward Compatibility
+## 向後相容
 
-- [ ] No breaking change to default runtime behavior
-- [ ] Existing systemd ExecStart path remains valid (`python -m hk_tick_collector.main`)
+- [ ] 預設執行期行為無破壞性變更
+- [ ] 既有 systemd ExecStart 路徑仍可用（`python -m hk_tick_collector.main`）
 
-## Test Plan
+## 測試計畫
 
 - [ ] `pytest -q`
 - [ ] `pre-commit run -a`
-- [ ] (if applicable) manual systemd verification
+- [ ] （如適用）手動 `systemd` 驗證
 
-## Operational Checklist
+## 維運檢查清單
 
-- [ ] Updated docs/runbook if behavior or observability changed
-- [ ] Updated `.env.example` if configuration changed
-- [ ] Added/updated migration notes if schema changed
+- [ ] 若行為或可觀測性變更，已更新 docs/runbook
+- [ ] 若設定變更，已更新 `.env.example`
+- [ ] 若 schema 變更，已補 migration 說明
 
-## Deployment Notes
+## 部署備註
 
-- 
+-

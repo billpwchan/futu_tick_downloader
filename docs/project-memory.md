@@ -1,35 +1,35 @@
-# Project Memory
+# 專案記憶（Project Memory）
 
-## 2026-02-12: Telegram group notifier (low-noise digest + key alerts)
+## 2026-02-12：Telegram 群組通知（低噪音摘要 + 關鍵告警）
 
-### What changed
+### 變更內容
 
-- Added notifier module:
+- 新增 notifier 模組：
   - `hk_tick_collector/notifiers/telegram.py`
-  - async queue + single worker sender
-  - local shared rate limiter (`TELEGRAM_RATE_LIMIT_PER_MIN`, default `18`)
-  - Telegram `429 retry_after` retry path (bounded retries)
-  - alert-key cooldown dedupe (`TELEGRAM_ALERT_COOLDOWN_SEC`)
-  - message truncation guard (`<=4096`, with `...(truncated)` suffix)
-- Added health/alert event snapshots:
-  - `HealthSnapshot`, `SymbolSnapshot`, `AlertEvent`
-- Reused existing event sources instead of introducing a heavy event bus:
+  - 非同步佇列 + 單一 sender worker
+  - 本地共享 rate limiter（`TELEGRAM_RATE_LIMIT_PER_MIN`，預設 `18`）
+  - Telegram `429 retry_after` 重試路徑（有界重試）
+  - alert-key cooldown 去重（`TELEGRAM_ALERT_COOLDOWN_SEC`）
+  - 訊息長度保護（`<=4096`，超出加 `...(truncated)`）
+- 新增健康／告警快照物件：
+  - `HealthSnapshot`、`SymbolSnapshot`、`AlertEvent`
+- 沿用既有事件來源，未引入重型 event bus：
   - `futu_client._health_loop` -> digest snapshots
   - `futu_client._check_watchdog` -> `PERSIST_STALL` alerts
   - `collector` runtime busy/locked counters -> `SQLITE_BUSY` alerts
-- Main lifecycle integration:
-  - `main.py` starts/stops notifier safely
-  - notifier errors never break ingest/persist pipeline
-- Added DB helper:
-  - `SQLiteTickStore.fetch_tick_stats(trading_day)` for digest `rows/max_ts`
-- Watchdog criterion tightened for “true stall”:
-  - requires backlog-or-enqueued signal
-  - requires persist quiet + commit age over threshold
-  - avoids duplicate-only false alarms
+- 主流程生命週期整合：
+  - `main.py` 以安全方式啟停 notifier
+  - notifier 失敗不影響匯入／落盤主路徑
+- 新增 DB helper：
+  - `SQLiteTickStore.fetch_tick_stats(trading_day)`，供摘要顯示 `rows/max_ts`
+- Watchdog 停滯判定收斂為「真停滯」：
+  - 需要 backlog 或 enqueued 訊號
+  - 需要 persist 安靜 + commit age 超過門檻
+  - 避免 duplicate-only 假告警
 
-### New configuration
+### 新增設定
 
-- Required Telegram controls:
+- Telegram 必要控制項：
   - `TELEGRAM_ENABLED`
   - `TELEGRAM_BOT_TOKEN`
   - `TELEGRAM_CHAT_ID`
@@ -39,26 +39,26 @@
   - `TELEGRAM_RATE_LIMIT_PER_MIN`
   - `TELEGRAM_INCLUDE_SYSTEM_METRICS`
   - `INSTANCE_ID`
-- Additional noise-tuning knobs:
+- 額外噪音調校：
   - `TELEGRAM_DIGEST_QUEUE_CHANGE_PCT`
   - `TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC`
   - `TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC`
   - `TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE`
   - `TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD`
 
-### Tests added
+### 新增測試
 
 - `tests/test_telegram_notifier.py`
-  - formatter/line budget + truncation
-  - sliding-window rate limiter cap
-  - alert cooldown dedupe
-  - `429 retry_after` handling
+  - formatter 行長與截斷
+  - 滑動視窗 rate limiter 上限
+  - alert cooldown 去重
+  - `429 retry_after` 處理
 - `tests/test_futu_client.py`
-  - watchdog trigger when enqueued-window positive even below queue threshold
+  - queue 未達門檻但 enqueued-window 為正時，Watchdog 仍可觸發
 
-### Docs updated
+### 更新文件
 
-- `README.md` (Telegram feature + examples)
+- `README.md`（Telegram 功能 + 範例）
 - `docs/deployment.md`
 - `docs/telegram.md`
 - `docs/runbook.md`
@@ -66,17 +66,16 @@
 - `.env.example`
 - `deploy/systemd/hk-tick-collector.service`
 
-## 2026-02-11: OSS release hardening (docs/community/packaging/CI)
+## 2026-02-11：OSS 發版強化（docs/community/packaging/CI）
 
-### What changed
+### 變更內容
 
-- Repositioned repo for open-source onboarding:
-  - `README.md` (English, production-oriented quickstart + operations)
-  - `README.zh-CN.md` (Chinese quickstart)
+- 針對開源上手重整 repo 入口：
+  - `README.md`
   - `docs/getting-started.md`
   - `docs/troubleshooting.md`
   - `docs/faq.md`
-- Added canonical docs layout and runbooks:
+- 新增標準化文件與 runbook：
   - `docs/deployment/systemd.md`
   - `docs/deployment/docker.md`
   - `docs/runbook/operations.md`
@@ -84,195 +83,194 @@
   - `docs/runbook/sqlite-wal.md`
   - `docs/runbook/data-quality.md`
   - `docs/releasing.md`
-- Added examples and operational helpers:
+- 新增操作範例與維運腳本：
   - `scripts/db_health_check.sh`
   - `scripts/query_examples.sql`
   - `scripts/export_csv.py`
-- Added OSS community hygiene files:
-  - `LICENSE`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `CODEOWNERS`, `MAINTAINERS.md`
-  - `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`
-- Added release-ready Python packaging/tooling:
-  - `pyproject.toml` (PEP 621 metadata + console script `hk-tick-collector`)
+- 新增社群治理文件：
+  - `LICENSE`、`CODE_OF_CONDUCT.md`、`CONTRIBUTING.md`、`SECURITY.md`、`SUPPORT.md`、`CODEOWNERS`、`MAINTAINERS.md`
+  - `.github/ISSUE_TEMPLATE/*`、`.github/PULL_REQUEST_TEMPLATE.md`
+- 新增封裝／工具／CI：
+  - `pyproject.toml`（PEP 621 metadata + `hk-tick-collector`）
   - `.pre-commit-config.yaml`
   - `.github/workflows/ci.yml`
   - `.github/workflows/release.yml`
   - `CHANGELOG.md`
-- Added entrypoint and tests:
+- 新增入口與測試：
   - `hk_tick_collector/__main__.py`
   - `tests/test_entrypoint.py`
-  - watchdog fake-time regression test in `tests/test_futu_client.py`
+  - `tests/test_futu_client.py` fake-time regression
 
-### Behavior compatibility statement
+### 相容性聲明
 
-- Default runtime behavior preserved:
-  - systemd `ExecStart=/opt/futu_tick_downloader/.venv/bin/python -m hk_tick_collector.main` remains valid.
-  - New `hk-tick-collector` command is additive alias only.
-- Timestamp semantics unchanged and explicitly documented:
-  - `ts_ms` / `recv_ts_ms` remain UTC epoch milliseconds.
-  - HK-local source timestamps remain interpreted as `Asia/Hong_Kong` then converted to UTC epoch.
+- 預設執行期行為維持不變：
+  - `systemd` `ExecStart=/opt/futu_tick_downloader/.venv/bin/python -m hk_tick_collector.main` 持續有效。
+  - 新增 `hk-tick-collector` 只為加法別名。
+- 時間戳語義維持不變且已明確文件化：
+  - `ts_ms`、`recv_ts_ms` 皆為 UTC epoch 毫秒。
+  - 港股本地時間仍按 `Asia/Hong_Kong` 解讀後轉 UTC。
 
-## 2026-02-11: docs/runbook standardization + watchdog threshold fix
+## 2026-02-11：runbook 標準化 + Watchdog 門檻修正
 
-### What changed
+### 變更內容
 
-- Documentation standardized and split by concern:
+- 文件依關注點拆分：
   - `README.md`
   - `docs/architecture.md`
   - `docs/configuration.md`
   - `docs/deployment/systemd.md`
   - `docs/runbook/operations.md`
-- Added ops scripts:
+- 新增維運腳本：
   - `scripts/verify_db.sh`
   - `scripts/tail_logs.sh`
   - `scripts/healthcheck.sh`
   - `scripts/install_systemd.sh`
-- Added recommended unit template:
+- 新增建議 unit 範本：
   - `deploy/systemd/hk-tick-collector.service`
 
-### Root cause and minimal code fix
+### 根因與最小修復
 
-- Root cause: `WATCHDOG_QUEUE_THRESHOLD_ROWS` existed in config but was not used by watchdog logic.
-- Fix: watchdog now requires `queue_size >= WATCHDOG_QUEUE_THRESHOLD_ROWS` before stall/recovery path.
-- Outcome: reduces false positives when backlog is tiny or absent.
+- 根因：`WATCHDOG_QUEUE_THRESHOLD_ROWS` 已存在設定，但舊邏輯未使用。
+- 修復：Watchdog 需滿足 `queue_size >= WATCHDOG_QUEUE_THRESHOLD_ROWS` 才進入停滯／恢復流程。
+- 效果：降低小 backlog 或無 backlog 場景的誤報。
 
-### Regression coverage
+### 回歸覆蓋
 
 - `tests/test_futu_client.py::test_watchdog_honors_queue_threshold`
 - `tests/test_futu_client.py::test_watchdog_ignores_duplicate_only_window_without_backlog`
-- `tests/test_config.py` for env parsing behavior
+- `tests/test_config.py`
 - `tests/test_schema.py::test_connect_applies_sqlite_pragmas`
-- `tests/test_smoke_pipeline.py` end-to-end local smoke
+- `tests/test_smoke_pipeline.py`
 
-## 2026-02-11: one-shot hardening for watchdog/timestamp semantics
+## 2026-02-11：Watchdog/時間戳一次性強化
 
-### What changed
+### 變更內容
 
-- Timestamp semantics:
-  - `ticks.ts_ms` is enforced as UTC epoch milliseconds (absolute event time).
-  - Added `ticks.recv_ts_ms` as UTC epoch milliseconds (collector receive time).
-  - `mapping.parse_time_to_ts_ms` now normalizes numeric epoch seconds/milliseconds and HK local time text via `ZoneInfo("Asia/Hong_Kong")`.
-- Persist stability:
-  - SQLite PRAGMA on each writer connection now includes `temp_store=MEMORY` in addition to `WAL/NORMAL,busy_timeout,wal_autocheckpoint`.
-  - Busy/locked and other sqlite write errors are logged with full traceback (`logger.exception`) + exponential backoff + connection reset.
-  - Commit heartbeat (`last_commit_monotonic`) updates even when batch is fully ignored/duplicate.
-- Watchdog:
-  - Stall condition simplified to durable signal: `queue>0 && (now_monotonic-last_commit_monotonic)>=WATCHDOG_STALL_SEC`.
-  - On stall: stack dump -> in-process writer recovery.
-  - Only exits after repeated recovery failures, exit code switched to `1`.
-- Poll noise reduction:
-  - Poll runs only when push/tick becomes stale (`FUTU_POLL_STALE_SEC`).
-  - Poll dedupe baseline moved to `last_persisted_seq` (durable progress).
-- Ops:
-  - Added `scripts/check_ts_semantics.py` (`max(ts_ms)-now_utc` within tolerance, default `±5s`).
-- Added scripted restart acceptance checks (now consolidated under `scripts/`).
+- 時間戳語義：
+  - `ticks.ts_ms` 強制為 UTC epoch 毫秒（事件時間）
+  - 新增 `ticks.recv_ts_ms`（接收時間）
+  - `mapping.parse_time_to_ts_ms` 將數字 epoch 與 HK 本地文字時間統一轉換（`ZoneInfo("Asia/Hong_Kong")`）
+- 落盤穩定性：
+  - writer 連線 PRAGMA 增加 `temp_store=MEMORY`
+  - SQLite 寫入錯誤以 `logger.exception` 記錄完整 traceback，並做 backoff + 連線重設
+  - 即使 batch 全為 duplicate，`last_commit_monotonic` 仍會更新
+- Watchdog：
+  - 停滯條件收斂為 `queue>0 && (now_monotonic-last_commit_monotonic)>=WATCHDOG_STALL_SEC`
+  - 觸發時先 dump stack，再做程序內 writer recovery
+  - 連續失敗才非零退出（改為 `1`）
+- Poll 降噪：
+  - 只有 push/tick 停滯才啟動 poll（`FUTU_POLL_STALE_SEC`）
+  - poll 去重基線改用 `last_persisted_seq`
+- 維運：
+  - 新增 `scripts/check_ts_semantics.py`
 
-## 2026-02-10: HK tick pipeline hidden stall fix
+## 2026-02-10：HK tick pipeline 隱性停滯修復
 
-### Incident summary
+### 事件摘要
 
-- Symptom: `poll_stats fetched=100 enqueued=0` repeated while `persist_ticks` disappeared for hours.
-- Impact: SQLite file stopped growing; measured max gap reached ~3.27 hours.
-- Temporary recovery: restart service and clear stale WAL/SHM side files.
+- 症狀：`poll_stats fetched=100 enqueued=0` 重複出現，`persist_ticks` 長時間消失。
+- 影響：SQLite 檔案停止成長，最大缺口約 3.27 小時。
+- 臨時復原：重啟服務並清理陳舊 WAL/SHM side files。
 
-### Root cause
+### 根因
 
-- Single `last_seq` mixed multiple semantics.
-- `poll` dedupe used this in-memory progress, which could run ahead of durable DB progress when persist path stalled.
-- During queue backpressure / flush stall, pipeline could keep seeing upstream activity but stop durable writes, becoming a silent failure.
+- 單一 `last_seq` 混合多種語義。
+- poll 去重使用記憶體進度，可能超前於 DB 持久進度。
+- 在 queue backpressure／flush stall 下，上游仍活躍但落盤可靜默失效。
 
-### Permanent fix
+### 永久修復
 
-- Split sequence state:
-  - `last_seen_seq`: upstream observed max seq (observability only)
-  - `last_accepted_seq`: successfully enqueued max seq
-  - `last_persisted_seq`: successfully committed max seq
-- Poll dedupe baseline now uses `max(last_accepted_seq, last_persisted_seq)`; no longer depends on seen-only seq.
-- Enqueue failure never advances accepted/persisted seq.
-- Added watchdog: if upstream remains active and persist is stalled beyond threshold, process logs `WATCHDOG` and exits with code `2` for systemd auto-restart.
+- 序列狀態拆分：
+  - `last_seen_seq`：僅觀測到的上游最大 seq
+  - `last_accepted_seq`：成功入佇列的最大 seq
+  - `last_persisted_seq`：成功 commit 的最大 seq
+- poll 去重基線改為 `max(last_accepted_seq, last_persisted_seq)`。
+- enqueue 失敗不再推進 accepted/persisted seq。
+- 新增 Watchdog：若上游活躍但落盤停滯超過門檻，記錄 `WATCHDOG` 並退出（`exit code 1`，由 systemd 自動重啟）。
 
-### Observability upgrades
+### 可觀測性升級
 
-- `poll_stats` now includes queue utilization, accepted/enqueued counts, drop reasons, and all three seq states.
-- `persist_ticks` includes commit latency and ignored counts.
-- `health` emits per-minute rollups for push/poll/persist/drop counters.
+- `poll_stats` 新增 queue utilization、accepted/enqueued、drop reasons 與三種 seq 狀態。
+- `persist_ticks` 新增 commit latency 與 ignored 數。
+- `health` 新增每分鐘 push/poll/persist/drop rollup。
 
-### Tests added
+### 新增測試
 
-- Enqueue failure does not advance accepted/persisted seq.
-- Push updates seen seq but does not poison poll dedupe baseline.
-- Watchdog exits when upstream is active but persist remains stalled.
+- enqueue 失敗不會推進 accepted/persisted seq
+- push 更新 seen seq 不污染 poll 去重基線
+- 上游活躍且 persist 停滯時 Watchdog 退出
 
-## 2026-02-10: timestamp drift and persist-loop hardening
+## 2026-02-10：時鐘漂移與 persist-loop 強化
 
-### Incident summary
+### 事件摘要
 
-- `ts_ms` 出现与 UTC epoch 偏离约 8 小时，导致基于 `strftime('%s','now')` 的窗口查询失真。
-- 线上出现 `WATCHDOG persistent_stall`，表现为上游仍活跃但 `persisted_rows_per_min=0` 且队列增长。
+- `ts_ms` 曾出現與 UTC epoch 偏離約 8 小時，導致 `strftime('%s','now')` 視窗查詢失真。
+- 線上出現 `WATCHDOG persistent_stall`，呈現上游活躍但 `persisted_rows_per_min=0` 且 queue 增長。
 
-### Root cause
+### 根因
 
-- 时间解析对 naive datetime 依赖系统时区，未显式按 `Asia/Hong_Kong` 解释市场时间。
-- persist loop 对落库异常仅记录后继续，缺少“重试上限 + fatal 信号”，可能形成长期停摆风险。
+- naive datetime 解析依賴系統時區，未顯式以 `Asia/Hong_Kong` 解讀。
+- persist loop 對落盤異常僅記錄後繼續，缺少重試上限與 fatal 訊號。
 
-### Permanent fix
+### 永久修復
 
-- `mapping.parse_time_to_ts_ms` 统一为 `Asia/Hong_Kong -> UTC epoch ms` 转换。
-- `trading_day_from_ts` 改为 UTC->HK 反推，摆脱系统时区依赖。
-- collector 持久化新增重试与 fatal 机制：
-  - `persist_flush_failed` 带上下文（queue/db path/last seq）日志。
-  - 超过重试上限触发 `persist_loop_exited`，主流程非零退出。
-- health/poll 增加 `queue_in/queue_out`、`last_commit_monotonic_age_sec`、`db_write_rate`、`ts_drift_sec`。
-- watchdog stall 仅基于 monotonic commit 时间计算。
+- `mapping.parse_time_to_ts_ms` 統一 `Asia/Hong_Kong -> UTC epoch ms`。
+- `trading_day_from_ts` 改為 UTC->HK 反推，移除系統時區依賴。
+- persist 增加重試與 fatal：
+  - `persist_flush_failed` 日誌包含 queue/db path/last seq
+  - 超過重試上限觸發 `persist_loop_exited`，主流程非零退出
+- health/poll 增加 `queue_in/queue_out`、`last_commit_monotonic_age_sec`、`db_write_rate`、`ts_drift_sec`
+- watchdog 停滯判定只依賴 monotonic commit 時間
 
-### Ops assets
+### Ops 資產
 
-- 新增 `scripts/redeploy_hk_tick_collector.sh`（拉代码/装依赖/重启/SQL+日志验收）。
-- 新增 runbook（`docs/runbook/operations.md`）。
+- `scripts/redeploy_hk_tick_collector.sh`
+- `docs/runbook/operations.md`
 
-## 2026-02-11: watchdog self-heal first + future-ts repair toolkit
+## 2026-02-11：Watchdog 先自癒 + future-ts 修復工具
 
-### Incident pattern
+### 事件型態
 
-- （历史现象）曾出现 `WATCHDOG persistent_stall` + `status=2/INVALIDARGUMENT` 循环重启。
-- 核验 SQL 发现 `MAX(ts_ms)` 超前 `now_utc` 约 +8h。
-- `lsof` 未稳定复现 DB 锁，说明“仅以锁冲突解释”不充分，watchdog 判据与恢复路径需要加强。
+- （歷史）曾出現 `WATCHDOG persistent_stall` + `status=2/INVALIDARGUMENT` 循環重啟。
+- SQL 核驗發現 `MAX(ts_ms)` 比 `now_utc` 超前約 +8h。
+- `lsof` 未穩定重現 DB 鎖，顯示僅以鎖衝突解釋不足。
 
-### Final fixes
+### 最終修復
 
-- 时间戳:
-  - `mapping.parse_time_to_ts_ms` 强制 `Asia/Hong_Kong -> UTC epoch ms`。
-  - 增加 compact 时间解析（`HHMMSS` / `YYYYMMDDHHMMSS`）。
-  - 对“明显 +8h 未来值”自动纠偏并告警日志。
-- seed:
-  - `main` 改为跨最近交易日 DB 取 `max(seq)`，不依赖 `ts<=now`。
-- persist:
-  - 新增 writer 自愈接口：请求重建 worker/writer（关闭连接并重启线程）。
-  - 所有落库异常都带 traceback 日志，且会重置 sqlite connection。
-  - heartbeat 默认 30s，增加 `wal_bytes`、`last_commit_rows`、`recovery_count`。
-- watchdog:
-  - 基于 `last_dequeue_monotonic`/`last_commit_monotonic` + 持续 backlog 判定 stall。
-  - 触发时先 dump 全线程栈并执行 writer 自愈。
-  - 连续自愈失败 N 次后才非零退出交给 systemd（当前实现为 `exit(1)`）。
+- 時間戳：
+  - `mapping.parse_time_to_ts_ms` 強制 `Asia/Hong_Kong -> UTC epoch ms`
+  - 新增 compact 時間解析（`HHMMSS` / `YYYYMMDDHHMMSS`）
+  - 對明顯 +8h future 值自動糾偏並告警
+- seed：
+  - `main` 改為掃最近交易日 DB 的 `max(seq)`，不依賴 `ts<=now`
+- persist：
+  - 新增 writer 自癒介面，可重建 worker/writer
+  - 所有落盤異常都記錄 traceback 並重設 sqlite connection
+  - heartbeat 預設 30s，新增 `wal_bytes`、`last_commit_rows`、`recovery_count`
+- watchdog：
+  - 基於 `last_dequeue_monotonic` / `last_commit_monotonic` + 持續 backlog 判定
+  - 觸發先 dump 全 thread stack，再做 writer 自癒
+  - 連續自癒失敗才非零退出交由 systemd 接手
 
-### New Ops scripts
+### 新增維運腳本
 
 - `scripts/repair_future_ts_ms.py`
-  - 只修 `ts_ms > now + 2h`，默认 `-8h`，并同步修正 `trading_day`。
+  - 只修 `ts_ms > now + 2h`，預設 `-8h`，並同步更新 `trading_day`
 - `scripts/verify_hk_tick_collector.sh`
-  - 输出 `now_utc/max_ts_utc/max_minus_now_sec/rows` + recent watchdog + pragma。
+  - 輸出 `now_utc/max_ts_utc/max_minus_now_sec/rows` + recent watchdog + pragma
 - `scripts/redeploy_hk_tick_collector.sh`
-  - stop -> deploy -> test -> repair -> start -> log acceptance -> verify -> (失败自动回滚)。
+  - stop -> deploy -> test -> repair -> start -> log acceptance -> verify ->（失敗自動回滾）
 - `scripts/rollback_hk_tick_collector.sh`
-  - 手动指定 `ROLLBACK_REF` 一键回滚并拉起服务。
+  - 手動指定 `ROLLBACK_REF` 一鍵回滾並拉起服務
 
-### Verification commands
+### 驗證命令
 
 - `bash scripts/verify_hk_tick_collector.sh`
 - `python3 scripts/repair_future_ts_ms.py --data-root /data/sqlite/HK --day $(TZ=Asia/Hong_Kong date +%Y%m%d)`
 - `journalctl -u hk-tick-collector --since \"30 minutes ago\" --no-pager | grep -E \"WATCHDOG|persist_loop_heartbeat|health|persist_ticks\"`
 
-### Common pitfalls
+### 常見誤區
 
-- 将 HK 本地时间直接当 UTC 存储，导致 `ts_ms` 偏移 +28800 秒。
-- 只看 `persisted_rows_per_min` 判停写，忽略 dequeue/commit heartbeat。
-- 新连接直接查 `PRAGMA busy_timeout` 时读到 0（连接级参数），应结合服务配置/日志判断。
+- 把 HK 本地時間直接當 UTC 儲存，造成 `ts_ms` 偏移 +28800 秒。
+- 只看 `persisted_rows_per_min` 判停寫，忽略 dequeue/commit heartbeat。
+- 新連線直接查 `PRAGMA busy_timeout` 讀到 0，就誤判配置失效（該值是連線層級）。

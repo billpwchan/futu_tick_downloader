@@ -1,25 +1,25 @@
-# Security Policy
+# 安全政策
 
-## Supported Versions
+## 支援版本
 
-Security fixes are generally provided for the latest minor release on `main`.
+安全修補原則上僅提供給 `main` 最新 minor 版本。
 
-| Version | Supported |
+| 版本 | 是否支援 |
 |---|---|
 | latest | :white_check_mark: |
 | older tags | :x: |
 
-## Reporting a Vulnerability
+## 通報弱點
 
-Please do not open public GitHub issues for security vulnerabilities.
+請勿在公開 GitHub issue 回報安全弱點。
 
-Report privately via: security@hk-tick-collector.example.com
+請透過以下管道私下通報：security@hk-tick-collector.example.com
 
-Include:
+建議附上：
 
-- affected version/commit
-- impact summary
-- reproduction steps or PoC
-- proposed remediation (if available)
+- 受影響版本／commit
+- 影響範圍摘要
+- 重現步驟或 PoC
+- 建議修補方式（若已具備）
 
-We will acknowledge within 3 business days and coordinate disclosure.
+我們會在 3 個工作天內回覆並協調揭露流程。

@@ -1,15 +1,25 @@
-# Incident Runbook: WATCHDOG Persistent Stall
+# 事件操作手冊：WATCHDOG Persistent Stall
 
-## Symptom Patterns
+## 目的
 
-Typical log patterns:
+處理 `WATCHDOG persistent_stall` 事件，快速判斷根因並恢復落盤。
+
+## 前置條件
+
+- 可讀取 `journalctl`
+- 可查詢當日 SQLite DB
+- 可執行 `systemctl` 重啟服務
+
+## 症狀模式
+
+常見日誌模式：
 
 - `WATCHDOG persistent_stall ...`
-- repeated `sqlite_busy_backoff ...`
-- queue size grows while `persist_ticks` stops progressing
-- `worker_alive=False` or commit age continuously increasing
+- 重複 `sqlite_busy_backoff ...`
+- 佇列持續增長但 `persist_ticks` 不再前進
+- `worker_alive=False` 或 commit age 持續上升
 
-## Triage Decision Tree
+## 判斷樹
 
 ```text
 1) Is upstream active? (push/poll moving)
@@ -26,16 +36,16 @@ Typical log patterns:
    - No -> worker/writer recovery path
 ```
 
-## Commands to Run
+## 步驟
 
-### Logs
+### 1) 先收斂日誌
 
 ```bash
 sudo journalctl -u hk-tick-collector --since "30 minutes ago" --no-pager \
   | grep -E "WATCHDOG|persist_loop_heartbeat|persist_ticks|sqlite_busy|health"
 ```
 
-### DB checks and PRAGMA
+### 2) 查 DB 與 PRAGMA
 
 ```bash
 DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)
@@ -44,7 +54,7 @@ sqlite3 "file:${DB}?mode=ro" "PRAGMA journal_mode; PRAGMA synchronous; PRAGMA wa
 sqlite3 "file:${DB}?mode=ro" "SELECT COUNT(*), MAX(ts_ms) FROM ticks;"
 ```
 
-### Lock inspection
+### 3) 查鎖
 
 ```bash
 lsof "$DB" "$DB-wal" "$DB-shm" || true
@@ -52,41 +62,51 @@ fuser "$DB" "$DB-wal" "$DB-shm" || true
 lslocks | grep -E "$(basename "$DB")|sqlite" || true
 ```
 
-## Mitigation Steps
+### 4) 緩解措施
 
-1. If readonly/permission issue:
+1. 若是 readonly/權限問題：
 
 ```bash
 sudo chown -R hkcollector:hkcollector /data/sqlite/HK
 sudo chmod -R 750 /data/sqlite/HK
 ```
 
-2. If transient lock pressure: restart collector (keep OpenD up):
+2. 若是暫時性鎖壓力：重啟 collector（OpenD 保持運行）：
 
 ```bash
 sudo systemctl restart hk-tick-collector
 ```
 
-3. If repeated watchdog exits:
+3. 若反覆 Watchdog 退出：
 
-- increase `WATCHDOG_STALL_SEC` moderately
-- verify `WATCHDOG_QUEUE_THRESHOLD_ROWS` is not too low
-- inspect storage latency and WAL growth
+- 適度調高 `WATCHDOG_STALL_SEC`
+- 確認 `WATCHDOG_QUEUE_THRESHOLD_ROWS` 不過低
+- 檢查儲存延遲與 WAL 成長
 
-4. If OpenD unstable:
+4. 若 OpenD 不穩定：
 
 ```bash
 sudo systemctl status futu-opend --no-pager
 sudo systemctl restart futu-opend
 ```
 
-5. Re-verify freshness:
+5. 重新驗證：
 
 ```bash
 bash scripts/db_health_check.sh
 ```
 
-## Postmortem Template
+## 如何驗證
+
+- `persist_ticks` 恢復輸出。
+- `MAX(ts_ms)` 與 row 數持續前進。
+- 無連續 `WATCHDOG persistent_stall`。
+
+## 常見問題
+
+- 重啟後短時間再次觸發：多半為底層鎖競爭或磁碟延遲未解決。
+
+## Postmortem 範本
 
 ```markdown
 # Incident: WATCHDOG persistent_stall

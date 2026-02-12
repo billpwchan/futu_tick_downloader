@@ -1,22 +1,22 @@
-# Support
+# 支援說明
 
-## Where to Ask Questions
+## 問題應該發在哪裡
 
-- GitHub Discussions (recommended)
-- GitHub Issues (for reproducible bugs)
+- GitHub Discussions（建議，適合一般使用與維運問題）
+- GitHub Issues（僅限可重現 bug）
 
-## What to Include
+## 建議提供資訊
 
-- deployment mode (`systemd`, local run, container)
-- OS and Python version
-- sanitized `.env` values relevant to issue
-- logs from:
+- 部署模式（`systemd`、本機執行、container）
+- 作業系統與 Python 版本
+- 與問題相關、已去敏的 `.env` 內容
+- 近期日誌：
 
 ```bash
 sudo journalctl -u hk-tick-collector --since "30 minutes ago" --no-pager
 ```
 
-- DB diagnostics:
+- DB 診斷：
 
 ```bash
 DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)

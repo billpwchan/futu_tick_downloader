@@ -1,25 +1,25 @@
-# FAQ
+# 常見問題（FAQ）
 
-## Is this only for HK symbols?
+## 只支援港股 symbol 嗎？
 
-Primary target is HK tick collection, but symbol handling follows Futu code format and can be extended.
+主要目標是港股 tick 採集，但 symbol 處理遵循 Futu code 格式，可按需求擴充。
 
-## Why one SQLite DB per trading day?
+## 為什麼採「每個交易日一個 SQLite DB」？
 
-Operational simplicity: easier retention, backups, and bounded file sizes.
+維運更簡單：保留、備份與檔案大小管理都更直觀。
 
-## Is duplicate data expected?
+## 會出現重複資料嗎？
 
-At ingest level yes (push + poll overlap). Final table is deduped via unique indexes and `INSERT OR IGNORE`.
+匯入層面會（push + poll 重疊屬正常），最終表會透過唯一索引與 `INSERT OR IGNORE` 去重。
 
-## Can I run without poll fallback?
+## 可以關掉 poll 備援嗎？
 
-Yes (`FUTU_POLL_ENABLED=0`), but production reliability decreases if push stream goes stale.
+可以（`FUTU_POLL_ENABLED=0`），但若 push 串流停滯，生產可靠性會下降。
 
-## Does this project redistribute market data?
+## 專案是否允許再散布市場資料？
 
-No. It collects/stores data under your own Futu/OpenD entitlement and terms.
+不允許。本專案僅在你自身 Futu/OpenD 授權範圍內採集與儲存資料。
 
-## When should I move off SQLite?
+## 什麼時候該從 SQLite 升級？
 
-When you need multi-host writes, large-scale analytics, or centralized multi-tenant access. Consider Postgres or columnar lakehouse patterns.
+當你需要多主機寫入、大規模分析、或多租戶集中存取時，可考慮 Postgres 或 columnar lakehouse 架構。

@@ -5,53 +5,54 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-Production-grade HK tick collector for Futu OpenD.
+面向生產環境的港股 Tick 採集服務，專為 Futu OpenD 設計。
 
-It ingests push + poll fallback ticks, deduplicates safely, and persists to SQLite WAL with systemd-friendly operations.
+本專案使用 Push 為主、Poll 為備援的資料匯入策略，提供安全去重，並將資料落盤至 SQLite WAL，同時具備適合 `systemd` 長時間運行的維運能力。
 
-- For operators: fast deploy, clear runbooks, one-page incident commands.
-- For developers: clean env config, tests, lint, packaging, CI.
+- 給維運人員：快速部署、清楚操作手冊、一頁式事件指令。
+- 給開發人員：乾淨的環境設定、測試、lint、封裝與 CI 流程。
 
-[中文文档 (README.zh-CN)](README.zh-CN.md)
+## 目錄
 
-## Table Of Contents
+- [為什麼要做這個專案](#why-this-project)
+- [功能亮點](#feature-highlights)
+- [架構](#architecture)
+- [3 分鐘快速開始](#3-minute-quickstart)
+- [生產部署（systemd）](#production-deployment-systemd)
+- [Telegram 通知](#telegram-notifications)
+- [資料模型與保證](#data-model-and-guarantees)
+- [維運速查](#operations-cheat-sheet)
+- [故障排除](#troubleshooting)
+- [文件導覽](#documentation-map)
+- [路線圖](#roadmap)
+- [如何貢獻](#contributing)
+- [安全、授權與免責聲明](#security-license-disclaimer)
 
-- [Why This Project](#why-this-project)
-- [Feature Highlights](#feature-highlights)
-- [Architecture](#architecture)
-- [3-Minute Quickstart](#3-minute-quickstart)
-- [Production Deployment (systemd)](#production-deployment-systemd)
-- [Telegram Notifications](#telegram-notifications)
-- [Data Model And Guarantees](#data-model-and-guarantees)
-- [Operations Cheat Sheet](#operations-cheat-sheet)
-- [Troubleshooting](#troubleshooting)
-- [Documentation Map](#documentation-map)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [Security License Disclaimer](#security-license-disclaimer)
+<a id="why-this-project"></a>
+## 為什麼要做這個專案
 
-## Why This Project
+多數市場資料採集器在生產環境失效，常見原因包含：時間戳語義不清、去重策略脆弱、事件處置工具不足，或重啟流程不穩定。
 
-Most market-data collectors fail in production for one of these reasons: unclear timestamp semantics, weak dedupe, poor incident tooling, or fragile restarts.
+`hk-tick-collector` 先解決維運正確性：
 
-`hk-tick-collector` focuses on operational correctness first:
+- 以明確 UTC 語義定義落盤時間戳。
+- 透過唯一索引 + `INSERT OR IGNORE` 提供冪等寫入。
+- 具備 Watchdog 偵測與停滯恢復機制。
+- 內建 Linux `systemd` 部署與操作手冊。
 
-- Explicit UTC timestamp semantics for storage.
-- Idempotent writes via unique indexes + `INSERT OR IGNORE`.
-- Watchdog recovery for persist stalls.
-- Linux systemd deployment and runbooks included.
+<a id="feature-highlights"></a>
+## 功能亮點
 
-## Feature Highlights
+- Push 優先的資料匯入，並提供 Poll 備援（`FUTU_POLL_*`）。
+- 以交易日切分 SQLite 檔案（`DATA_ROOT/YYYYMMDD.db`）。
+- WAL 模式、可調 `busy_timeout`、自動 checkpoint。
+- 對 `seq` 與無 `seq` 資料都提供可持續去重。
+- 心跳日誌包含佇列、commit、drift、Watchdog 等關鍵訊號。
+- 低噪音 Telegram 群組通知（摘要 + 重要告警，含 rate limit 與 cooldown）。
+- 提供完整生產文件：部署、維運、事件處置、資料品質檢查。
 
-- Push-first ingestion with poll fallback (`FUTU_POLL_*`).
-- Per-trading-day SQLite files (`DATA_ROOT/YYYYMMDD.db`).
-- WAL mode, configurable busy timeout, auto-checkpoint.
-- Durable dedupe for `seq` and non-`seq` rows.
-- Health heartbeat logs with queue, commit, drift, and watchdog context.
-- Low-noise Telegram group notifications (digest + key alerts, rate-limited + cooldown).
-- Production docs: deployment, operations, incident response, data quality.
-
-## Architecture
+<a id="architecture"></a>
+## 架構
 
 ```mermaid
 flowchart LR
@@ -66,11 +67,12 @@ flowchart LR
     H --> I["Telegram Notifier\nDigest + Alerts"]
 ```
 
-Detailed design: [`docs/architecture.md`](docs/architecture.md)
+完整設計請見：[`docs/architecture.md`](docs/architecture.md)
 
-## 3-Minute Quickstart
+<a id="3-minute-quickstart"></a>
+## 3 分鐘快速開始
 
-### Option A: Validate locally (no live OpenD required)
+### 選項 A：本機驗證（不需要即時 OpenD）
 
 ```bash
 git clone <YOUR_FORK_OR_REPO_URL>
@@ -82,7 +84,7 @@ pip install -e .[dev]
 pytest -q
 ```
 
-### Option B: Live run with OpenD
+### 選項 B：連接 OpenD 即時執行
 
 ```bash
 cp .env.example .env
@@ -94,7 +96,7 @@ hk-tick-collector
 python -m hk_tick_collector.main
 ```
 
-Verify writes:
+驗證是否有成功寫入：
 
 ```bash
 DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)
@@ -102,13 +104,14 @@ DB=/data/sqlite/HK/${DAY}.db
 bash scripts/db_health_check.sh "$DB"
 ```
 
-## Production Deployment (systemd)
+<a id="production-deployment-systemd"></a>
+## 生產部署（systemd）
 
-- Unit template: [`deploy/systemd/hk-tick-collector.service`](deploy/systemd/hk-tick-collector.service)
-- Deployment guide: [`docs/deployment/systemd.md`](docs/deployment/systemd.md)
-- One-page production runbook (CN): [`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
+- Unit 範本：[`deploy/systemd/hk-tick-collector.service`](deploy/systemd/hk-tick-collector.service)
+- 部署指南：[`docs/deployment/systemd.md`](docs/deployment/systemd.md)
+- 一頁式生產操作手冊：[`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
 
-Enable service:
+啟用服務：
 
 ```bash
 sudo systemctl daemon-reload
@@ -116,9 +119,10 @@ sudo systemctl enable --now hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
 
-## Telegram Notifications
+<a id="telegram-notifications"></a>
+## Telegram 通知
 
-Enable in your env file (`.env` local or systemd `EnvironmentFile=` in production):
+請在環境設定檔啟用（本機 `.env` 或生產 `systemd` `EnvironmentFile=`）：
 
 ```dotenv
 TELEGRAM_ENABLED=1
@@ -132,14 +136,14 @@ TELEGRAM_INCLUDE_SYSTEM_METRICS=1
 INSTANCE_ID=hk-prod-a1
 ```
 
-Design goals:
+設計目標：
 
-- readable messages with hostname + instance context.
-- low noise: digest interval + change-driven suppression + alert cooldown.
-- reliability: async queue worker, Telegram `429 retry_after` handling, sender rate limit.
-- safety: notifier failures never block ingest/persist.
+- 訊息可讀：包含 hostname 與 instance 上下文。
+- 低噪音：摘要週期 + 變更抑制 + 告警 cooldown。
+- 高可靠：非同步佇列 worker、Telegram `429 retry_after` 處理、本地送信 rate limit。
+- 安全降級：通知失敗不會阻塞匯入與落盤流程。
 
-Digest sample:
+摘要樣例：
 
 ```text
 📈 HK Tick Collector · HEALTH
@@ -152,7 +156,7 @@ symbols:
 sys: load1=0.42 rss_mb=186.5 disk_free_gb=327.44
 ```
 
-Alert sample:
+告警樣例：
 
 ```text
 🚨 HK Tick Collector · PERSIST STALL
@@ -164,11 +168,12 @@ suggest: journalctl -u hk-tick-collector -n 200 --no-pager
 suggest: sqlite3 /data/sqlite/HK/20260212.db 'select count(*) from ticks;'
 ```
 
-Setup guide: [`docs/telegram.md`](docs/telegram.md)
+設定細節請見：[`docs/telegram.md`](docs/telegram.md)
 
-## Data Model And Guarantees
+<a id="data-model-and-guarantees"></a>
+## 資料模型與保證
 
-Core table (`ticks`) is append-only from collector perspective.
+核心資料表（`ticks`）在採集器視角為 append-only。
 
 ```sql
 CREATE TABLE ticks (
@@ -189,28 +194,29 @@ CREATE TABLE ticks (
 );
 ```
 
-### Dedupe guarantees
+### 去重保證
 
-- `uniq_ticks_symbol_seq` when `seq IS NOT NULL`.
-- `uniq_ticks_symbol_ts_price_vol_turnover` when `seq IS NULL`.
-- `INSERT OR IGNORE` makes ingestion idempotent under retries and push/poll overlap.
+- `uniq_ticks_symbol_seq`：當 `seq IS NOT NULL`。
+- `uniq_ticks_symbol_ts_price_vol_turnover`：當 `seq IS NULL`。
+- `INSERT OR IGNORE` 讓重試與 push/poll 重疊場景保持冪等。
 
-### Timestamp guarantees
+### 時間戳保證
 
-- `ts_ms`: event timestamp in UTC epoch milliseconds.
-- `recv_ts_ms`: collector receive timestamp in UTC epoch milliseconds.
-- HK local source times are interpreted as `Asia/Hong_Kong`, then converted to UTC epoch.
+- `ts_ms`：事件時間（UTC epoch 毫秒）。
+- `recv_ts_ms`：採集器接收時間（UTC epoch 毫秒）。
+- 港股本地時間來源先以 `Asia/Hong_Kong` 解讀，再轉為 UTC epoch。
 
-## Operations Cheat Sheet
+<a id="operations-cheat-sheet"></a>
+## 維運速查
 
-Service:
+服務管理：
 
 ```bash
 sudo systemctl restart hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
 
-Logs:
+查看日誌：
 
 ```bash
 sudo journalctl -u hk-tick-collector -f --no-pager
@@ -218,7 +224,7 @@ sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
   | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG|sqlite_busy|ERROR"
 ```
 
-Freshness:
+新鮮度檢查：
 
 ```bash
 DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)
@@ -227,45 +233,52 @@ sqlite3 "file:${DB}?mode=ro" \
   "SELECT ROUND(strftime('%s','now')-MAX(ts_ms)/1000.0,3) AS lag_sec, COUNT(*) AS rows FROM ticks;"
 ```
 
-More SQL snippets: [`scripts/query_examples.sql`](scripts/query_examples.sql)
+更多 SQL 範例：[`scripts/query_examples.sql`](scripts/query_examples.sql)
 
-## Troubleshooting
+<a id="troubleshooting"></a>
+## 故障排除
 
-- WATCHDOG stall: [`docs/runbook/incident-watchdog-stall.md`](docs/runbook/incident-watchdog-stall.md)
-- SQLite WAL / locked: [`docs/runbook/sqlite-wal.md`](docs/runbook/sqlite-wal.md)
-- Timestamp and drift checks: [`docs/runbook/data-quality.md`](docs/runbook/data-quality.md)
-- General troubleshooting: [`docs/troubleshooting.md`](docs/troubleshooting.md)
+- WATCHDOG 停滯：[`docs/runbook/incident-watchdog-stall.md`](docs/runbook/incident-watchdog-stall.md)
+- SQLite WAL / locked：[`docs/runbook/sqlite-wal.md`](docs/runbook/sqlite-wal.md)
+- 時間戳與 drift 檢查：[`docs/runbook/data-quality.md`](docs/runbook/data-quality.md)
+- 一般故障排除：[`docs/troubleshooting.md`](docs/troubleshooting.md)
 
-## Documentation Map
+<a id="documentation-map"></a>
+## 文件導覽
 
-- Quickstart: [`docs/getting-started.md`](docs/getting-started.md)
-- Configuration (full env reference): [`docs/configuration.md`](docs/configuration.md)
-- Architecture: [`docs/architecture.md`](docs/architecture.md)
-- Deployment (systemd): [`docs/deployment/systemd.md`](docs/deployment/systemd.md)
-- Deployment quick guide: [`docs/deployment.md`](docs/deployment.md)
-- Telegram setup: [`docs/telegram.md`](docs/telegram.md)
-- Operations runbook: [`docs/runbook.md`](docs/runbook.md)
-- Extended operations runbook: [`docs/runbook/operations.md`](docs/runbook/operations.md)
-- One-page runbook (CN): [`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
-- Release process: [`docs/releasing.md`](docs/releasing.md)
-- FAQ: [`docs/faq.md`](docs/faq.md)
+- 快速開始：[`docs/getting-started.md`](docs/getting-started.md)
+- 設定參考（完整環境變數）：[`docs/configuration.md`](docs/configuration.md)
+- 架構：[`docs/architecture.md`](docs/architecture.md)
+- 部署（systemd）：[`docs/deployment/systemd.md`](docs/deployment/systemd.md)
+- 部署速覽：[`docs/deployment.md`](docs/deployment.md)
+- Telegram 設定：[`docs/telegram.md`](docs/telegram.md)
+- 維運操作手冊：[`docs/runbook.md`](docs/runbook.md)
+- 延伸維運操作手冊：[`docs/runbook/operations.md`](docs/runbook/operations.md)
+- 一頁式 Runbook：[`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
+- 發版流程：[`docs/releasing.md`](docs/releasing.md)
+- FAQ：[`docs/faq.md`](docs/faq.md)
+- 文件風格與術語規範：[`docs/STYLEGUIDE.zh-TW.md`](docs/STYLEGUIDE.zh-TW.md)
+- 翻譯自檢說明：[`docs/translation_check.md`](docs/translation_check.md)
 
-## Roadmap
+<a id="roadmap"></a>
+## 路線圖
 
-- Optional metrics endpoint for external observability stacks.
-- Optional Parquet export flow for analytics pipelines.
-- Additional integration tests for larger symbol universes.
+- 可選的 metrics endpoint，供外部可觀測平台使用。
+- 可選的 Parquet 匯出流程，供分析管線使用。
+- 補強更大 symbol 規模下的整合測試。
 
-## Contributing
+<a id="contributing"></a>
+## 如何貢獻
 
-- Guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- Code of conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
-- PR template: [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)
+- 指南：[`CONTRIBUTING.md`](CONTRIBUTING.md)
+- 行為準則：[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
+- PR 範本：[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)
 
-## Security License Disclaimer
+<a id="security-license-disclaimer"></a>
+## 安全、授權與免責聲明
 
-- Security policy: [`SECURITY.md`](SECURITY.md)
-- Support channels: [`SUPPORT.md`](SUPPORT.md)
-- License: Apache-2.0 ([`LICENSE`](LICENSE))
+- 安全政策：[`SECURITY.md`](SECURITY.md)
+- 支援管道：[`SUPPORT.md`](SUPPORT.md)
+- 授權：Apache-2.0（[`LICENSE`](LICENSE)）
 
-Futu OpenD and market data usage must comply with Futu terms and local regulations. This repository is a collector/persistence service and does not grant redistribution rights for proprietary data.
+Futu OpenD 與市場資料使用必須符合 Futu 條款與在地法規。本 repo 提供採集與落盤能力，不授予任何專有資料再散布權利。

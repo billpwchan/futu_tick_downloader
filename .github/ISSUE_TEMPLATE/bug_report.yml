@@ -1,26 +1,26 @@
-name: Bug report
-description: Report a reproducible problem in hk-tick-collector
+name: 錯誤回報
+description: 回報可重現的 hk-tick-collector 問題
 title: "[Bug] "
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for filing a bug. Please redact secrets from logs and env values.
+        感謝你回報問題。請先移除日誌與環境設定中的敏感資訊。
 
   - type: textarea
     id: summary
     attributes:
-      label: Summary
-      description: What happened and what did you expect?
+      label: 問題摘要
+      description: 發生了什麼？你原本預期是什麼？
     validations:
       required: true
 
   - type: textarea
     id: repro
     attributes:
-      label: Reproduction steps
-      description: Step-by-step commands/config used.
+      label: 重現步驟
+      description: 請提供可逐步執行的命令與設定。
       placeholder: |
         1. Configure ...
         2. Run ...
@@ -31,7 +31,7 @@ body:
   - type: input
     id: os
     attributes:
-      label: OS
+      label: 作業系統
       placeholder: Ubuntu 22.04
     validations:
       required: true
@@ -39,7 +39,7 @@ body:
   - type: input
     id: python
     attributes:
-      label: Python version
+      label: Python 版本
       placeholder: 3.11.8
     validations:
       required: true
@@ -47,8 +47,8 @@ body:
   - type: textarea
     id: env
     attributes:
-      label: Redacted env config
-      description: Include relevant `.env` keys only (remove secrets).
+      label: 去敏後的 env 設定
+      description: 請只提供與問題相關的 `.env` key（請移除 secrets）。
       placeholder: |
         FUTU_HOST=127.0.0.1
         FUTU_PORT=11111
@@ -60,8 +60,8 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Recent logs (journalctl snippet)
-      description: Include output from the last 10-30 minutes.
+      label: 近期日誌（journalctl 節錄）
+      description: 請附最近 10-30 分鐘輸出。
       placeholder: sudo journalctl -u hk-tick-collector --since "30 minutes ago" --no-pager
     validations:
       required: true
@@ -69,8 +69,8 @@ body:
   - type: textarea
     id: db
     attributes:
-      label: DB diagnostics
-      description: Include DB size and PRAGMA outputs.
+      label: DB 診斷資訊
+      description: 請附 DB 大小與 PRAGMA 輸出。
       placeholder: |
         sqlite3 "file:/data/sqlite/HK/20260211.db?mode=ro" "PRAGMA journal_mode; PRAGMA synchronous; PRAGMA wal_autocheckpoint;"
         ls -lh /data/sqlite/HK/20260211.db*

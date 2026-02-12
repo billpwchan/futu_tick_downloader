@@ -1,12 +1,12 @@
-# Maintainers
+# 維護者
 
-## Current Maintainer
+## 目前維護者
 
 - @billpwchan
 
-## Maintainer Responsibilities
+## 維護責任
 
-- keep CI and release flow healthy
-- review behavior-changing PRs with tests
-- enforce runtime stability and production safety
-- maintain runbooks and operational documentation
+- 維持 CI 與發版流程健康可用
+- 審查會改變行為的 PR（需附測試）
+- 守住執行期穩定性與生產安全
+- 持續維護操作手冊與維運文件
