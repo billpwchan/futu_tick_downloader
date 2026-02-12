@@ -96,6 +96,7 @@ Primary deployment target is Linux + `systemd`.
 
 - Unit template: [`deploy/systemd/hk-tick-collector.service`](deploy/systemd/hk-tick-collector.service)
 - Deployment guide: [`docs/deployment/systemd.md`](docs/deployment/systemd.md)
+- One-page runbook (CN): [`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
 - Runbook: [`docs/runbook/operations.md`](docs/runbook/operations.md)
 
 Common operations:

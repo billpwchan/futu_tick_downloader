@@ -4,6 +4,8 @@
 
 Business-as-usual operations for `hk-tick-collector` on Linux + systemd.
 
+Quick command guide (single page): [`production-onepager.md`](production-onepager.md)
+
 ## Daily Checks
 
 ### Before Market Open
