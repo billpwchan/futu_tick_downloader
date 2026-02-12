@@ -70,7 +70,7 @@ nc -vz 127.0.0.1 11111
 
 ## 如何驗證
 
-- `health`、`persist_ticks` 日誌恢復連續輸出。
+- `health`、`persist_summary` 日誌恢復連續輸出。
 - DB 查詢的 `MAX(ts_ms)` 持續前進。
 
 ## 常見問題

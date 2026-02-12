@@ -4,6 +4,8 @@
 
 說明 `hk-tick-collector` 在 Linux + `systemd` 的標準生產部署流程。
 
+> 若你要快速上手，優先閱讀新版精簡部署文：[`docs/deploy.md`](../deploy.md)。
+
 ## 前置條件
 
 - Linux 主機（建議 Ubuntu）
@@ -124,7 +126,7 @@ sudo systemctl stop hk-tick-collector
 ```bash
 sudo systemctl is-active hk-tick-collector
 sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
-  | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG"
+  | grep -E "health|persist_summary|persist_loop_heartbeat|WATCHDOG"
 ```
 
 DB 新鮮度查詢：

@@ -77,9 +77,9 @@ now_utc              max_tick_utc          lag_sec  rows
 範例日誌：
 
 ```text
-INFO persist_ticks trading_day=20260211 batch=500 inserted=498 ignored=2 commit_latency_ms=6 queue=0/50000
+INFO persist_summary window_sec=5.0 inserted_per_min=24120 ignored_per_min=320 commit_latency_ms_p50=5 commit_latency_ms_p95=12 queue=0/50000 batches=24
 INFO persist_loop_heartbeat worker_alive=True queue=0/50000 total_rows_committed=2013450 busy_locked_count=0
-INFO health queue=0/50000 persisted_rows_per_min=22340 lag_sec=1.4 watchdog_failures=0
+INFO health sid=sid-a1b2c3d4 connected=True queue=0/50000 persisted_rows_per_min=22340 ...
 ```
 
 ## 常見問題
@@ -89,7 +89,7 @@ INFO health queue=0/50000 persisted_rows_per_min=22340 lag_sec=1.4 watchdog_fail
 
 ## 下一步
 
-- 生產部署：[`docs/deployment/systemd.md`](deployment/systemd.md)
+- 生產部署：[`docs/deploy.md`](deploy.md)
 - Telegram 設定：[`docs/telegram-notify.md`](telegram-notify.md)
-- 操作手冊：[`docs/runbook/operations.md`](runbook/operations.md)
+- 操作手冊：[`docs/runbook.md`](runbook.md)
 - 故障排除：[`docs/troubleshooting.md`](troubleshooting.md)

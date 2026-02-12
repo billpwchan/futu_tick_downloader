@@ -4,6 +4,8 @@
 
 定義 Linux + `systemd` 下 `hk-tick-collector` 的日常維運流程（Business-as-usual）。
 
+> 新版值班手冊請優先參考：[`docs/runbook.md`](../runbook.md)。
+
 ## 前置條件
 
 - 可使用 `sudo` 檢查服務與日誌
@@ -40,7 +42,7 @@ df -h /data/sqlite/HK
 
 ```bash
 sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
-  | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG"
+  | grep -E "health|persist_summary|persist_loop_heartbeat|WATCHDOG"
 ```
 
 2. 新鮮度與 row 成長：

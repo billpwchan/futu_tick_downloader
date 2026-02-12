@@ -20,8 +20,10 @@
 - [3 分鐘快速開始](#3-minute-quickstart)
 - [生產部署（systemd）](#production-deployment-systemd)
 - [Telegram 通知](#telegram-notifications)
+- [產品化通知示例](#notification-examples)
 - [資料模型與保證](#data-model-and-guarantees)
 - [維運速查](#operations-cheat-sheet)
+- [FAQ（常見問題）](#faq-section)
 - [故障排除](#troubleshooting)
 - [文件導覽](#documentation-map)
 - [路線圖](#roadmap)
@@ -108,7 +110,8 @@ bash scripts/db_health_check.sh "$DB"
 ## 生產部署（systemd）
 
 - Unit 範本：[`deploy/systemd/hk-tick-collector.service`](deploy/systemd/hk-tick-collector.service)
-- 部署指南：[`docs/deployment/systemd.md`](docs/deployment/systemd.md)
+- 部署指南（新版）：[`docs/deploy.md`](docs/deploy.md)
+- 相容舊版部署文：[`docs/deployment/systemd.md`](docs/deployment/systemd.md)
 - 一頁式生產操作手冊：[`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
 
 啟用服務：
@@ -140,40 +143,63 @@ TG_INCLUDE_SYSTEM_METRICS=1
 INSTANCE_ID=hk-prod-a1
 ```
 
-設計目標：
+目前通知策略：
 
-- human-friendly：第一層 6-10 行可快速判讀是否需處理。
-- 低噪音：狀態變化 + 固定節奏、fingerprint 去重、冷卻與升級提醒。
-- 高可靠：非同步佇列 worker、Telegram `429 retry_after`、本地 sender rate limit。
-- 安全降級：通知失敗不會阻塞匯入與落盤流程（可完全關閉）。
+- `HEALTH OK`：啟動後 1 條、開盤前 1 條、收盤後 1 條；其餘只在狀態切換發送
+- `HEALTH WARN`：切換即發；持續最多每 10 分鐘 1 條；恢復即發 OK
+- `ALERT`：切換即發；持續最多每 3 分鐘 1 條；恢復即發 `RECOVERED`
+- `DAILY DIGEST`：收盤後 1 條日報
+- 每條訊息都會帶 `sid`，事件告警另帶 `eid`
 
-摘要樣例：
+設定與排障細節請見：[`docs/telegram-notify.md`](docs/telegram-notify.md)
 
-```text
-✅ HK Tick Collector · HEALTH · OK
-結論：正常，資料採集與寫入穩定
-影響：目前不需人工介入
-關鍵：freshness=1.0s persisted/min=24310 queue=0/50000
-主機：ip-10-0-1-12 (hk-prod-a1) day=20260212 mode=open
-symbols:
- - HK.00700 age=0.8s lag=0
- - HK.00981 age=1.0s lag=0
-<blockquote expandable>tech: ... suggest: ...</blockquote>
-```
-
-告警樣例：
+<a id="notification-examples"></a>
+## 產品化通知示例
 
 ```text
-🚨 HK Tick Collector · PERSIST_STALL · ALERT
-結論：異常，疑似停止寫入
-影響：新資料可能未落庫，延遲持續擴大
-需要處理：是
-關鍵：stall_sec=242.3/180 queue=8542/50000 persisted/min=0
-主機：ip-10-0-1-12 (hk-prod-a1) day=20260212 mode=open
-<blockquote expandable>tech: ... suggest: journalctl ... sqlite3 ...</blockquote>
+🟢 HK Tick Collector 正常
+結論：服務運作正常，暫時不需人工介入
+指標：狀態=盤中 | 延遲=1.2s | 寫入=24100/min | 今日累計=18200341 | 最後更新=2026-02-12T08:01:02+00:00 | symbols_age=2.1s
+主機：ip-10-0-1-12 / hk-prod-a1
+資源：load1=0.22 rss=145.3MB disk_free=87.30GB
+sid=sid-12ab34cd
 ```
 
-設定細節請見：[`docs/telegram-notify.md`](docs/telegram-notify.md)
+```text
+🟡 注意
+結論：注意：服務仍在運作，但品質指標有退化
+指標：原因=HEALTH_WARN | 可能影響=目前未完全停寫，但可能出現延遲或吞吐下降 | queue=3200/50000 | drift=185.0s
+建議：journalctl -u hk-tick-collector -n 120 --no-pager
+主機：ip-10-0-1-12 / hk-prod-a1
+sid=sid-34de56fa
+```
+
+```text
+🔴 異常
+結論：異常：持久化停滯，資料可能未落庫
+指標：事件=PERSIST_STALL | 持續=242s/180s | 影響=新資料可能無法寫入 SQLite，時序會持續落後 | write=0/min | queue=8542/50000 | lag=412
+建議1：journalctl -u hk-tick-collector -n 200 --no-pager
+建議2：sqlite3 /data/sqlite/HK/20260212.db 'select count(*), max(ts_ms) from ticks;'
+主機：ip-10-0-1-12 / hk-prod-a1
+eid=eid-a1b2c3d4 sid=sid-34de56fa
+```
+
+```text
+✅ 已恢復
+結論：DISCONNECT 已恢復正常
+指標：status=reconnected | queue=0/50000
+主機：ip-10-0-1-12 / hk-prod-a1
+eid=eid-a1b2c3d4 sid=sid-34de56fa
+```
+
+```text
+📊 日報
+結論：20260212 收盤摘要
+指標：今日總量=18100234 | 峰值=39800/min | 最大延遲=4.2s | 告警次數=3
+db：/data/sqlite/HK/20260212.db rows=321001245
+主機：ip-10-0-1-12 / hk-prod-a1
+sid=sid-9f8e7d6c
+```
 
 <a id="data-model-and-guarantees"></a>
 ## 資料模型與保證
@@ -226,7 +252,7 @@ sudo systemctl status hk-tick-collector --no-pager
 ```bash
 sudo journalctl -u hk-tick-collector -f --no-pager
 sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
-  | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG|sqlite_busy|ERROR"
+  | grep -E "health|persist_summary|persist_loop_heartbeat|WATCHDOG|sqlite_busy|ERROR"
 ```
 
 新鮮度檢查：
@@ -240,6 +266,21 @@ sqlite3 "file:${DB}?mode=ro" \
 
 更多 SQL 範例：[`scripts/query_examples.sql`](scripts/query_examples.sql)
 
+<a id="faq-section"></a>
+## FAQ（常見問題）
+
+Q1. 為什麼 journal 看不到 `poll_stats`？  
+A1. `poll_stats` 已降為 `DEBUG`；預設 `INFO` 只看 `health` 與 `persist_summary` 聚合訊號。
+
+Q2. 為什麼正常時 Telegram 幾乎不發訊息？  
+A2. 這是設計目標。正常態只在啟動、開盤前、收盤後與狀態切換發送，避免群組噪音。
+
+Q3. 收到告警後第一步該做什麼？  
+A3. 先執行 `scripts/hk-tickctl logs --ops --since "20 minutes ago"`，再用訊息內的 `eid/sid` 反查 journal。
+
+Q4. Telegram 沒收到訊息怎麼查？  
+A4. 依序檢查 `TG_BOT_TOKEN`、`TG_CHAT_ID`、群組權限、`getUpdates`/`getWebhookInfo`。
+
 <a id="troubleshooting"></a>
 ## 故障排除
 
@@ -252,6 +293,9 @@ sqlite3 "file:${DB}?mode=ro" \
 ## 文件導覽
 
 - 快速開始：[`docs/getting-started.md`](docs/getting-started.md)
+- 部署（新版）：[`docs/deploy.md`](docs/deploy.md)
+- Runbook（新版）：[`docs/runbook.md`](docs/runbook.md)
+- 可觀測性：[`docs/observability.md`](docs/observability.md)
 - 設定參考（完整環境變數）：[`docs/configuration.md`](docs/configuration.md)
 - 架構：[`docs/architecture.md`](docs/architecture.md)
 - 部署（systemd）：[`docs/deployment/systemd.md`](docs/deployment/systemd.md)

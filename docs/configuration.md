@@ -83,6 +83,7 @@
 
 - 舊版 `TELEGRAM_*` 仍可使用（向後相容）。
 - 新增部署建議改用 `TG_*` + `HEALTH_*` + `ALERT_*`。
+- 產品化通知策略已內建固定節奏（OK/WARN/ALERT/RECOVERED）；`HEALTH_*` 與 `ALERT_*` 主要保留向後相容，不建議再依舊版高頻模式調整。
 
 ## 生產基線範本
 
@@ -156,7 +157,7 @@ bash scripts/db_health_check.sh
 ## 如何驗證
 
 - 服務重啟後可正常啟動，且 `journalctl` 無解析錯誤。
-- `health` 與 `persist_ticks` 日誌持續輸出。
+- `health` 與 `persist_summary` 日誌持續輸出。
 - DB `MAX(ts_ms)` 持續前進。
 
 ## 常見問題

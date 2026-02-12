@@ -36,7 +36,7 @@ docker run --rm \
 
 ## 如何驗證
 
-- 容器內日誌可看到 `health` 與 `persist_ticks`。
+- 容器內日誌可看到 `health` 與 `persist_summary`。
 - 主機掛載目錄出現當日 `YYYYMMDD.db`。
 
 ## 常見問題

@@ -1,61 +1,59 @@
-# Telegram 通知設定（Human-friendly）
+# Telegram 通知設定（產品化）
 
-本文件描述如何把 `hk-tick-collector` 通知發到 Telegram 群組，並維持「可讀、低噪音、可維運」。
+本文件描述 `hk-tick-collector` 在 Telegram 的「低噪音 + 可行動」通知模型。
 
-## 通知模型
+## 1. 通知類型
 
-- A 類：`HEALTH` digest（定時 + 狀態變化）
-- C 類：事件告警（`PERSIST_STALL` / `DISCONNECT` / `RESTART` / `SQLITE_BUSY`）
+- `HEALTH OK`：正常摘要（低頻）
+- `HEALTH WARN`：品質退化提醒
+- `ALERT`：事件告警（如 `PERSIST_STALL`、`DISCONNECT`、`SQLITE_BUSY`）
+- `RECOVERED`：事件恢復
+- `DAILY DIGEST`：收盤日報
 
-每則訊息採兩層結構：
+每則訊息固定遵循：
 
-1. 第一層（必讀）：6-10 行，快速回答「要不要處理」
-2. 第二層（可展開）：`<blockquote expandable>` 技術細節與建議命令
+1. 先結論
+2. 後指標
+3. 再建議（僅 WARN/ALERT）
 
-## 1) 建立 Bot
+並附上關聯 ID：
 
-1. 與 [@BotFather](https://t.me/BotFather) 對話。
-2. 執行 `/newbot`。
-3. 保存 token（例如 `123456:ABC...`）。
+- `sid`：health snapshot id
+- `eid`：event id（事件告警/恢復）
 
-安全注意：
+## 2. 建立 bot 與取得 chat_id
 
-- token 視為密鑰，不可 commit 到 git。
-- 建議放在私有 `.env` 或 secret manager。
+## 2.1 建立 bot
 
-## 2) 將 Bot 加入群組
+1. 找 [@BotFather](https://t.me/BotFather)
+2. `/newbot`
+3. 保存 token
 
-1. 把 bot 拉進目標群組。
-2. 允許 bot 發送訊息。
-3. 若使用 forum topic，記錄 topic id（`message_thread_id`）。
+## 2.2 查 `chat_id` / `thread_id`
 
-## 3) 取得群組 `chat_id`
-
-## 方法 A：`getUpdates`（推薦）
-
-先在群組中送一條訊息，再執行：
+先在群組送一則訊息，再執行：
 
 ```bash
 TOKEN="<your_bot_token>"
 curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates"
 ```
 
-回應裡 `chat.id` 即目標 id（supergroup 常為 `-100...`）。
+- `chat.id`：群組 ID（多為 `-100...`）
+- `message_thread_id`：forum topic id
 
-## 方法 B：暫時腳本
+## 2.3 webhook 衝突排查
 
-```python
-import json
-import urllib.request
-
-TOKEN = "<your_bot_token>"
-url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-print(json.loads(urllib.request.urlopen(url, timeout=10).read().decode()))
+```bash
+curl -s "https://api.telegram.org/bot${TOKEN}/getWebhookInfo"
 ```
 
-## 4) 設定環境變數
+若使用 pull 模式，建議清 webhook：
 
-在生產環境請編輯 systemd `EnvironmentFile`（預設 `/etc/hk-tick-collector.env`）：
+```bash
+curl -s "https://api.telegram.org/bot${TOKEN}/deleteWebhook"
+```
+
+## 3. 設定環境變數
 
 ```dotenv
 TG_ENABLED=1
@@ -63,90 +61,32 @@ TG_BOT_TOKEN=<secret>
 TG_CHAT_ID=-1001234567890
 TG_MESSAGE_THREAD_ID=
 TG_PARSE_MODE=HTML
-
-HEALTH_INTERVAL_SEC=600
-HEALTH_TRADING_INTERVAL_SEC=600
-HEALTH_OFFHOURS_INTERVAL_SEC=1800
-
-ALERT_COOLDOWN_SEC=600
-ALERT_ESCALATION_STEPS=0,600,1800
-
-TG_RATE_LIMIT_PER_MIN=18
-TG_INCLUDE_SYSTEM_METRICS=1
-
-TG_DIGEST_QUEUE_CHANGE_PCT=20
-TG_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC=60
-TG_DIGEST_DRIFT_THRESHOLD_SEC=60
-TG_SQLITE_BUSY_ALERT_THRESHOLD=3
-
 INSTANCE_ID=hk-prod-a1
 ```
 
-建議統一使用 `TG_*` + `HEALTH_*` + `ALERT_*`。
+## 4. 降噪節奏（內建）
 
-## 5) 套用與驗證
+- OK：啟動後 1 條、開盤前 1 條、收盤後 1 條；其餘僅狀態切換
+- WARN：狀態切換即發；持續最多每 10 分鐘 1 條；恢復即發 OK
+- ALERT：狀態切換即發；持續最多每 3 分鐘 1 條；恢復即發 RECOVERED
+- 全部事件告警都用 fingerprint 去重
+
+## 5. 驗證
 
 ```bash
 sudo systemctl restart hk-tick-collector
-sudo systemctl status hk-tick-collector --no-pager
+scripts/hk-tickctl logs --ops --since "10 minutes ago"
 ```
 
-查看 notifier 日誌：
+驗收重點：
 
-```bash
-sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
-  | grep -E "telegram_notifier_started|telegram_enqueue|telegram_send_ok|telegram_send_failed|telegram_alert_suppressed"
-```
+- 正常時不刷屏
+- 告警含建議命令（WARN 最多 1 條，ALERT 最多 2 條）
+- 日誌可用 `sid/eid` 快速 grep 對齊
 
-驗收點：
+## 6. 常見錯誤
 
-- 群組可收到 HEALTH 與 ALERT。
-- 第一層可 5 秒內判讀是否需處理。
-- 相同 fingerprint 不會每分鐘刷屏。
+- `403 Forbidden`：bot 不在群組或無發言權
+- `400 Bad Request`：`TG_CHAT_ID` 或 `TG_MESSAGE_THREAD_ID` 錯
+- `429 Too Many Requests`：Telegram 限流；系統會依 `retry_after` 退避重試
 
-## 6) 常見錯誤
-
-## `403 Forbidden`
-
-常見原因：
-
-- bot 不在群組
-- bot 無發言權限
-
-## `400 Bad Request`
-
-常見原因：
-
-- `TG_CHAT_ID` 錯誤
-- `TG_MESSAGE_THREAD_ID` 錯誤
-
-建議先清空 `TG_MESSAGE_THREAD_ID` 驗證主群可發，再加 topic。
-
-## `429 Too Many Requests`
-
-系統行為：
-
-- 讀取 `retry_after` 並退避重試
-- 本地 sender 有共用速率限制（`TG_RATE_LIMIT_PER_MIN`）
-- 失敗只記錄日志，不影響主採集與寫庫
-
-## 7) 降噪調參建議
-
-- 摘要過多：調大 `HEALTH_INTERVAL_*_SEC`
-- 告警重複：調大 `ALERT_COOLDOWN_SEC`
-- 事件長時間持續但想補提醒：調整 `ALERT_ESCALATION_STEPS`
-- 避免觸發 Telegram 限流：維持 `TG_RATE_LIMIT_PER_MIN <= 18`
-
-## 8) 示例（截斷）
-
-```text
-✅ HK Tick Collector · HEALTH · OK
-結論：正常，資料採集與寫入穩定
-影響：目前不需人工介入
-關鍵：freshness=1.2s persisted/min=24100 queue=0/50000
-主機：collector-a (hk-prod-a1) day=20260212 mode=open
-symbols:
-- HK.00700: age=0.8s, lag=0
-- HK.00981: age=1.0s, lag=0
-<blockquote expandable>tech: db_path=... suggest: journalctl ...</blockquote>
-```

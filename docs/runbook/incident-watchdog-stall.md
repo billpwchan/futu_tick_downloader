@@ -16,7 +16,7 @@
 
 - `WATCHDOG persistent_stall ...`
 - 重複 `sqlite_busy_backoff ...`
-- 佇列持續增長但 `persist_ticks` 不再前進
+- 佇列持續增長但 `persist_summary` 不再前進
 - `worker_alive=False` 或 commit age 持續上升
 
 ## 判斷樹
@@ -42,7 +42,7 @@
 
 ```bash
 sudo journalctl -u hk-tick-collector --since "30 minutes ago" --no-pager \
-  | grep -E "WATCHDOG|persist_loop_heartbeat|persist_ticks|sqlite_busy|health"
+  | grep -E "WATCHDOG|persist_loop_heartbeat|persist_summary|sqlite_busy|health"
 ```
 
 ### 2) 查 DB 與 PRAGMA
@@ -98,7 +98,7 @@ bash scripts/db_health_check.sh
 
 ## 如何驗證
 
-- `persist_ticks` 恢復輸出。
+- `persist_summary` 恢復輸出。
 - `MAX(ts_ms)` 與 row 數持續前進。
 - 無連續 `WATCHDOG persistent_stall`。
 

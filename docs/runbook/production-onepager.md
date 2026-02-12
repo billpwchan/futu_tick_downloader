@@ -38,7 +38,7 @@ sudo systemctl status hk-tick-collector --no-pager
 ```bash
 sudo journalctl -u hk-tick-collector -f --no-pager
 sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
-  | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG|sqlite_busy|ERROR|Traceback"
+  | grep -E "health|persist_summary|persist_loop_heartbeat|WATCHDOG|sqlite_busy|ERROR|Traceback"
 sudo journalctl -u hk-tick-collector -b --no-pager | tail -n 200
 ```
 
@@ -88,7 +88,7 @@ sudo systemctl restart hk-tick-collector
 
 ```bash
 sudo journalctl -u hk-tick-collector --since "30 minutes ago" --no-pager \
-  | grep -E "WATCHDOG|health|persist_ticks|persist_loop_heartbeat|sqlite_busy|Traceback"
+  | grep -E "WATCHDOG|health|persist_summary|persist_loop_heartbeat|sqlite_busy|Traceback"
 ```
 
 2. 判斷是否為「佇列上升 + persisted_rows_per_min 持續 0」。
