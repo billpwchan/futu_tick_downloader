@@ -55,7 +55,7 @@ print(json.loads(urllib.request.urlopen(url, timeout=10).read().decode()))
 
 ## 4) 設定環境變數
 
-在 `/opt/futu_tick_downloader/.env`：
+在生產環境請編輯 systemd `EnvironmentFile`（預設 `/etc/hk-tick-collector.env`）：
 
 ```dotenv
 TG_ENABLED=1
@@ -82,10 +82,7 @@ TG_SQLITE_BUSY_ALERT_THRESHOLD=3
 INSTANCE_ID=hk-prod-a1
 ```
 
-相容性說明：
-
-- 舊版 `TELEGRAM_*` 變數仍支援。
-- 新部署建議統一使用 `TG_*` + `HEALTH_*` + `ALERT_*`。
+建議統一使用 `TG_*` + `HEALTH_*` + `ALERT_*`。
 
 ## 5) 套用與驗證
 

@@ -255,15 +255,11 @@ sqlite3 "file:${DB}?mode=ro" \
 - 設定參考（完整環境變數）：[`docs/configuration.md`](docs/configuration.md)
 - 架構：[`docs/architecture.md`](docs/architecture.md)
 - 部署（systemd）：[`docs/deployment/systemd.md`](docs/deployment/systemd.md)
-- 部署速覽：[`docs/deployment.md`](docs/deployment.md)
 - Telegram 設定：[`docs/telegram-notify.md`](docs/telegram-notify.md)
-- 維運操作手冊：[`docs/runbook.md`](docs/runbook.md)
 - 延伸維運操作手冊：[`docs/runbook/operations.md`](docs/runbook/operations.md)
 - 一頁式 Runbook：[`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
 - 發版流程：[`docs/releasing.md`](docs/releasing.md)
 - FAQ：[`docs/faq.md`](docs/faq.md)
-- 文件風格與術語規範：[`docs/STYLEGUIDE.zh-TW.md`](docs/STYLEGUIDE.zh-TW.md)
-- 翻譯自檢說明：[`docs/translation_check.md`](docs/translation_check.md)
 
 <a id="roadmap"></a>
 ## 路線圖

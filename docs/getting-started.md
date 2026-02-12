@@ -89,7 +89,7 @@ INFO health queue=0/50000 persisted_rows_per_min=22340 lag_sec=1.4 watchdog_fail
 
 ## 下一步
 
-- 生產部署：[`docs/deployment.md`](deployment.md)
+- 生產部署：[`docs/deployment/systemd.md`](deployment/systemd.md)
 - Telegram 設定：[`docs/telegram-notify.md`](telegram-notify.md)
-- 操作手冊：[`docs/runbook.md`](runbook.md)
+- 操作手冊：[`docs/runbook/operations.md`](runbook/operations.md)
 - 故障排除：[`docs/troubleshooting.md`](troubleshooting.md)

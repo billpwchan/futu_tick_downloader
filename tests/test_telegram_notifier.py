@@ -3,7 +3,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hk_tick_collector.notify.telegram import (
+from hk_tick_collector.notifiers.telegram import (
     AlertEvent,
     AlertStateMachine,
     DedupeStore,
