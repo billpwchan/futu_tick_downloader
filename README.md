@@ -145,7 +145,7 @@ INSTANCE_ID=hk-prod-a1
 
 目前通知策略：
 
-- `HEALTH OK`：啟動後 1 條、開盤前 1 條、收盤後 1 條；其餘只在狀態切換發送
+- `HEALTH OK`：盤前每 30 分鐘、盤中每 10 分鐘、午休每 30 分鐘、盤後每 60 分鐘
 - `HEALTH WARN`：切換即發；持續最多每 10 分鐘 1 條；恢復即發 OK
 - `ALERT`：切換即發；持續最多每 3 分鐘 1 條；恢復即發 `RECOVERED`
 - `DAILY DIGEST`：收盤後 1 條日報
@@ -158,8 +158,8 @@ INSTANCE_ID=hk-prod-a1
 
 ```text
 🟢 HK Tick Collector 正常
-結論：服務運作正常，暫時不需人工介入
-指標：狀態=盤中 | 延遲=1.2s | 寫入=24100/min | 今日累計=18200341 | 最後更新=2026-02-12T08:01:02+00:00 | symbols_age=2.1s
+結論：正常：盤中採集與寫入穩定
+指標：狀態=盤中 | ingest_lag=1.2s | persisted=24100/min | queue=0/50000 | symbols=1000 | stale_symbols=2 | p95_age=1.8s
 主機：ip-10-0-1-12 / hk-prod-a1
 資源：load1=0.22 rss=145.3MB disk_free=87.30GB
 sid=sid-12ab34cd
@@ -167,8 +167,8 @@ sid=sid-12ab34cd
 
 ```text
 🟡 注意
-結論：注意：服務仍在運作，但品質指標有退化
-指標：原因=HEALTH_WARN | 可能影響=目前未完全停寫，但可能出現延遲或吞吐下降 | queue=3200/50000 | drift=185.0s
+結論：注意：盤中品質指標退化
+指標：狀態=盤中 | ingest_lag=48.2s | persisted=9200/min | queue=3200/50000 | symbols=1000 | stale_symbols=127 | p95_age=26.1s
 建議：journalctl -u hk-tick-collector -n 120 --no-pager
 主機：ip-10-0-1-12 / hk-prod-a1
 sid=sid-34de56fa
@@ -195,7 +195,7 @@ eid=eid-a1b2c3d4 sid=sid-34de56fa
 ```text
 📊 日報
 結論：20260212 收盤摘要
-指標：今日總量=18100234 | 峰值=39800/min | 最大延遲=4.2s | 告警次數=3
+指標：今日總量=18100234 | 峰值=39800/min | 最大延遲=4.2s | 告警次數=3 | 恢復次數=3
 db：/data/sqlite/HK/20260212.db rows=321001245
 主機：ip-10-0-1-12 / hk-prod-a1
 sid=sid-9f8e7d6c

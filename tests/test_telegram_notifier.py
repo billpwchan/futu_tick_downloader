@@ -6,6 +6,9 @@ from pathlib import Path
 
 from hk_tick_collector.notifiers.telegram import (
     ALERT_CADENCE_SEC,
+    AFTER_HOURS_CADENCE_SEC,
+    OPEN_CADENCE_SEC,
+    PREOPEN_CADENCE_SEC,
     WARN_CADENCE_SEC,
     AlertEvent,
     AlertStateMachine,
@@ -81,7 +84,7 @@ def test_sid_eid_format_is_short_and_stable():
 
 def test_renderer_health_ok_template_contains_sid_and_required_order():
     state_machine = AlertStateMachine(drift_warn_sec=120)
-    snapshot = _make_snapshot()
+    snapshot = _make_snapshot(created_at=datetime(2026, 2, 12, 2, 0, tzinfo=timezone.utc))
     assessment = state_machine.assess_health(snapshot)
     renderer = MessageRenderer(parse_mode="HTML")
     rendered = renderer.render_health(
@@ -96,8 +99,42 @@ def test_renderer_health_ok_template_contains_sid_and_required_order():
     assert lines[0].startswith("<b>🟢 HK Tick Collector 正常</b>")
     assert lines[1].startswith("結論：")
     assert lines[2].startswith("指標：")
+    assert "persisted=" in lines[2]
+    assert "symbols=" in lines[2]
     assert "主機：" in rendered.text
     assert f"sid={snapshot.sid}" in rendered.text
+
+
+def test_renderer_after_hours_uses_since_close_not_large_drift_seconds():
+    state_machine = AlertStateMachine(drift_warn_sec=120)
+    after_hours = datetime(2026, 2, 12, 12, 30, tzinfo=timezone.utc)
+    snapshot = _make_snapshot(
+        created_at=after_hours,
+        persisted_per_min=0,
+        drift_sec=24000.0,
+        queue_size=0,
+    )
+    assessment = state_machine.assess_health(snapshot)
+    assert assessment.severity == NotifySeverity.OK
+    renderer = MessageRenderer(parse_mode="HTML")
+    digest = _DailyDigestState(
+        trading_day="20260212",
+        start_db_rows=120000,
+        db_rows=123456,
+        db_path="/data/sqlite/HK/20260212.db",
+    )
+    rendered = renderer.render_health(
+        snapshot=snapshot,
+        assessment=assessment,
+        hostname="collector-a",
+        instance_id="node-1",
+        include_system_metrics=True,
+        digest=digest,
+    )
+
+    assert "距收盤=" in rendered.text
+    assert "db_growth_today=" in rendered.text
+    assert "延遲=24000.0s" not in rendered.text
 
 
 def test_renderer_warn_and_alert_template_suggestion_limit_and_ids():
@@ -179,10 +216,12 @@ def test_renderer_recovered_and_daily_digest_templates():
 
     digest = _DailyDigestState(
         trading_day="20260212",
+        start_db_rows=1000000,
         total_rows=1800000,
         peak_rows_per_min=38000,
         max_lag_sec=3.6,
         alert_count=4,
+        recovered_count=3,
         db_rows=22000000,
         db_path="/data/sqlite/HK/20260212.db",
     )
@@ -195,6 +234,7 @@ def test_renderer_recovered_and_daily_digest_templates():
     assert "<b>📊 日報</b>" in digest_rendered.text
     assert "今日總量=1800000" in digest_rendered.text
     assert "告警次數=4" in digest_rendered.text
+    assert "恢復次數=3" in digest_rendered.text
 
 
 def test_truncate_message_respects_limit():
@@ -309,6 +349,20 @@ def test_notifier_health_and_alert_cadence_with_recovered():
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 1
 
+        # open heartbeat cadence should emit every 10 minutes
+        monotonic_now["value"] += OPEN_CADENCE_SEC
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=830,
+                drift_sec=1.5,
+                queue_size=1,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 2
+        assert "persisted=" in calls[-1]["text"]
+
         # WARN should send immediately on state change
         monotonic_now["value"] += 5
         notifier.submit_health(
@@ -320,7 +374,7 @@ def test_notifier_health_and_alert_cadence_with_recovered():
             )
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 2
+        assert len(calls) == 3
         assert "🟡 HK Tick Collector 注意" in calls[-1]["text"]
 
         # WARN cadence: <10m suppressed
@@ -334,7 +388,7 @@ def test_notifier_health_and_alert_cadence_with_recovered():
             )
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 2
+        assert len(calls) == 3
 
         # WARN cadence: >=10m allowed
         monotonic_now["value"] += 10
@@ -347,7 +401,7 @@ def test_notifier_health_and_alert_cadence_with_recovered():
             )
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 3
+        assert len(calls) == 4
 
         # ALERT event cadence + recovered
         event = AlertEvent(
@@ -364,20 +418,20 @@ def test_notifier_health_and_alert_cadence_with_recovered():
         monotonic_now["value"] += 1
         notifier.submit_alert(event)
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 4
+        assert len(calls) == 5
         assert "🔴 異常" in calls[-1]["text"]
 
         # <3m suppressed
         monotonic_now["value"] += ALERT_CADENCE_SEC - 20
         notifier.submit_alert(event)
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 4
+        assert len(calls) == 5
 
         # >=3m allowed
         monotonic_now["value"] += 25
         notifier.submit_alert(event)
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 5
+        assert len(calls) == 6
 
         notifier.resolve_alert(
             code="DISCONNECT",
@@ -387,12 +441,107 @@ def test_notifier_health_and_alert_cadence_with_recovered():
             sid="sid-aaaaaaaa",
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 6
+        assert len(calls) == 7
         assert "✅ 已恢復" in calls[-1]["text"]
 
         await notifier.stop()
 
     asyncio.run(runner())
+
+
+def test_notifier_after_hours_ok_cadence_and_mode_transition():
+    async def runner() -> None:
+        calls = []
+
+        def fake_sender(payload):
+            calls.append(dict(payload))
+            return TelegramSendResult(ok=True, status_code=200)
+
+        monotonic_now = {"value": 0.0}
+
+        def fake_now() -> float:
+            return monotonic_now["value"]
+
+        async def fake_sleep(_: float) -> None:
+            return
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            parse_mode="HTML",
+            sender=fake_sender,
+            now_monotonic=fake_now,
+            sleep=fake_sleep,
+        )
+        await notifier.start()
+
+        open_time = datetime(2026, 2, 12, 2, 0, tzinfo=timezone.utc)
+        after_hours = datetime(2026, 2, 12, 12, 30, tzinfo=timezone.utc)
+
+        notifier.submit_health(
+            _make_snapshot(created_at=open_time, persisted_per_min=900, drift_sec=1.0)
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 1
+
+        # mode changes to after-hours: emit immediately
+        monotonic_now["value"] += 60
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=after_hours, persisted_per_min=0, drift_sec=24000.0, queue_size=0
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 3  # HEALTH + DAILY_DIGEST
+        assert "距收盤=" in calls[-2]["text"]
+
+        # after-hours cadence not reached yet
+        monotonic_now["value"] += AFTER_HOURS_CADENCE_SEC - 1
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=after_hours, persisted_per_min=0, drift_sec=24500.0, queue_size=0
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 3
+
+        # after-hours cadence reached
+        monotonic_now["value"] += 2
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=after_hours, persisted_per_min=0, drift_sec=25000.0, queue_size=0
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 4
+        assert "距收盤=" in calls[-1]["text"]
+
+        await notifier.stop()
+
+    asyncio.run(runner())
+
+
+def test_state_machine_pre_open_and_after_hours_not_warn_for_large_drift():
+    sm = AlertStateMachine(drift_warn_sec=120)
+    pre_open = datetime(2026, 2, 12, 1, 20, tzinfo=timezone.utc)
+    after_hours = datetime(2026, 2, 12, 12, 30, tzinfo=timezone.utc)
+
+    pre_open_assessment = sm.assess_health(
+        _make_snapshot(created_at=pre_open, persisted_per_min=0, drift_sec=9999.0, queue_size=0)
+    )
+    after_hours_assessment = sm.assess_health(
+        _make_snapshot(created_at=after_hours, persisted_per_min=0, drift_sec=24000.0, queue_size=0)
+    )
+
+    assert pre_open_assessment.severity == NotifySeverity.OK
+    assert after_hours_assessment.severity == NotifySeverity.OK
+
+
+def test_preopen_open_afterhours_constants():
+    assert PREOPEN_CADENCE_SEC == 1800
+    assert OPEN_CADENCE_SEC == 600
+    assert AFTER_HOURS_CADENCE_SEC == 3600
 
 
 def test_retry_after_respected_and_eventually_succeeds():

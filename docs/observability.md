@@ -20,13 +20,18 @@
 
 ## 2. Telegram 降噪節奏
 
-- `HEALTH OK`：啟動後 1 條、開盤前 1 條、收盤後 1 條；其餘僅狀態切換
+- `HEALTH OK`：盤前每 30 分鐘、盤中每 10 分鐘、午休每 30 分鐘、盤後每 60 分鐘
 - `HEALTH WARN`：狀態切換即發；持續最多每 10 分鐘 1 條；恢復即發 OK
 - `ALERT`：狀態切換即發；持續最多每 3 分鐘 1 條
 - `RECOVERED`：事件恢復立即發（含原 `eid`）
 - `DAILY DIGEST`：收盤後 1 條日報
 
 所有事件告警都使用 fingerprint 去重 + cooldown。
+
+盤後語義：
+
+- 不把大幅度 `drift_sec` 直接視為異常（避免出現數萬秒延遲的誤導訊號）
+- 改用 `距收盤`、`last_update_at`、`close_snapshot_ok`、`db_growth_today`
 
 ## 3. sid/eid 關聯規範
 
@@ -57,4 +62,3 @@ scripts/hk-tickctl logs --ops --since "20 minutes ago"
 sudo journalctl -u hk-tick-collector --since "2 hours ago" --no-pager | grep "sid=sid-xxxx"
 sudo journalctl -u hk-tick-collector --since "2 hours ago" --no-pager | grep "eid=eid-xxxx"
 ```
-

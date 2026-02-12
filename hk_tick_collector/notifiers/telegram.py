@@ -24,6 +24,12 @@ HK_TZ = ZoneInfo("Asia/Hong_Kong")
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 WARN_CADENCE_SEC = 600
 ALERT_CADENCE_SEC = 180
+PREOPEN_CADENCE_SEC = 1800
+OPEN_CADENCE_SEC = 600
+LUNCH_CADENCE_SEC = 1800
+AFTER_HOURS_CADENCE_SEC = 3600
+OPEN_STALE_SYMBOL_AGE_SEC = 10.0
+OFFHOURS_STALE_SYMBOL_AGE_SEC = 120.0
 
 
 def _make_short_id(prefix: str) -> str:
@@ -141,10 +147,12 @@ class _DedupeRecord:
 @dataclass
 class _DailyDigestState:
     trading_day: str
+    start_db_rows: int | None = None
     total_rows: int = 0
     peak_rows_per_min: int = 0
     max_lag_sec: float = 0.0
     alert_count: int = 0
+    recovered_count: int = 0
     db_rows: int = 0
     db_path: str = "n/a"
 
@@ -267,6 +275,44 @@ def _is_after_close_window(created_at: datetime) -> bool:
         return False
     t = local.timetz().replace(tzinfo=None)
     return t >= dt_time(16, 0)
+
+
+def _format_duration(seconds: int | float) -> str:
+    value = max(0, int(seconds))
+    hours = value // 3600
+    minutes = (value % 3600) // 60
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m"
+
+
+def _seconds_to_open(created_at: datetime) -> int:
+    local = created_at.astimezone(HK_TZ)
+    open_at = local.replace(hour=9, minute=30, second=0, microsecond=0)
+    return max(0, int((open_at - local).total_seconds()))
+
+
+def _seconds_since_close(created_at: datetime) -> int:
+    local = created_at.astimezone(HK_TZ)
+    close_at = local.replace(hour=16, minute=0, second=0, microsecond=0)
+    return max(0, int((local - close_at).total_seconds()))
+
+
+def _symbol_ages(snapshot: HealthSnapshot) -> list[float]:
+    return [age for age in (item.last_tick_age_sec for item in snapshot.symbols) if age is not None]
+
+
+def _count_stale_symbols(snapshot: HealthSnapshot, *, threshold_sec: float) -> int:
+    return sum(1 for age in _symbol_ages(snapshot) if age >= threshold_sec)
+
+
+def _percentile_float(values: Sequence[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    clipped = max(0.0, min(1.0, float(percentile)))
+    ordered = sorted(values)
+    index = int((len(ordered) - 1) * clipped)
+    return float(ordered[index])
 
 
 def truncate_rendered_message(
@@ -400,30 +446,65 @@ class AlertStateMachine:
         queue_pct = _queue_utilization_pct(snapshot)
         persisted = max(0, int(snapshot.persisted_rows_per_min))
         max_lag = _max_symbol_lag(snapshot)
+        queue = max(0, int(snapshot.queue_size))
 
         low_persist = False
         if self._last_persisted_rows_per_min is not None and self._last_persisted_rows_per_min > 0:
             low_persist = 0 < persisted < max(1, int(self._last_persisted_rows_per_min * 0.3))
 
-        if persisted == 0 and (snapshot.queue_size > 0 or max_lag > 0):
-            severity = NotifySeverity.WARN
-            conclusion = "注意：疑似停寫跡象，建議盡快排查"
-            impact = "若未處理，可能演變為持續積壓與資料延遲擴大"
-            needs_action = True
-        elif (
-            (freshness_sec is not None and freshness_sec >= self._drift_warn_sec)
-            or queue_pct >= 60.0
-            or low_persist
-        ):
-            severity = NotifySeverity.WARN
-            conclusion = "注意：服務仍在運作，但品質指標有退化"
-            impact = "目前未完全停寫，但可能出現延遲或吞吐下降"
-            needs_action = False
+        if mode == "open":
+            if persisted == 0 and (queue > 0 or max_lag > 0):
+                severity = NotifySeverity.WARN
+                conclusion = "注意：盤中疑似停寫，建議立即檢查"
+                impact = "若持續，可能造成即時資料落後與積壓擴大"
+                needs_action = True
+            elif (
+                (freshness_sec is not None and freshness_sec >= self._drift_warn_sec)
+                or queue_pct >= 60.0
+                or low_persist
+            ):
+                severity = NotifySeverity.WARN
+                conclusion = "注意：盤中品質指標退化"
+                impact = "目前仍可運作，但延遲與吞吐可能持續惡化"
+                needs_action = True
+            else:
+                severity = NotifySeverity.OK
+                conclusion = "正常：盤中採集與寫入穩定"
+                impact = "目前沒有明顯風險，暫時不需要人工介入"
+                needs_action = False
+        elif mode == "pre-open":
+            if queue_pct >= 80.0:
+                severity = NotifySeverity.WARN
+                conclusion = "注意：開盤前佇列偏高"
+                impact = "若未在開盤前回落，盤中可能出現短暫延遲"
+                needs_action = True
+            else:
+                severity = NotifySeverity.OK
+                conclusion = "正常：開盤前系統就緒"
+                impact = "可待開盤後持續觀察吞吐與延遲"
+                needs_action = False
+        elif mode == "lunch-break":
+            if queue > 0 and persisted <= 0:
+                severity = NotifySeverity.WARN
+                conclusion = "注意：午休期間存在積壓"
+                impact = "若持續到下午開盤，可能出現補寫壓力"
+                needs_action = True
+            else:
+                severity = NotifySeverity.OK
+                conclusion = "正常：午休狀態平穩"
+                impact = "目前不需人工介入"
+                needs_action = False
         else:
-            severity = NotifySeverity.OK
-            conclusion = "正常：資料採集與寫入穩定"
-            impact = "目前沒有明顯風險，暫時不需要人工介入"
-            needs_action = False
+            if queue > 0 and persisted <= 0:
+                severity = NotifySeverity.WARN
+                conclusion = "注意：收盤後仍有佇列積壓"
+                impact = "可能影響收盤資料完整性，建議追蹤恢復"
+                needs_action = True
+            else:
+                severity = NotifySeverity.OK
+                conclusion = "正常：收盤後服務平穩"
+                impact = "目前不需人工介入"
+                needs_action = False
 
         self._last_persisted_rows_per_min = persisted
         return HealthAssessment(
@@ -482,37 +563,69 @@ class MessageRenderer:
         hostname: str,
         instance_id: str | None,
         include_system_metrics: bool,
+        digest: _DailyDigestState | None = None,
     ) -> RenderedMessage:
         if self._parse_mode != "HTML":
             return self._render_health_plain(snapshot, assessment, hostname, instance_id)
 
         host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
-        freshness = abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None
-        max_symbol_age = _max_symbol_age_sec(snapshot)
+        lag_sec = abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None
         market_label = _market_mode_label(assessment.market_mode)
+        symbol_count = len(snapshot.symbols)
+        stale_threshold_sec = (
+            OPEN_STALE_SYMBOL_AGE_SEC
+            if assessment.market_mode == "open"
+            else OFFHOURS_STALE_SYMBOL_AGE_SEC
+        )
+        stale_symbols = _count_stale_symbols(snapshot, threshold_sec=stale_threshold_sec)
+        symbol_ages = _symbol_ages(snapshot)
+        p95_age = _percentile_float(symbol_ages, 0.95)
         icon = "🟢" if assessment.severity == NotifySeverity.OK else "🟡"
-        conclusion = (
-            "服務運作正常，暫時不需人工介入"
-            if assessment.severity == NotifySeverity.OK
-            else assessment.conclusion
-        )
-
-        metrics_line = (
-            f"指標：狀態={market_label} | 延遲={_format_float(freshness)}s | "
-            f"寫入={snapshot.persisted_rows_per_min}/min | 今日累計={snapshot.db_rows} | "
-            f"最後更新={snapshot.db_max_ts_utc} | symbols_age={_format_float(max_symbol_age)}s"
-        )
         system_line = (
             f"資源：load1={_format_float(snapshot.system_load1, 2)} "
             f"rss={_format_float(snapshot.system_rss_mb, 1)}MB "
             f"disk_free={_format_float(snapshot.system_disk_free_gb, 2)}GB"
         )
+
+        if assessment.market_mode == "pre-open":
+            metrics_line = (
+                f"指標：狀態={market_label} | 距開盤={_format_duration(_seconds_to_open(snapshot.created_at))} | "
+                f"symbols={symbol_count} | stale_symbols={stale_symbols} | "
+                f"queue={snapshot.queue_size}/{snapshot.queue_maxsize} | "
+                f"last_update_at={snapshot.db_max_ts_utc}"
+            )
+        elif assessment.market_mode == "open":
+            metrics_line = (
+                f"指標：狀態={market_label} | ingest_lag={_format_float(lag_sec)}s | "
+                f"persisted={snapshot.persisted_rows_per_min}/min | "
+                f"queue={snapshot.queue_size}/{snapshot.queue_maxsize} | "
+                f"symbols={symbol_count} | stale_symbols={stale_symbols} | "
+                f"p95_age={_format_float(p95_age)}s"
+            )
+        elif assessment.market_mode == "lunch-break":
+            metrics_line = (
+                f"指標：狀態={market_label} | symbols={symbol_count} | stale_symbols={stale_symbols} | "
+                f"queue={snapshot.queue_size}/{snapshot.queue_maxsize} | "
+                f"last_update_at={snapshot.db_max_ts_utc}"
+            )
+        else:
+            db_growth = "n/a"
+            if digest is not None and digest.start_db_rows is not None:
+                db_growth = f"{digest.db_rows - digest.start_db_rows:+,} rows"
+            metrics_line = (
+                f"指標：狀態={market_label} | 距收盤={_format_duration(_seconds_since_close(snapshot.created_at))} | "
+                f"symbols={symbol_count} | close_snapshot_ok={'true' if snapshot.queue_size == 0 else 'false'} | "
+                f"db_growth_today={db_growth} | last_update_at={snapshot.db_max_ts_utc}"
+            )
+
         lines = [
             f"<b>{icon} HK Tick Collector {'正常' if assessment.severity == NotifySeverity.OK else '注意'}</b>",
-            f"結論：{escape(conclusion)}",
+            f"結論：{escape(assessment.conclusion)}",
             escape(metrics_line),
-            f"主機：{escape(host_text)}",
         ]
+        if assessment.severity == NotifySeverity.WARN:
+            lines.append("建議：journalctl -u hk-tick-collector -n 120 --no-pager")
+        lines.append(f"主機：{escape(host_text)}")
         if include_system_metrics:
             lines.append(escape(system_line))
         lines.append(f"sid={escape(snapshot.sid)}")
@@ -610,7 +723,8 @@ class MessageRenderer:
             (
                 "指標："
                 f"今日總量={digest.total_rows} | 峰值={digest.peak_rows_per_min}/min | "
-                f"最大延遲={digest.max_lag_sec:.1f}s | 告警次數={digest.alert_count}"
+                f"最大延遲={digest.max_lag_sec:.1f}s | 告警次數={digest.alert_count} | "
+                f"恢復次數={digest.recovered_count}"
             ),
             f"db：{escape(digest.db_path)} rows={digest.db_rows}",
             f"主機：{escape(host_text)}",
@@ -877,8 +991,8 @@ class TelegramNotifier:
         self._worker_task: asyncio.Task | None = None
         self._last_health_snapshot: HealthSnapshot | None = None
         self._last_health_severity: NotifySeverity | None = None
+        self._last_health_market_mode: str | None = None
         self._last_health_sent_at: float | None = None
-        self._ok_milestones_sent: set[str] = set()
         self._daily_digest_sent: set[str] = set()
         self._digest_state: _DailyDigestState | None = None
 
@@ -938,6 +1052,7 @@ class TelegramNotifier:
         )
         self._last_health_snapshot = snapshot
         self._last_health_severity = assessment.severity
+        self._last_health_market_mode = assessment.market_mode
         if not should_send:
             logger.info(
                 "telegram_health_suppressed reason=%s severity=%s mode=%s sid=%s",
@@ -954,6 +1069,7 @@ class TelegramNotifier:
             hostname=self._hostname,
             instance_id=self._instance_id,
             include_system_metrics=self._include_system_metrics,
+            digest=self._digest_state,
         )
         self._enqueue_message(
             kind="HEALTH",
@@ -966,7 +1082,6 @@ class TelegramNotifier:
         )
         self._last_health_sent_at = now
         if assessment.severity == NotifySeverity.OK:
-            self._mark_ok_milestone(snapshot=snapshot, market_mode=assessment.market_mode)
             if (
                 assessment.market_mode == "after-hours"
                 and snapshot.trading_day not in self._daily_digest_sent
@@ -1086,6 +1201,8 @@ class TelegramNotifier:
             sid=resolved_sid,
             eid=resolved_eid,
         )
+        if self._digest_state is not None:
+            self._digest_state.recovered_count += 1
 
     def _enqueue_message(
         self,
@@ -1137,39 +1254,44 @@ class TelegramNotifier:
         assessment: HealthAssessment,
         now: float,
     ) -> tuple[bool, str]:
-        previous = self._last_health_severity
-        state_changed = previous is not None and previous != assessment.severity
-        if previous is None:
+        if self._last_health_severity is None:
             return True, "bootstrap"
-        if state_changed:
+
+        if self._last_health_market_mode != assessment.market_mode:
+            return True, "market_mode_changed"
+
+        if self._last_health_severity != assessment.severity:
             return True, "state_changed"
 
         elapsed = None if self._last_health_sent_at is None else (now - self._last_health_sent_at)
-        if assessment.severity == NotifySeverity.OK:
-            if self._should_send_ok_milestone(
-                snapshot=snapshot, market_mode=assessment.market_mode
-            ):
-                if assessment.market_mode == "pre-open":
-                    return True, "pre_open_once"
-                if assessment.market_mode == "after-hours":
-                    return True, "after_close_once"
-            return False, "ok_suppressed"
-
-        cadence_sec = WARN_CADENCE_SEC
+        cadence_sec = self._health_cadence_sec(
+            market_mode=assessment.market_mode,
+            severity=assessment.severity,
+        )
         if elapsed is None or elapsed >= cadence_sec:
-            return True, "warn_cadence"
-        return False, "warn_cooldown"
+            if assessment.severity == NotifySeverity.WARN:
+                return True, "warn_cadence"
+            if assessment.severity == NotifySeverity.ALERT:
+                return True, "alert_cadence"
+            return True, "ok_cadence"
+        if assessment.severity == NotifySeverity.WARN:
+            return False, "warn_cooldown"
+        if assessment.severity == NotifySeverity.ALERT:
+            return False, "alert_cooldown"
+        return False, "ok_cooldown"
 
-    def _should_send_ok_milestone(self, *, snapshot: HealthSnapshot, market_mode: str) -> bool:
-        if market_mode not in {"pre-open", "after-hours"}:
-            return False
-        marker = f"{snapshot.trading_day}:{market_mode}"
-        return marker not in self._ok_milestones_sent
-
-    def _mark_ok_milestone(self, *, snapshot: HealthSnapshot, market_mode: str) -> None:
-        if market_mode not in {"pre-open", "after-hours"}:
-            return
-        self._ok_milestones_sent.add(f"{snapshot.trading_day}:{market_mode}")
+    def _health_cadence_sec(self, *, market_mode: str, severity: NotifySeverity) -> int:
+        if severity == NotifySeverity.ALERT:
+            return ALERT_CADENCE_SEC
+        if severity == NotifySeverity.WARN:
+            return WARN_CADENCE_SEC
+        mode_to_cadence = {
+            "pre-open": PREOPEN_CADENCE_SEC,
+            "open": OPEN_CADENCE_SEC,
+            "lunch-break": LUNCH_CADENCE_SEC,
+            "after-hours": AFTER_HOURS_CADENCE_SEC,
+        }
+        return mode_to_cadence.get(market_mode, OPEN_CADENCE_SEC)
 
     def _normalize_event_ids(self, event: AlertEvent) -> AlertEvent:
         sid = event.sid
@@ -1202,7 +1324,10 @@ class TelegramNotifier:
 
     def _observe_digest(self, *, snapshot: HealthSnapshot) -> None:
         if self._digest_state is None or self._digest_state.trading_day != snapshot.trading_day:
-            self._digest_state = _DailyDigestState(trading_day=snapshot.trading_day)
+            self._digest_state = _DailyDigestState(
+                trading_day=snapshot.trading_day,
+                start_db_rows=int(snapshot.db_rows),
+            )
         state = self._digest_state
         state.total_rows += max(0, int(snapshot.persisted_rows_per_min))
         state.peak_rows_per_min = max(
