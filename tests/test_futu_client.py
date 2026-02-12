@@ -127,6 +127,20 @@ def build_config(**overrides) -> Config:
         sqlite_journal_mode="WAL",
         sqlite_synchronous="NORMAL",
         sqlite_wal_autocheckpoint=1000,
+        telegram_enabled=False,
+        telegram_bot_token="",
+        telegram_chat_id="",
+        telegram_thread_id=None,
+        telegram_digest_interval_sec=600,
+        telegram_alert_cooldown_sec=600,
+        telegram_rate_limit_per_min=18,
+        telegram_include_system_metrics=True,
+        telegram_digest_queue_change_pct=20.0,
+        telegram_digest_last_tick_age_threshold_sec=60,
+        telegram_digest_drift_threshold_sec=60,
+        telegram_digest_send_alive_when_idle=False,
+        telegram_sqlite_busy_alert_threshold=3,
+        instance_id="",
         log_level="INFO",
     )
     data.update(overrides)
@@ -412,7 +426,7 @@ def test_watchdog_honors_queue_threshold():
             initial_last_seq={"HK.00700": 5},
         )
 
-        client._push_rows_since_report = 20
+        client._push_rows_since_report = 0
         client._last_upstream_active_at = loop.time()
         collector._runtime["last_dequeue_monotonic"] = loop.time() - 5
         collector._runtime["last_commit_monotonic"] = loop.time() - 5
@@ -423,10 +437,40 @@ def test_watchdog_honors_queue_threshold():
             queue_size=5,
             queue_maxsize=100,
             persisted_rows_per_min=0,
-            queue_in_rows_per_min=50,
+            queue_in_rows_per_min=0,
             queue_out_rows_per_min=0,
         )
         assert collector.recovery_calls == 0
+
+    asyncio.run(runner())
+
+
+def test_watchdog_triggers_when_enqueued_window_positive_even_below_threshold():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        client = FutuQuoteClient(
+            build_config(watchdog_stall_sec=1, watchdog_queue_threshold_rows=20),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+
+        client._push_rows_since_report = 10
+        client._last_upstream_active_at = loop.time()
+        collector._runtime["last_dequeue_monotonic"] = loop.time() - 5
+        collector._runtime["last_commit_monotonic"] = loop.time() - 5
+        collector._runtime["worker_alive"] = False
+
+        await client._check_watchdog(
+            now=loop.time(),
+            queue_size=5,
+            queue_maxsize=100,
+            persisted_rows_per_min=0,
+            queue_in_rows_per_min=10,
+            queue_out_rows_per_min=0,
+        )
+        assert collector.recovery_calls == 1
 
     asyncio.run(runner())
 

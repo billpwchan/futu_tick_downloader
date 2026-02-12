@@ -1,5 +1,40 @@
 # Project Memory (Agents)
 
+## 2026-02-12: Telegram notifier integration
+
+### Scope
+
+- Added Telegram notifier package:
+  - `hk_tick_collector/notifiers/telegram.py`
+  - non-blocking queue worker + bounded retries
+  - rate limit + cooldown + message length guard
+- Connected notifier to existing health/watchdog/persist signals:
+  - digest from `futu_client._health_loop`
+  - stall alerts from `futu_client._check_watchdog`
+  - sqlite busy alerts from collector runtime counters
+- Added DB stats helper:
+  - `SQLiteTickStore.fetch_tick_stats`
+- Updated runtime config surface (`Config` + `.env.example`) for Telegram and noise tuning.
+
+### Reliability guarantees
+
+- `TELEGRAM_ENABLED=0` keeps baseline behavior unchanged.
+- Notify failures never block ingest queue or SQLite persist.
+- `429` handled with `retry_after` backoff and bounded retries.
+- Alert keys are cooldown-deduped to avoid repeated spam.
+
+### Docs/tests touched
+
+- New docs:
+  - `docs/deployment.md`
+  - `docs/telegram.md`
+  - `docs/runbook.md`
+- Updated docs:
+  - `README.md`, `docs/configuration.md`, `docs/getting-started.md`, `docs/deployment/systemd.md`
+- New tests:
+  - `tests/test_telegram_notifier.py`
+  - watchdog regression extension in `tests/test_futu_client.py`
+
 ## 2026-02-11: OSS + release readiness baseline
 
 ### Scope

@@ -3,19 +3,24 @@ from __future__ import annotations
 import asyncio
 import faulthandler
 import logging
+import os
+import resource
+import shutil
 import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Deque, Dict, List, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from futu import OpenQuoteContext, RET_OK, Session, SubType, TickerHandlerBase
 
 from .collector import AsyncTickCollector
 from .config import Config
-from .db import PersistResult
+from .db import PersistResult, SQLiteTickStore, db_path_for_trading_day
 from .mapping import ticker_df_to_rows
 from .models import TickRow
+from .notifiers.telegram import AlertEvent, HealthSnapshot, SymbolSnapshot, TelegramNotifier
 from .utils import ExponentialBackoff
 
 logger = logging.getLogger(__name__)
@@ -24,6 +29,7 @@ POLL_SKIP_PUSH_SEC = 2
 POLL_RECENT_KEY_LIMIT = 500
 HEALTH_LOG_INTERVAL_SEC = 60
 WATCHDOG_EXIT_CODE = 1
+HK_TZ = ZoneInfo("Asia/Hong_Kong")
 
 
 class FutuTickerHandler(TickerHandlerBase):
@@ -59,10 +65,14 @@ class FutuQuoteClient:
         loop: asyncio.AbstractEventLoop,
         initial_last_seq: Optional[Dict[str, int]] = None,
         context_factory: Optional[Callable[..., OpenQuoteContext]] = None,
+        store: Optional[SQLiteTickStore] = None,
+        notifier: Optional[TelegramNotifier] = None,
     ) -> None:
         self._config = config
         self._collector = collector
         self._loop = loop
+        self._store = store
+        self._notifier = notifier
         self._ctx: OpenQuoteContext | None = None
         self._context_factory = context_factory or OpenQuoteContext
         self._handler = FutuTickerHandler(self._handle_push_rows, loop)
@@ -99,6 +109,7 @@ class FutuQuoteClient:
         self._watchdog_heal_attempts = 0
         self._watchdog_last_heal_at: float | None = None
         self._watchdog_dumped = False
+        self._last_busy_backoff_count = 0
 
     async def run_forever(self) -> None:
         backoff = ExponentialBackoff(
@@ -385,6 +396,47 @@ class FutuQuoteClient:
                 " | ".join(parts),
             )
 
+            runtime = self._collector.snapshot_runtime_state()
+            busy_backoff_count = int(runtime.get("busy_backoff_count", 0))
+            busy_backoff_delta = max(0, busy_backoff_count - self._last_busy_backoff_count)
+            self._last_busy_backoff_count = busy_backoff_count
+            if (
+                self._notifier is not None
+                and busy_backoff_delta >= self._config.telegram_sqlite_busy_alert_threshold
+            ):
+                trading_day = self._current_trading_day()
+                self._notifier.submit_alert(
+                    AlertEvent(
+                        created_at=datetime.now(tz=timezone.utc),
+                        code="SQLITE_BUSY",
+                        key=f"SQLITE_BUSY:{trading_day}",
+                        trading_day=trading_day,
+                        summary_lines=[
+                            f"busy_backoff_delta={busy_backoff_delta}/min threshold={self._config.telegram_sqlite_busy_alert_threshold}",
+                            f"queue={queue_size}/{queue_maxsize} persisted_per_min={persisted_rows_per_min}",
+                            f"last_exception_type={runtime.get('last_exception_type')}",
+                        ],
+                        suggestions=[
+                            "journalctl -u hk-tick-collector -n 200 --no-pager",
+                            f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*) from ticks;'",
+                        ],
+                    )
+                )
+
+            if self._notifier is not None:
+                snapshot = await self._build_health_snapshot(
+                    now=now,
+                    queue_size=queue_size,
+                    queue_maxsize=queue_maxsize,
+                    persisted_rows_per_min=persisted_rows_per_min,
+                    drift_sec=drift_sec,
+                    push_rows_per_min=self._push_rows_since_report,
+                    poll_fetched=self._poll_fetched_since_report,
+                    poll_accepted=self._poll_accepted_since_report,
+                    dropped_duplicate=self._dropped_duplicate_since_report,
+                )
+                self._notifier.submit_health(snapshot)
+
             await self._check_watchdog(
                 now=now,
                 queue_size=queue_size,
@@ -562,15 +614,16 @@ class FutuQuoteClient:
         poll_active = (
             self._poll_fetched_since_report > 0 and self._poll_seq_advanced_since_report > 0
         )
+        enqueued_in_window = max(
+            queue_in_rows_per_min,
+            self._push_rows_since_report + self._poll_enqueued_since_report,
+        )
         recent_upstream = (
             self._last_upstream_active_at is not None
             and (now - self._last_upstream_active_at) <= self._config.watchdog_upstream_window_sec
         )
         upstream_active = recent_upstream and (
-            self._push_rows_since_report > 0
-            or poll_active
-            or queue_in_rows_per_min > 0
-            or queue_out_rows_per_min > 0
+            enqueued_in_window > 0 or poll_active or queue_out_rows_per_min > 0
         )
 
         runtime = self._collector.snapshot_runtime_state()
@@ -587,20 +640,23 @@ class FutuQuoteClient:
         )
         exception_age_sec = (now - float(last_exception)) if last_exception is not None else None
         queue_threshold = max(1, int(self._config.watchdog_queue_threshold_rows))
+        backlog_or_enqueue = queue_size >= queue_threshold or enqueued_in_window > 0
 
-        if queue_size < queue_threshold:
+        if not backlog_or_enqueue:
             self._watchdog_heal_failures = 0
             self._watchdog_dumped = False
             return
 
         consumer_dead = not worker_alive
+        persist_quiet = persisted_rows_per_min <= 0
         commit_stalled = commit_age_sec >= self._config.watchdog_stall_sec
+        persist_stalled = persist_quiet and commit_stalled
 
-        if not upstream_active:
+        if not (upstream_active or queue_size >= queue_threshold):
             self._watchdog_heal_failures = 0
             self._watchdog_dumped = False
             return
-        if not (commit_stalled or consumer_dead):
+        if not (persist_stalled or consumer_dead):
             self._watchdog_heal_failures = 0
             self._watchdog_dumped = False
             return
@@ -718,6 +774,28 @@ class FutuQuoteClient:
             f"{drift_sec:.1f}" if drift_sec is not None else "none",
             self._watchdog_heal_failures,
         )
+        if self._notifier is not None:
+            trading_day = self._current_trading_day()
+            persisted_parts = []
+            for symbol in self._config.symbols:
+                persisted_parts.append(f"{symbol}={self._last_persisted_seq.get(symbol, 'none')}")
+            self._notifier.submit_alert(
+                AlertEvent(
+                    created_at=datetime.now(tz=timezone.utc),
+                    code="PERSIST_STALL",
+                    key=f"PERSIST_STALL:{trading_day}:{','.join(self._config.symbols)}",
+                    trading_day=trading_day,
+                    summary_lines=[
+                        f"stall_sec={commit_age_sec:.1f}/{self._config.watchdog_stall_sec}",
+                        f"queue={queue_size}/{queue_maxsize} max_seq_lag={self._max_seq_lag()} persisted_per_min={persisted_rows_per_min}",
+                        f"last_persisted_seq: {' '.join(persisted_parts)}",
+                    ],
+                    suggestions=[
+                        "journalctl -u hk-tick-collector -n 200 --no-pager",
+                        f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*) from ticks;'",
+                    ],
+                )
+            )
         raise SystemExit(WATCHDOG_EXIT_CODE)
 
     def _dump_threads_for_watchdog(
@@ -821,6 +899,107 @@ class FutuQuoteClient:
         if ts_ms is None:
             return "none"
         return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat()
+
+    def _current_trading_day(self) -> str:
+        return datetime.now(tz=HK_TZ).strftime("%Y%m%d")
+
+    def _fetch_db_snapshot(self, trading_day: str) -> tuple[int, int | None]:
+        if self._store is None:
+            return 0, self._max_ts_ms_seen
+        return self._store.fetch_tick_stats(trading_day)
+
+    def _collect_system_metrics(self) -> tuple[float | None, float | None, float | None]:
+        if not self._config.telegram_include_system_metrics:
+            return None, None, None
+
+        load1: float | None = None
+        rss_mb: float | None = None
+        disk_free_gb: float | None = None
+        try:
+            load1 = os.getloadavg()[0]
+        except (AttributeError, OSError):
+            load1 = None
+
+        try:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            if sys.platform == "darwin":
+                rss_mb = usage.ru_maxrss / (1024.0 * 1024.0)
+            else:
+                rss_mb = usage.ru_maxrss / 1024.0
+        except Exception:
+            rss_mb = None
+
+        try:
+            disk_free_gb = shutil.disk_usage(self._config.data_root).free / (1024.0**3)
+        except OSError:
+            disk_free_gb = None
+        return load1, rss_mb, disk_free_gb
+
+    async def _build_health_snapshot(
+        self,
+        *,
+        now: float,
+        queue_size: int,
+        queue_maxsize: int,
+        persisted_rows_per_min: int,
+        drift_sec: float | None,
+        push_rows_per_min: int,
+        poll_fetched: int,
+        poll_accepted: int,
+        dropped_duplicate: int,
+    ) -> HealthSnapshot:
+        trading_day = self._current_trading_day()
+        try:
+            db_rows, db_max_ts = await asyncio.to_thread(self._fetch_db_snapshot, trading_day)
+        except Exception:
+            logger.exception("health_db_snapshot_failed trading_day=%s", trading_day)
+            db_rows, db_max_ts = 0, self._max_ts_ms_seen
+
+        if db_max_ts is not None:
+            drift_from_db = (int(time.time() * 1000) - db_max_ts) / 1000.0
+        else:
+            drift_from_db = drift_sec
+
+        symbols: List[SymbolSnapshot] = []
+        for symbol in self._config.symbols:
+            last_tick = self._last_tick_seen_at.get(symbol)
+            age_sec = None if last_tick is None else max(0.0, now - last_tick)
+            seen = self._last_seen_seq.get(symbol)
+            persisted = self._last_persisted_seq.get(symbol)
+            lag = 0
+            if seen is not None:
+                lag = max(0, seen - (persisted or 0))
+            symbols.append(
+                SymbolSnapshot(
+                    symbol=symbol,
+                    last_tick_age_sec=age_sec,
+                    last_persisted_seq=persisted,
+                    max_seq_lag=lag,
+                )
+            )
+
+        load1, rss_mb, disk_free_gb = self._collect_system_metrics()
+        return HealthSnapshot(
+            created_at=datetime.now(tz=timezone.utc),
+            pid=os.getpid(),
+            uptime_sec=int(max(0.0, now - self._started_at)),
+            trading_day=trading_day,
+            db_path=db_path_for_trading_day(self._config.data_root, trading_day),
+            db_rows=db_rows,
+            db_max_ts_utc=self._format_ts_ms_utc(db_max_ts),
+            drift_sec=drift_from_db,
+            queue_size=queue_size,
+            queue_maxsize=queue_maxsize,
+            push_rows_per_min=push_rows_per_min,
+            poll_fetched=poll_fetched,
+            poll_accepted=poll_accepted,
+            persisted_rows_per_min=persisted_rows_per_min,
+            dropped_duplicate=dropped_duplicate,
+            symbols=symbols,
+            system_load1=load1,
+            system_rss_mb=rss_mb,
+            system_disk_free_gb=disk_free_gb,
+        )
 
     async def _sleep_with_stop(self, delay: float) -> None:
         if delay <= 0:

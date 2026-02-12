@@ -1,5 +1,71 @@
 # Project Memory
 
+## 2026-02-12: Telegram group notifier (low-noise digest + key alerts)
+
+### What changed
+
+- Added notifier module:
+  - `hk_tick_collector/notifiers/telegram.py`
+  - async queue + single worker sender
+  - local shared rate limiter (`TELEGRAM_RATE_LIMIT_PER_MIN`, default `18`)
+  - Telegram `429 retry_after` retry path (bounded retries)
+  - alert-key cooldown dedupe (`TELEGRAM_ALERT_COOLDOWN_SEC`)
+  - message truncation guard (`<=4096`, with `...(truncated)` suffix)
+- Added health/alert event snapshots:
+  - `HealthSnapshot`, `SymbolSnapshot`, `AlertEvent`
+- Reused existing event sources instead of introducing a heavy event bus:
+  - `futu_client._health_loop` -> digest snapshots
+  - `futu_client._check_watchdog` -> `PERSIST_STALL` alerts
+  - `collector` runtime busy/locked counters -> `SQLITE_BUSY` alerts
+- Main lifecycle integration:
+  - `main.py` starts/stops notifier safely
+  - notifier errors never break ingest/persist pipeline
+- Added DB helper:
+  - `SQLiteTickStore.fetch_tick_stats(trading_day)` for digest `rows/max_ts`
+- Watchdog criterion tightened for “true stall”:
+  - requires backlog-or-enqueued signal
+  - requires persist quiet + commit age over threshold
+  - avoids duplicate-only false alarms
+
+### New configuration
+
+- Required Telegram controls:
+  - `TELEGRAM_ENABLED`
+  - `TELEGRAM_BOT_TOKEN`
+  - `TELEGRAM_CHAT_ID`
+  - `TELEGRAM_THREAD_ID`
+  - `TELEGRAM_DIGEST_INTERVAL_SEC`
+  - `TELEGRAM_ALERT_COOLDOWN_SEC`
+  - `TELEGRAM_RATE_LIMIT_PER_MIN`
+  - `TELEGRAM_INCLUDE_SYSTEM_METRICS`
+  - `INSTANCE_ID`
+- Additional noise-tuning knobs:
+  - `TELEGRAM_DIGEST_QUEUE_CHANGE_PCT`
+  - `TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC`
+  - `TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC`
+  - `TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE`
+  - `TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD`
+
+### Tests added
+
+- `tests/test_telegram_notifier.py`
+  - formatter/line budget + truncation
+  - sliding-window rate limiter cap
+  - alert cooldown dedupe
+  - `429 retry_after` handling
+- `tests/test_futu_client.py`
+  - watchdog trigger when enqueued-window positive even below queue threshold
+
+### Docs updated
+
+- `README.md` (Telegram feature + examples)
+- `docs/deployment.md`
+- `docs/telegram.md`
+- `docs/runbook.md`
+- `docs/configuration.md`
+- `.env.example`
+- `deploy/systemd/hk-tick-collector.service`
+
 ## 2026-02-11: OSS release hardening (docs/community/packaging/CI)
 
 ### What changed

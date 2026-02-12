@@ -78,6 +78,7 @@ INFO health queue=0/50000 persisted_rows_per_min=22340 lag_sec=1.4 watchdog_fail
 
 ## Next Steps
 
-- Production deployment: [`docs/deployment/systemd.md`](deployment/systemd.md)
-- Runbook: [`docs/runbook/operations.md`](runbook/operations.md)
+- Production deployment: [`docs/deployment.md`](deployment.md)
+- Telegram setup: [`docs/telegram.md`](telegram.md)
+- Runbook: [`docs/runbook.md`](runbook.md)
 - Troubleshooting: [`docs/troubleshooting.md`](troubleshooting.md)

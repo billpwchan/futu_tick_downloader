@@ -21,6 +21,7 @@ It ingests push + poll fallback ticks, deduplicates safely, and persists to SQLi
 - [Architecture](#architecture)
 - [3-Minute Quickstart](#3-minute-quickstart)
 - [Production Deployment (systemd)](#production-deployment-systemd)
+- [Telegram Notifications](#telegram-notifications)
 - [Data Model And Guarantees](#data-model-and-guarantees)
 - [Operations Cheat Sheet](#operations-cheat-sheet)
 - [Troubleshooting](#troubleshooting)
@@ -47,6 +48,7 @@ Most market-data collectors fail in production for one of these reasons: unclear
 - WAL mode, configurable busy timeout, auto-checkpoint.
 - Durable dedupe for `seq` and non-`seq` rows.
 - Health heartbeat logs with queue, commit, drift, and watchdog context.
+- Low-noise Telegram group notifications (digest + key alerts, rate-limited + cooldown).
 - Production docs: deployment, operations, incident response, data quality.
 
 ## Architecture
@@ -61,6 +63,7 @@ flowchart LR
     E --> F["Persist Worker"]
     F --> G["SQLite WAL\nDATA_ROOT/YYYYMMDD.db"]
     F --> H["Health Logs + Watchdog"]
+    H --> I["Telegram Notifier\nDigest + Alerts"]
 ```
 
 Detailed design: [`docs/architecture.md`](docs/architecture.md)
@@ -112,6 +115,56 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
+
+## Telegram Notifications
+
+Enable in your env file (`.env` local or systemd `EnvironmentFile=` in production):
+
+```dotenv
+TELEGRAM_ENABLED=1
+TELEGRAM_BOT_TOKEN=<secret>
+TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_THREAD_ID=
+TELEGRAM_DIGEST_INTERVAL_SEC=600
+TELEGRAM_ALERT_COOLDOWN_SEC=600
+TELEGRAM_RATE_LIMIT_PER_MIN=18
+TELEGRAM_INCLUDE_SYSTEM_METRICS=1
+INSTANCE_ID=hk-prod-a1
+```
+
+Design goals:
+
+- readable messages with hostname + instance context.
+- low noise: digest interval + change-driven suppression + alert cooldown.
+- reliability: async queue worker, Telegram `429 retry_after` handling, sender rate limit.
+- safety: notifier failures never block ingest/persist.
+
+Digest sample:
+
+```text
+📈 HK Tick Collector · HEALTH
+host=ip-10-0-1-12 instance=hk-prod-a1 pid=7821 uptime=06:12:05 day=20260212 tz=UTC+8
+db=/data/sqlite/HK/20260212.db rows=2843001 max_ts=2026-02-12T03:15:59+00:00 drift_sec=1.0
+queue=0/50000 push_per_min=24100 poll_fetched=300 accepted=220 persisted_per_min=24310 dup_drop=80
+symbols:
+- HK.00700 age=0.8 last_persisted_seq=884102 max_seq_lag=0
+- HK.00981 age=1.0 last_persisted_seq=553011 max_seq_lag=0
+sys: load1=0.42 rss_mb=186.5 disk_free_gb=327.44
+```
+
+Alert sample:
+
+```text
+🚨 HK Tick Collector · PERSIST STALL
+host=ip-10-0-1-12 instance=hk-prod-a1 day=20260212
+stall_sec=242.3/180
+queue=8542/50000 max_seq_lag=812 persisted_per_min=0
+last_persisted_seq: HK.00700=884102 HK.00981=553011
+suggest: journalctl -u hk-tick-collector -n 200 --no-pager
+suggest: sqlite3 /data/sqlite/HK/20260212.db 'select count(*) from ticks;'
+```
+
+Setup guide: [`docs/telegram.md`](docs/telegram.md)
 
 ## Data Model And Guarantees
 
@@ -189,7 +242,10 @@ More SQL snippets: [`scripts/query_examples.sql`](scripts/query_examples.sql)
 - Configuration (full env reference): [`docs/configuration.md`](docs/configuration.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Deployment (systemd): [`docs/deployment/systemd.md`](docs/deployment/systemd.md)
-- Operations runbook: [`docs/runbook/operations.md`](docs/runbook/operations.md)
+- Deployment quick guide: [`docs/deployment.md`](docs/deployment.md)
+- Telegram setup: [`docs/telegram.md`](docs/telegram.md)
+- Operations runbook: [`docs/runbook.md`](docs/runbook.md)
+- Extended operations runbook: [`docs/runbook/operations.md`](docs/runbook/operations.md)
 - One-page runbook (CN): [`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
 - Release process: [`docs/releasing.md`](docs/releasing.md)
 - FAQ: [`docs/faq.md`](docs/faq.md)

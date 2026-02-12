@@ -427,3 +427,23 @@ class SQLiteTickStore:
                 if current is None or seq > current:
                     result[symbol] = seq
         return result
+
+    def fetch_tick_stats(self, trading_day: str) -> tuple[int, int | None]:
+        db_path = db_path_for_trading_day(self._data_root, trading_day)
+        if not db_path.exists():
+            return 0, None
+
+        conn = self._connect(db_path)
+        try:
+            ensure_schema(conn)
+            row = conn.execute(
+                "SELECT COUNT(*), MAX(ts_ms) FROM ticks WHERE trading_day = ?",
+                (trading_day,),
+            ).fetchone()
+            if not row:
+                return 0, None
+            count = int(row[0] or 0)
+            max_ts = int(row[1]) if row[1] is not None else None
+            return count, max_ts
+        finally:
+            conn.close()

@@ -61,12 +61,12 @@ sqlite3 "file:${DB}?mode=ro" \
 
 生产 unit 默认读取：
 
-- `/etc/hk-tick-collector.env`
+- `/opt/futu_tick_downloader/.env`
 
 步骤：
 
 ```bash
-sudo vim /etc/hk-tick-collector.env
+sudo vim /opt/futu_tick_downloader/.env
 sudo systemctl restart hk-tick-collector
 ```
 

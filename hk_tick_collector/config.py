@@ -34,6 +34,13 @@ def _get_env_float(name: str, default: float) -> float:
     return float(value)
 
 
+def _get_env_optional_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return int(value)
+
+
 def _get_env_list(name: str, default: List[str]) -> List[str]:
     value = os.getenv(name)
     if not value:
@@ -86,6 +93,20 @@ class Config:
     sqlite_journal_mode: str
     sqlite_synchronous: str
     sqlite_wal_autocheckpoint: int
+    telegram_enabled: bool
+    telegram_bot_token: str
+    telegram_chat_id: str
+    telegram_thread_id: int | None
+    telegram_digest_interval_sec: int
+    telegram_alert_cooldown_sec: int
+    telegram_rate_limit_per_min: int
+    telegram_include_system_metrics: bool
+    telegram_digest_queue_change_pct: float
+    telegram_digest_last_tick_age_threshold_sec: int
+    telegram_digest_drift_threshold_sec: int
+    telegram_digest_send_alive_when_idle: bool
+    telegram_sqlite_busy_alert_threshold: int
+    instance_id: str
     log_level: str
 
     @classmethod
@@ -125,5 +146,29 @@ class Config:
             sqlite_journal_mode=os.getenv("SQLITE_JOURNAL_MODE", "WAL"),
             sqlite_synchronous=os.getenv("SQLITE_SYNCHRONOUS", "NORMAL"),
             sqlite_wal_autocheckpoint=_get_env_int("SQLITE_WAL_AUTOCHECKPOINT", 1000),
+            telegram_enabled=_get_env_bool("TELEGRAM_ENABLED", False),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+            telegram_thread_id=_get_env_optional_int("TELEGRAM_THREAD_ID"),
+            telegram_digest_interval_sec=_get_env_int("TELEGRAM_DIGEST_INTERVAL_SEC", 600),
+            telegram_alert_cooldown_sec=_get_env_int("TELEGRAM_ALERT_COOLDOWN_SEC", 600),
+            telegram_rate_limit_per_min=_get_env_int("TELEGRAM_RATE_LIMIT_PER_MIN", 18),
+            telegram_include_system_metrics=_get_env_bool("TELEGRAM_INCLUDE_SYSTEM_METRICS", True),
+            telegram_digest_queue_change_pct=_get_env_float(
+                "TELEGRAM_DIGEST_QUEUE_CHANGE_PCT", 20.0
+            ),
+            telegram_digest_last_tick_age_threshold_sec=_get_env_int(
+                "TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC", 60
+            ),
+            telegram_digest_drift_threshold_sec=_get_env_int(
+                "TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC", 60
+            ),
+            telegram_digest_send_alive_when_idle=_get_env_bool(
+                "TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE", False
+            ),
+            telegram_sqlite_busy_alert_threshold=_get_env_int(
+                "TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD", 3
+            ),
+            instance_id=os.getenv("INSTANCE_ID", "").strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

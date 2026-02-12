@@ -48,6 +48,20 @@ Parser implementation: `hk_tick_collector/config.py`
 | `SQLITE_JOURNAL_MODE` | `WAL` | SQLite journal mode | `WAL` recommended | Non-WAL hurts concurrent read/write | Change only for special constraints |
 | `SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite fsync safety mode | `NORMAL`/`FULL` | `OFF` increases corruption risk on crash | Use `FULL` for stricter durability |
 | `SQLITE_WAL_AUTOCHECKPOINT` | `1000` | WAL auto-checkpoint pages | `500-2000` | Too high grows WAL file | Tune by write volume/disk IO |
+| `TELEGRAM_ENABLED` | `false` | Enable Telegram notifier worker | `0/1` | Disabled keeps runtime behavior unchanged | Set to `1` only after bot/chat validation |
+| `TELEGRAM_BOT_TOKEN` | empty | Telegram bot token | secret | Invalid/missing token disables notifier | Store in private env/secret manager |
+| `TELEGRAM_CHAT_ID` | empty | Destination group/channel chat id | group id (often negative) | Wrong id causes `400/403` send failures | Fill with real group/topic target |
+| `TELEGRAM_THREAD_ID` | empty | Optional group topic id | positive int | Wrong topic id causes `400` | Set only when using forum topics |
+| `TELEGRAM_DIGEST_INTERVAL_SEC` | `600` | Digest evaluation interval | `300-1800` | Too small increases noise | Tune by ops preference |
+| `TELEGRAM_ALERT_COOLDOWN_SEC` | `600` | Same alert-key cooldown window | `300-1800` | Too small may spam repeated incidents | Tune by incident cadence |
+| `TELEGRAM_RATE_LIMIT_PER_MIN` | `18` | Local sender cap across all message types | `1-20` | Too high risks Telegram throttling | Keep below Telegram soft cap |
+| `TELEGRAM_INCLUDE_SYSTEM_METRICS` | `true` | Include `load1/rss/disk` in digest | `0/1` | Off reduces payload detail | Disable for minimal digest |
+| `TELEGRAM_DIGEST_QUEUE_CHANGE_PCT` | `20` | Queue utilization change threshold for "meaningful change" | `5-50` | Low values raise extra digests | Tune noise/sensitivity |
+| `TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC` | `60` | `last_tick_age` threshold for digest change detection | `30-300` | Low values increase digest churn | Tune by symbol activity |
+| `TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC` | `60` | `|drift_sec|` threshold for digest change detection | `30-300` | Low values increase digest churn | Tune with drift policy |
+| `TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE` | `false` | Send compact alive digest when no meaningful change | `0/1` | On can add background noise | Default off for low-noise mode |
+| `TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD` | `3` | Per-minute busy/locked backoff alert threshold | `1-20` | Low values may alert on transient lock | Tune by storage contention |
+| `INSTANCE_ID` | empty | Human-readable instance label in messages | short text | Empty falls back to hostname only | Use for multi-node collectors |
 | `LOG_LEVEL` | `INFO` | App log verbosity | `INFO` for prod | `DEBUG` can be very noisy | Use debug only transiently |
 
 ## Production Baseline Template
@@ -83,6 +97,21 @@ SQLITE_BUSY_TIMEOUT_MS=5000
 SQLITE_JOURNAL_MODE=WAL
 SQLITE_SYNCHRONOUS=NORMAL
 SQLITE_WAL_AUTOCHECKPOINT=1000
+
+TELEGRAM_ENABLED=1
+TELEGRAM_BOT_TOKEN=<secret>
+TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_THREAD_ID=
+TELEGRAM_DIGEST_INTERVAL_SEC=600
+TELEGRAM_ALERT_COOLDOWN_SEC=600
+TELEGRAM_RATE_LIMIT_PER_MIN=18
+TELEGRAM_INCLUDE_SYSTEM_METRICS=1
+TELEGRAM_DIGEST_QUEUE_CHANGE_PCT=20
+TELEGRAM_DIGEST_LAST_TICK_AGE_THRESHOLD_SEC=60
+TELEGRAM_DIGEST_DRIFT_THRESHOLD_SEC=60
+TELEGRAM_DIGEST_SEND_ALIVE_WHEN_IDLE=0
+TELEGRAM_SQLITE_BUSY_ALERT_THRESHOLD=3
+INSTANCE_ID=hk-a1
 
 DRIFT_WARN_SEC=120
 SEED_RECENT_DB_DAYS=3

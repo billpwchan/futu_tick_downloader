@@ -24,6 +24,8 @@ def _clear_env(monkeypatch):
                 "SEED_RECENT_DB_DAYS",
                 "PERSIST_",
                 "SQLITE_",
+                "TELEGRAM_",
+                "INSTANCE_ID",
                 "LOG_LEVEL",
             )
         ):
@@ -45,6 +47,9 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.watchdog_stall_sec == 180
     assert cfg.sqlite_journal_mode == "WAL"
     assert cfg.sqlite_synchronous == "NORMAL"
+    assert cfg.telegram_enabled is False
+    assert cfg.telegram_rate_limit_per_min == 18
+    assert cfg.telegram_thread_id is None
 
 
 def test_config_bool_and_list_parsing(monkeypatch):

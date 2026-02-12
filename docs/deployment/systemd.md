@@ -40,7 +40,7 @@ Type=simple
 User=hkcollector
 Group=hkcollector
 WorkingDirectory=/opt/futu_tick_downloader
-EnvironmentFile=/etc/hk-tick-collector.env
+EnvironmentFile=/opt/futu_tick_downloader/.env
 ExecStart=/opt/futu_tick_downloader/.venv/bin/python -m hk_tick_collector.main
 Restart=always
 RestartSec=5
@@ -69,9 +69,9 @@ WantedBy=multi-user.target
 
 ```bash
 sudo cp /opt/futu_tick_downloader/deploy/systemd/hk-tick-collector.service /etc/systemd/system/hk-tick-collector.service
-sudo cp /opt/futu_tick_downloader/.env.example /etc/hk-tick-collector.env
-sudo chown root:root /etc/hk-tick-collector.env
-sudo chmod 640 /etc/hk-tick-collector.env
+sudo cp /opt/futu_tick_downloader/.env.example /opt/futu_tick_downloader/.env
+sudo chown root:hkcollector /opt/futu_tick_downloader/.env
+sudo chmod 640 /opt/futu_tick_downloader/.env
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now hk-tick-collector
@@ -80,7 +80,7 @@ sudo systemctl status hk-tick-collector --no-pager
 
 ## Updating Env Safely
 
-1. Edit `/etc/hk-tick-collector.env`.
+1. Edit `/opt/futu_tick_downloader/.env`.
 2. If only env changed, `daemon-reload` is optional but safe.
 3. Restart service:
 

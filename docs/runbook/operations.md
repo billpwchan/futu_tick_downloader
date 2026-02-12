@@ -20,7 +20,7 @@ sudo systemctl status futu-opend --no-pager
 2. config sanity:
 
 ```bash
-grep -E '^(FUTU_HOST|FUTU_PORT|FUTU_SYMBOLS|DATA_ROOT)=' /etc/hk-tick-collector.env
+grep -E '^(FUTU_HOST|FUTU_PORT|FUTU_SYMBOLS|DATA_ROOT)=' /opt/futu_tick_downloader/.env
 ```
 
 3. disk capacity:
