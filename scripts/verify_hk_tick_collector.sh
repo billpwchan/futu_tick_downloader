@@ -68,7 +68,7 @@ if command -v journalctl >/dev/null 2>&1; then
   echo "[INFO] latest sqlite_pragmas line"
   echo "${LOG_OUTPUT}" | grep "sqlite_pragmas" | tail -n 1 || true
   echo "[INFO] recent health/persist lines"
-  echo "${LOG_OUTPUT}" | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG" | tail -n 40 || true
+  echo "${LOG_OUTPUT}" | grep -E "health|persist_summary|persist_loop_heartbeat|WATCHDOG" | tail -n 40 || true
 else
   echo "[WARN] journalctl not found; skip log verification"
 fi

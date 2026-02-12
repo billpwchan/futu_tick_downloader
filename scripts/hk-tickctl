@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="${SERVICE_NAME:-hk-tick-collector}"
+DATA_ROOT="${DATA_ROOT:-/data/sqlite/HK}"
+DAY_DEFAULT="$(TZ=Asia/Hong_Kong date +%Y%m%d)"
+
+usage() {
+  cat <<'EOF'
+hk-tickctl - HK Tick Collector 維運工具
+
+用法:
+  hk-tickctl logs [--ops] [--since "<time>"] [--no-follow]
+  hk-tickctl db stats [--db <path>] [--day YYYYMMDD]
+  hk-tickctl db symbols [--db <path>] [--day YYYYMMDD] [--minutes N]
+
+範例:
+  hk-tickctl logs
+  hk-tickctl logs --ops --since "30 minutes ago"
+  hk-tickctl db stats --day 20260212
+  hk-tickctl db symbols --minutes 15
+EOF
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "[FAIL] command not found: $1" >&2
+    exit 1
+  fi
+}
+
+db_path_from_args() {
+  local db_path="${1:-}"
+  local day="${2:-$DAY_DEFAULT}"
+  if [[ -n "${db_path}" ]]; then
+    printf '%s\n' "${db_path}"
+    return
+  fi
+  printf '%s/%s.db\n' "${DATA_ROOT}" "${day}"
+}
+
+run_logs() {
+  local ops="0"
+  local since="15 minutes ago"
+  local follow="1"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ops)
+        ops="1"
+        shift
+        ;;
+      --since)
+        since="${2:-}"
+        shift 2
+        ;;
+      --no-follow)
+        follow="0"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "[FAIL] unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  require_cmd journalctl
+
+  local pattern
+  if [[ "${ops}" == "1" ]]; then
+    pattern="health|persist_summary|WATCHDOG|ERROR|Traceback|telegram_|sqlite_busy|poll_stats|persist_ticks"
+  else
+    pattern="health|persist_summary|WATCHDOG|ERROR|Traceback|telegram_send_failed|telegram_alert_suppressed"
+  fi
+
+  if [[ "${follow}" == "1" ]]; then
+    journalctl -u "${SERVICE_NAME}" --since "${since}" -f --no-pager \
+      | grep -E --line-buffered "${pattern}" || true
+  else
+    journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager \
+      | grep -E "${pattern}" || true
+  fi
+}
+
+run_db_stats() {
+  local db_path=""
+  local day="${DAY_DEFAULT}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --db)
+        db_path="${2:-}"
+        shift 2
+        ;;
+      --day)
+        day="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "[FAIL] unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  require_cmd sqlite3
+  local db
+  db="$(db_path_from_args "${db_path}" "${day}")"
+  if [[ ! -f "${db}" ]]; then
+    echo "[FAIL] db not found: ${db}" >&2
+    exit 1
+  fi
+
+  sqlite3 "file:${db}?mode=ro" <<'SQL'
+.headers on
+.mode column
+SELECT
+  COUNT(*) AS rows,
+  MAX(ts_ms) AS max_ts_ms,
+  datetime(MAX(ts_ms)/1000,'unixepoch') AS max_ts_utc,
+  ROUND(strftime('%s','now') - MAX(ts_ms)/1000.0, 3) AS drift_sec
+FROM ticks;
+SQL
+}
+
+run_db_symbols() {
+  local db_path=""
+  local day="${DAY_DEFAULT}"
+  local minutes="10"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --db)
+        db_path="${2:-}"
+        shift 2
+        ;;
+      --day)
+        day="${2:-}"
+        shift 2
+        ;;
+      --minutes)
+        minutes="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "[FAIL] unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  require_cmd sqlite3
+  local db
+  db="$(db_path_from_args "${db_path}" "${day}")"
+  if [[ ! -f "${db}" ]]; then
+    echo "[FAIL] db not found: ${db}" >&2
+    exit 1
+  fi
+
+  sqlite3 "file:${db}?mode=ro" <<SQL
+.headers on
+.mode column
+WITH now_ms AS (
+  SELECT CAST(strftime('%s','now') * 1000 AS INTEGER) AS n
+)
+SELECT
+  t.symbol AS symbol,
+  COUNT(*) AS rows,
+  datetime(MAX(t.ts_ms)/1000,'unixepoch') AS latest_ts_utc,
+  ROUND(strftime('%s','now') - MAX(t.ts_ms)/1000.0, 3) AS lag_sec,
+  ROUND(
+    SUM(CASE WHEN t.ts_ms >= (SELECT n - (${minutes} * 60000) FROM now_ms) THEN 1 ELSE 0 END)
+    * 1.0 / ${minutes},
+    2
+  ) AS write_rate_per_min_last_${minutes}m
+FROM ticks t
+GROUP BY t.symbol
+ORDER BY symbol;
+SQL
+}
+
+main() {
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+
+  case "$1" in
+    logs)
+      shift
+      run_logs "$@"
+      ;;
+    db)
+      shift
+      if [[ $# -lt 1 ]]; then
+        usage
+        exit 1
+      fi
+      case "$1" in
+        stats)
+          shift
+          run_db_stats "$@"
+          ;;
+        symbols)
+          shift
+          run_db_symbols "$@"
+          ;;
+        *)
+          echo "[FAIL] unknown db subcommand: $1" >&2
+          usage
+          exit 1
+          ;;
+      esac
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo "[FAIL] unknown subcommand: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

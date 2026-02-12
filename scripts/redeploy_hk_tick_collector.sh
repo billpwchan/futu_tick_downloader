@@ -179,7 +179,7 @@ log_step "Collect health logs (${LOG_SCAN_SECONDS}s)"
 SINCE_UTC="$(date -u +'%Y-%m-%d %H:%M:%S')"
 sleep "${LOG_SCAN_SECONDS}"
 LOG_OUTPUT="$(journalctl -u "${SERVICE_NAME}" --since "${SINCE_UTC}" --no-pager || true)"
-echo "${LOG_OUTPUT}" | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG" | tail -n 120 || true
+echo "${LOG_OUTPUT}" | grep -E "health|persist_summary|persist_loop_heartbeat|WATCHDOG" | tail -n 120 || true
 
 if echo "${LOG_OUTPUT}" | grep -q "WATCHDOG persistent_stall"; then
   fail "acceptance failed: detected WATCHDOG persistent_stall"
