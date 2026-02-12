@@ -5,19 +5,49 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-High-reliability HK tick collector for Futu OpenD with SQLite WAL persistence.
-It is designed for long-running `systemd` production services and idempotent tick ingestion.
+Production-grade HK tick collector for Futu OpenD.
+
+It ingests push + poll fallback ticks, deduplicates safely, and persists to SQLite WAL with systemd-friendly operations.
+
+- For operators: fast deploy, clear runbooks, one-page incident commands.
+- For developers: clean env config, tests, lint, packaging, CI.
 
 [中文文档 (README.zh-CN)](README.zh-CN.md)
 
-## Features
+## Table Of Contents
 
-- Push-first ingestion with poll fallback from Futu OpenD.
-- SQLite per-trading-day files in WAL mode.
-- Durable dedupe with unique indexes + `INSERT OR IGNORE`.
-- Watchdog self-healing for persistent writer stalls.
-- Env-driven config (`.env` / `EnvironmentFile`) with sane defaults.
-- Linux `systemd`-ready deployment templates and scripts.
+- [Why This Project](#why-this-project)
+- [Feature Highlights](#feature-highlights)
+- [Architecture](#architecture)
+- [3-Minute Quickstart](#3-minute-quickstart)
+- [Production Deployment (systemd)](#production-deployment-systemd)
+- [Data Model And Guarantees](#data-model-and-guarantees)
+- [Operations Cheat Sheet](#operations-cheat-sheet)
+- [Troubleshooting](#troubleshooting)
+- [Documentation Map](#documentation-map)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Security License Disclaimer](#security-license-disclaimer)
+
+## Why This Project
+
+Most market-data collectors fail in production for one of these reasons: unclear timestamp semantics, weak dedupe, poor incident tooling, or fragile restarts.
+
+`hk-tick-collector` focuses on operational correctness first:
+
+- Explicit UTC timestamp semantics for storage.
+- Idempotent writes via unique indexes + `INSERT OR IGNORE`.
+- Watchdog recovery for persist stalls.
+- Linux systemd deployment and runbooks included.
+
+## Feature Highlights
+
+- Push-first ingestion with poll fallback (`FUTU_POLL_*`).
+- Per-trading-day SQLite files (`DATA_ROOT/YYYYMMDD.db`).
+- WAL mode, configurable busy timeout, auto-checkpoint.
+- Durable dedupe for `seq` and non-`seq` rows.
+- Health heartbeat logs with queue, commit, drift, and watchdog context.
+- Production docs: deployment, operations, incident response, data quality.
 
 ## Architecture
 
@@ -30,15 +60,14 @@ flowchart LR
     D --> E["Async Queue"]
     E --> F["Persist Worker"]
     F --> G["SQLite WAL\nDATA_ROOT/YYYYMMDD.db"]
-    F --> H["Heartbeat + Metrics Logs"]
-    H --> I["Watchdog Recovery"]
+    F --> H["Health Logs + Watchdog"]
 ```
 
-Details: [`docs/architecture.md`](docs/architecture.md)
+Detailed design: [`docs/architecture.md`](docs/architecture.md)
 
-## Quickstart (Local, No Live OpenD Required)
+## 3-Minute Quickstart
 
-This path verifies installation and core pipeline behavior without a running Futu OpenD.
+### Option A: Validate locally (no live OpenD required)
 
 ```bash
 git clone <YOUR_FORK_OR_REPO_URL>
@@ -50,39 +79,19 @@ pip install -e .[dev]
 pytest -q
 ```
 
-### Optional: run one smoke test only
-
-```bash
-pytest -q tests/test_smoke_pipeline.py
-```
-
-## Quickstart (Production with Futu OpenD)
-
-1. Prepare env file:
+### Option B: Live run with OpenD
 
 ```bash
 cp .env.example .env
-```
+# set FUTU_HOST/FUTU_PORT/FUTU_SYMBOLS/DATA_ROOT
 
-2. Configure at least:
-
-```dotenv
-FUTU_HOST=127.0.0.1
-FUTU_PORT=11111
-FUTU_SYMBOLS=HK.00700,HK.00981
-DATA_ROOT=/data/sqlite/HK
-```
-
-3. Run directly (for validation):
-
-```bash
 . .venv/bin/activate
 hk-tick-collector
-# backward-compatible entrypoint still works:
+# existing production entrypoint also works:
 python -m hk_tick_collector.main
 ```
 
-4. Verify DB freshness:
+Verify writes:
 
 ```bash
 DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)
@@ -90,27 +99,23 @@ DB=/data/sqlite/HK/${DAY}.db
 bash scripts/db_health_check.sh "$DB"
 ```
 
-## Run In Production (systemd)
-
-Primary deployment target is Linux + `systemd`.
+## Production Deployment (systemd)
 
 - Unit template: [`deploy/systemd/hk-tick-collector.service`](deploy/systemd/hk-tick-collector.service)
 - Deployment guide: [`docs/deployment/systemd.md`](docs/deployment/systemd.md)
-- One-page runbook (CN): [`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
-- Runbook: [`docs/runbook/operations.md`](docs/runbook/operations.md)
+- One-page production runbook (CN): [`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
 
-Common operations:
+Enable service:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
-sudo journalctl -u hk-tick-collector -f
 ```
 
-## Data Model
+## Data Model And Guarantees
 
-Main table (per daily DB):
+Core table (`ticks`) is append-only from collector perspective.
 
 ```sql
 CREATE TABLE ticks (
@@ -131,133 +136,80 @@ CREATE TABLE ticks (
 );
 ```
 
-Indexes and dedupe key behavior:
+### Dedupe guarantees
 
-- `uniq_ticks_symbol_seq`: dedupe for rows where `seq IS NOT NULL`.
-- `uniq_ticks_symbol_ts_price_vol_turnover`: fallback dedupe when `seq IS NULL`.
-- Persist SQL is `INSERT OR IGNORE`, so duplicates are idempotent by design.
+- `uniq_ticks_symbol_seq` when `seq IS NOT NULL`.
+- `uniq_ticks_symbol_ts_price_vol_turnover` when `seq IS NULL`.
+- `INSERT OR IGNORE` makes ingestion idempotent under retries and push/poll overlap.
 
-SQLite settings (configurable by env):
+### Timestamp guarantees
 
-- `journal_mode=WAL`
-- `synchronous=NORMAL`
-- `busy_timeout=5000` (default)
-- `wal_autocheckpoint=1000` pages
+- `ts_ms`: event timestamp in UTC epoch milliseconds.
+- `recv_ts_ms`: collector receive timestamp in UTC epoch milliseconds.
+- HK local source times are interpreted as `Asia/Hong_Kong`, then converted to UTC epoch.
 
-## Timestamp Semantics (Important)
+## Operations Cheat Sheet
 
-- `ticks.ts_ms`: event timestamp in **UTC epoch milliseconds**.
-- `ticks.recv_ts_ms`: collector receive time in **UTC epoch milliseconds**.
-- Futu local HK time strings are interpreted as `Asia/Hong_Kong`, then converted to UTC epoch ms.
+Service:
 
-This is intentional and should be preserved in downstream analytics.
+```bash
+sudo systemctl restart hk-tick-collector
+sudo systemctl status hk-tick-collector --no-pager
+```
 
-## Common Queries
+Logs:
 
-Use current trading day DB:
+```bash
+sudo journalctl -u hk-tick-collector -f --no-pager
+sudo journalctl -u hk-tick-collector --since "10 minutes ago" --no-pager \
+  | grep -E "health|persist_ticks|persist_loop_heartbeat|WATCHDOG|sqlite_busy|ERROR"
+```
+
+Freshness:
 
 ```bash
 DAY=$(TZ=Asia/Hong_Kong date +%Y%m%d)
 DB=/data/sqlite/HK/${DAY}.db
-```
-
-Freshness / lag:
-
-```sql
-SELECT
-  datetime(strftime('%s','now'),'unixepoch') AS now_utc,
-  datetime(MAX(ts_ms)/1000,'unixepoch') AS max_tick_utc,
-  ROUND(strftime('%s','now') - MAX(ts_ms)/1000.0, 3) AS lag_sec,
-  COUNT(*) AS rows
-FROM ticks;
-```
-
-Rows by symbol:
-
-```sql
-SELECT symbol, COUNT(*) AS rows, MAX(seq) AS max_seq
-FROM ticks
-GROUP BY symbol
-ORDER BY rows DESC;
-```
-
-Last tick per symbol:
-
-```sql
-SELECT t.symbol, t.seq, t.ts_ms, t.price, t.volume
-FROM ticks t
-JOIN (
-  SELECT symbol, MAX(ts_ms) AS max_ts_ms
-  FROM ticks
-  GROUP BY symbol
-) m ON m.symbol = t.symbol AND m.max_ts_ms = t.ts_ms
-ORDER BY t.symbol;
-```
-
-Duplicate groups check:
-
-```sql
-SELECT 'dup_symbol_seq' AS check_name, COUNT(*) AS groups
-FROM (
-  SELECT symbol, seq FROM ticks WHERE seq IS NOT NULL GROUP BY symbol, seq HAVING COUNT(*) > 1
-)
-UNION ALL
-SELECT 'dup_composite_when_seq_null' AS check_name, COUNT(*) AS groups
-FROM (
-  SELECT symbol, ts_ms, price, volume, turnover
-  FROM ticks
-  WHERE seq IS NULL
-  GROUP BY symbol, ts_ms, price, volume, turnover
-  HAVING COUNT(*) > 1
-);
-```
-
-Clock drift check:
-
-```sql
-SELECT
-  ROUND((MAX(recv_ts_ms) - MAX(ts_ms)) / 1000.0, 3) AS recv_minus_event_sec,
-  ROUND((strftime('%s','now') * 1000 - MAX(ts_ms)) / 1000.0, 3) AS now_minus_event_sec
-FROM ticks;
+sqlite3 "file:${DB}?mode=ro" \
+  "SELECT ROUND(strftime('%s','now')-MAX(ts_ms)/1000.0,3) AS lag_sec, COUNT(*) AS rows FROM ticks;"
 ```
 
 More SQL snippets: [`scripts/query_examples.sql`](scripts/query_examples.sql)
 
 ## Troubleshooting
 
-- `WATCHDOG persistent_stall`: see [`docs/runbook/incident-watchdog-stall.md`](docs/runbook/incident-watchdog-stall.md)
-- `database is locked` / `busy`: see [`docs/runbook/sqlite-wal.md`](docs/runbook/sqlite-wal.md)
-- WAL file growth: tune checkpoint and runbook guidance in [`docs/runbook/sqlite-wal.md`](docs/runbook/sqlite-wal.md)
-- Clock/timezone confusion: see [`docs/runbook/data-quality.md`](docs/runbook/data-quality.md)
-- OpenD connectivity failures: see [`docs/troubleshooting.md`](docs/troubleshooting.md)
+- WATCHDOG stall: [`docs/runbook/incident-watchdog-stall.md`](docs/runbook/incident-watchdog-stall.md)
+- SQLite WAL / locked: [`docs/runbook/sqlite-wal.md`](docs/runbook/sqlite-wal.md)
+- Timestamp and drift checks: [`docs/runbook/data-quality.md`](docs/runbook/data-quality.md)
+- General troubleshooting: [`docs/troubleshooting.md`](docs/troubleshooting.md)
 
-## Why SQLite WAL?
+## Documentation Map
 
-SQLite WAL is a strong default when you need:
+- Quickstart: [`docs/getting-started.md`](docs/getting-started.md)
+- Configuration (full env reference): [`docs/configuration.md`](docs/configuration.md)
+- Architecture: [`docs/architecture.md`](docs/architecture.md)
+- Deployment (systemd): [`docs/deployment/systemd.md`](docs/deployment/systemd.md)
+- Operations runbook: [`docs/runbook/operations.md`](docs/runbook/operations.md)
+- One-page runbook (CN): [`docs/runbook/production-onepager.md`](docs/runbook/production-onepager.md)
+- Release process: [`docs/releasing.md`](docs/releasing.md)
+- FAQ: [`docs/faq.md`](docs/faq.md)
 
-- Simple operational footprint (single file per day).
-- Fast local writes with concurrent readers.
-- Easy snapshot backup and artifact transfer.
+## Roadmap
 
-Prefer Postgres/Parquet when you need:
-
-- Multi-writer ingestion across hosts.
-- Large historical analytics beyond single-node SQLite ergonomics.
-- Columnar scan performance at scale (Parquet + OLAP tooling).
-
-## Demo
-
-- Sample log excerpt and query output: [`docs/getting-started.md`](docs/getting-started.md)
-- Asset placeholders/screenshots: [`docs/assets/README.md`](docs/assets/README.md)
+- Optional metrics endpoint for external observability stacks.
+- Optional Parquet export flow for analytics pipelines.
+- Additional integration tests for larger symbol universes.
 
 ## Contributing
 
-- Contribution guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Code of conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
+- PR template: [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)
+
+## Security License Disclaimer
+
 - Security policy: [`SECURITY.md`](SECURITY.md)
 - Support channels: [`SUPPORT.md`](SUPPORT.md)
+- License: Apache-2.0 ([`LICENSE`](LICENSE))
 
-## Security, License, Disclaimer
-
-- License: Apache-2.0 (`LICENSE`)
-- Futu OpenD access and market data usage must comply with Futu terms and local regulations.
-- This project is a collector/persistence service; it does not grant redistribution rights for proprietary market data.
+Futu OpenD and market data usage must comply with Futu terms and local regulations. This repository is a collector/persistence service and does not grant redistribution rights for proprietary data.
