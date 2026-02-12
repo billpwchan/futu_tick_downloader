@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time as dt_time
 from enum import Enum
 from html import escape
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
+WARN_CADENCE_SEC = 600
+ALERT_CADENCE_SEC = 180
+
+
+def _make_short_id(prefix: str) -> str:
+    cleaned = "".join(ch for ch in prefix.lower() if ch.isalnum())[:8] or "id"
+    return f"{cleaned}-{secrets.token_hex(4)}"
 
 
 class NotifySeverity(str, Enum):
@@ -65,6 +73,7 @@ class HealthSnapshot:
     system_load1: float | None = None
     system_rss_mb: float | None = None
     system_disk_free_gb: float | None = None
+    sid: str = field(default_factory=lambda: _make_short_id("sid"))
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,10 @@ class AlertEvent:
     headline: str | None = None
     impact: str | None = None
     fingerprint: str | None = None
+    sid: str | None = None
+    duration_sec: int | None = None
+    threshold_sec: int | None = None
+    eid: str = field(default_factory=lambda: _make_short_id("eid"))
 
 
 @dataclass(frozen=True)
@@ -110,6 +123,8 @@ class _OutboundMessage:
     message: RenderedMessage
     severity: NotifySeverity
     fingerprint: str
+    sid: str | None
+    eid: str | None
 
 
 @dataclass
@@ -119,6 +134,19 @@ class _DedupeRecord:
     last_sent_at: float
     last_sent_severity: NotifySeverity
     next_escalation_index: int
+    last_event_id: str | None
+    last_snapshot_id: str | None
+
+
+@dataclass
+class _DailyDigestState:
+    trading_day: str
+    total_rows: int = 0
+    peak_rows_per_min: int = 0
+    max_lag_sec: float = 0.0
+    alert_count: int = 0
+    db_rows: int = 0
+    db_path: str = "n/a"
 
 
 class SlidingWindowRateLimiter:
@@ -212,13 +240,33 @@ def _infer_market_mode(created_at: datetime) -> str:
         return "pre-open"
     if dt_time(9, 30) <= t < dt_time(12, 0):
         return "open"
+    if dt_time(12, 0) <= t < dt_time(13, 0):
+        return "lunch-break"
     if dt_time(13, 0) <= t < dt_time(16, 0):
         return "open"
     return "after-hours"
 
 
 def _is_trading_mode(mode: str) -> bool:
-    return mode in {"pre-open", "open"}
+    return mode in {"pre-open", "open", "lunch-break"}
+
+
+def _market_mode_label(mode: str) -> str:
+    mapping = {
+        "pre-open": "開盤前",
+        "open": "盤中",
+        "lunch-break": "午休",
+        "after-hours": "收盤後",
+    }
+    return mapping.get(mode, mode)
+
+
+def _is_after_close_window(created_at: datetime) -> bool:
+    local = created_at.astimezone(HK_TZ)
+    if local.weekday() >= 5:
+        return False
+    t = local.timetz().replace(tzinfo=None)
+    return t >= dt_time(16, 0)
 
 
 def truncate_rendered_message(
@@ -266,6 +314,8 @@ class DedupeStore:
         now: float,
         cooldown_sec: int,
         escalation_steps: Sequence[int],
+        event_id: str | None = None,
+        snapshot_id: str | None = None,
     ) -> tuple[bool, str]:
         key = fingerprint.strip() or "unknown"
         steps = self._normalized_steps(escalation_steps)
@@ -280,6 +330,8 @@ class DedupeStore:
                 last_sent_at=now,
                 last_sent_severity=severity,
                 next_escalation_index=next_idx,
+                last_event_id=event_id,
+                last_snapshot_id=snapshot_id,
             )
             return True, "new"
 
@@ -288,21 +340,37 @@ class DedupeStore:
         if _severity_rank(severity) > _severity_rank(record.last_sent_severity):
             record.last_sent_severity = severity
             record.last_sent_at = now
+            if event_id:
+                record.last_event_id = event_id
+            if snapshot_id:
+                record.last_snapshot_id = snapshot_id
             return True, "severity_upgraded"
 
         incident_age = max(0.0, now - record.first_seen_at)
         if record.next_escalation_index < len(steps):
             step = steps[record.next_escalation_index]
-            if incident_age >= step and (now - record.last_sent_at) >= 1.0:
+            if incident_age >= step and (now - record.last_sent_at) >= cooldown:
                 record.next_escalation_index += 1
                 record.last_sent_at = now
+                if event_id:
+                    record.last_event_id = event_id
+                if snapshot_id:
+                    record.last_snapshot_id = snapshot_id
                 return True, f"escalation_step_{step}s"
 
         if (now - record.last_sent_at) >= cooldown:
             record.last_sent_at = now
+            if event_id:
+                record.last_event_id = event_id
+            if snapshot_id:
+                record.last_snapshot_id = snapshot_id
             return True, "cooldown_elapsed"
 
         return False, "cooldown_active"
+
+    def resolve(self, fingerprint: str) -> _DedupeRecord | None:
+        key = fingerprint.strip() or "unknown"
+        return self._records.pop(key, None)
 
     @staticmethod
     def _normalized_steps(values: Sequence[int]) -> list[int]:
@@ -338,9 +406,9 @@ class AlertStateMachine:
             low_persist = 0 < persisted < max(1, int(self._last_persisted_rows_per_min * 0.3))
 
         if persisted == 0 and (snapshot.queue_size > 0 or max_lag > 0):
-            severity = NotifySeverity.ALERT
-            conclusion = "異常：疑似停寫，建議立即處理"
-            impact = "資料可能無法持續落庫，延遲與積壓可能持續擴大"
+            severity = NotifySeverity.WARN
+            conclusion = "注意：疑似停寫跡象，建議盡快排查"
+            impact = "若未處理，可能演變為持續積壓與資料延遲擴大"
             needs_action = True
         elif (
             (freshness_sec is not None and freshness_sec >= self._drift_warn_sec)
@@ -418,82 +486,37 @@ class MessageRenderer:
         if self._parse_mode != "HTML":
             return self._render_health_plain(snapshot, assessment, hostname, instance_id)
 
-        icon = {
-            NotifySeverity.OK: "✅",
-            NotifySeverity.WARN: "⚠️",
-            NotifySeverity.ALERT: "🚨",
-        }[assessment.severity]
-        host_text = hostname if not instance_id else f"{hostname} ({instance_id})"
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
         freshness = abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None
-
-        symbols = list(snapshot.symbols)
-        symbol_lines = []
-        show_count = min(3, len(symbols))
-        for item in symbols[:show_count]:
-            symbol_lines.append(
-                f"- {item.symbol}: age={_format_float(item.last_tick_age_sec)}s, lag={item.max_seq_lag}"
-            )
-        if len(symbols) > show_count:
-            symbol_lines.append(f"- ... +{len(symbols) - show_count} symbols")
-
-        primary_lines = [
-            f"<b>{icon} HK Tick Collector · HEALTH · {assessment.severity.value}</b>",
-            f"結論：{escape(assessment.conclusion)}",
-            f"影響：{escape(assessment.impact)}",
-            (
-                "關鍵："
-                f"freshness={_format_float(freshness)}s, "
-                f"persisted/min={snapshot.persisted_rows_per_min}, "
-                f"queue={snapshot.queue_size}/{snapshot.queue_maxsize}"
-            ),
-            (
-                f"主機：{escape(host_text)} · day={escape(snapshot.trading_day)} "
-                f"· mode={escape(assessment.market_mode)}"
-            ),
-            "symbols:",
-        ]
-        primary_lines.extend(escape(line) for line in symbol_lines)
-
-        detail_lines = [
-            "tech:",
-            f"db_path={snapshot.db_path}",
-            f"db_rows={snapshot.db_rows} max_ts_utc={snapshot.db_max_ts_utc}",
-            (
-                f"push_per_min={snapshot.push_rows_per_min} poll_fetched={snapshot.poll_fetched} "
-                f"poll_accepted={snapshot.poll_accepted} dup_drop={snapshot.dropped_duplicate}"
-            ),
-            "seq:",
-        ]
-        for item in symbols[:5]:
-            detail_lines.append(
-                (
-                    f"{item.symbol}: last_persisted_seq={_format_int(item.last_persisted_seq)} "
-                    f"max_seq_lag={item.max_seq_lag}"
-                )
-            )
-        if include_system_metrics:
-            detail_lines.extend(
-                [
-                    "sys:",
-                    (
-                        f"load1={_format_float(snapshot.system_load1, 2)} "
-                        f"rss_mb={_format_float(snapshot.system_rss_mb, 1)} "
-                        f"disk_free_gb={_format_float(snapshot.system_disk_free_gb, 2)}"
-                    ),
-                ]
-            )
-        detail_lines.extend(
-            [
-                "suggest:",
-                "journalctl -u hk-tick-collector -n 120 --no-pager",
-                f"sqlite3 {snapshot.db_path} 'select count(*), max(ts_ms) from ticks;'",
-            ]
+        max_symbol_age = _max_symbol_age_sec(snapshot)
+        market_label = _market_mode_label(assessment.market_mode)
+        icon = "🟢" if assessment.severity == NotifySeverity.OK else "🟡"
+        conclusion = (
+            "服務運作正常，暫時不需人工介入"
+            if assessment.severity == NotifySeverity.OK
+            else assessment.conclusion
         )
 
-        text = "\n".join(primary_lines)
-        text += "\n"
-        text += "<blockquote expandable>" + escape("\n".join(detail_lines)) + "</blockquote>"
-        return RenderedMessage(text=text, parse_mode=self._parse_mode)
+        metrics_line = (
+            f"指標：狀態={market_label} | 延遲={_format_float(freshness)}s | "
+            f"寫入={snapshot.persisted_rows_per_min}/min | 今日累計={snapshot.db_rows} | "
+            f"最後更新={snapshot.db_max_ts_utc} | symbols_age={_format_float(max_symbol_age)}s"
+        )
+        system_line = (
+            f"資源：load1={_format_float(snapshot.system_load1, 2)} "
+            f"rss={_format_float(snapshot.system_rss_mb, 1)}MB "
+            f"disk_free={_format_float(snapshot.system_disk_free_gb, 2)}GB"
+        )
+        lines = [
+            f"<b>{icon} HK Tick Collector {'正常' if assessment.severity == NotifySeverity.OK else '注意'}</b>",
+            f"結論：{escape(conclusion)}",
+            escape(metrics_line),
+            f"主機：{escape(host_text)}",
+        ]
+        if include_system_metrics:
+            lines.append(escape(system_line))
+        lines.append(f"sid={escape(snapshot.sid)}")
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
 
     def render_alert(
         self,
@@ -507,41 +530,93 @@ class MessageRenderer:
         if self._parse_mode != "HTML":
             return self._render_alert_plain(event, hostname, instance_id, market_mode, severity)
 
-        icon = {
-            NotifySeverity.OK: "✅",
-            NotifySeverity.WARN: "⚠️",
-            NotifySeverity.ALERT: "🚨",
-        }[severity]
-        host_text = hostname if not instance_id else f"{hostname} ({instance_id})"
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
         headline = event.headline or self._default_alert_headline(event.code, severity)
         impact = event.impact or self._default_alert_impact(event.code, severity)
+        summary_text = " | ".join(event.summary_lines[:3]) if event.summary_lines else "n/a"
+        suggest_limit = 2 if severity == NotifySeverity.ALERT else 1
+        suggestions = [line for line in event.suggestions[:suggest_limit] if line]
 
-        action_line = "需要處理：是" if severity == NotifySeverity.ALERT else "需要處理：建議關注"
-        first_summary = event.summary_lines[0] if event.summary_lines else "n/a"
+        if severity == NotifySeverity.WARN:
+            lines = [
+                "<b>🟡 注意</b>",
+                f"結論：{escape(headline)}",
+                f"指標：原因={escape(event.code.upper())} | 可能影響={escape(impact)} | {escape(summary_text)}",
+            ]
+            if suggestions:
+                lines.append(f"建議：{escape(suggestions[0])}")
+            lines.extend(
+                [
+                    f"主機：{escape(host_text)}",
+                    f"sid={escape(event.sid or 'n/a')}",
+                ]
+            )
+            return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
 
-        primary_lines = [
-            f"<b>{icon} HK Tick Collector · {escape(event.code.upper())} · {severity.value}</b>",
+        duration_text = (
+            f"{event.duration_sec}s/{event.threshold_sec}s"
+            if event.duration_sec is not None and event.threshold_sec is not None
+            else "n/a"
+        )
+        lines = [
+            "<b>🔴 異常</b>",
             f"結論：{escape(headline)}",
-            f"影響：{escape(impact)}",
-            f"{escape(action_line)}",
-            f"關鍵：{escape(first_summary)}",
             (
-                f"主機：{escape(host_text)} · day={escape(event.trading_day)} "
-                f"· mode={escape(market_mode)}"
+                "指標："
+                f"事件={escape(event.code.upper())} | 持續={escape(duration_text)} | "
+                f"影響={escape(impact)} | {escape(summary_text)}"
             ),
         ]
+        for idx, command in enumerate(suggestions[:2], start=1):
+            lines.append(f"建議{idx}：{escape(command)}")
+        lines.extend(
+            [
+                f"主機：{escape(host_text)}",
+                f"eid={escape(event.eid)} sid={escape(event.sid or 'n/a')}",
+            ]
+        )
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
 
-        detail_lines = ["tech:"]
-        detail_lines.extend(event.summary_lines)
-        detail_lines.append(f"fingerprint={event.fingerprint or event.key}")
-        if event.suggestions:
-            detail_lines.append("suggest:")
-            detail_lines.extend(event.suggestions[:3])
+    def render_recovered(
+        self,
+        *,
+        event: AlertEvent,
+        hostname: str,
+        instance_id: str | None,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        summary_text = " | ".join(event.summary_lines[:2]) if event.summary_lines else "n/a"
+        lines = [
+            "<b>✅ 已恢復</b>",
+            f"結論：{escape(event.code.upper())} 已恢復正常",
+            f"指標：{escape(summary_text)}",
+            f"主機：{escape(host_text)}",
+            f"eid={escape(event.eid)} sid={escape(event.sid or 'n/a')}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
 
-        text = "\n".join(primary_lines)
-        text += "\n"
-        text += "<blockquote expandable>" + escape("\n".join(detail_lines)) + "</blockquote>"
-        return RenderedMessage(text=text, parse_mode=self._parse_mode)
+    def render_daily_digest(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        digest: _DailyDigestState,
+        hostname: str,
+        instance_id: str | None,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        lines = [
+            "<b>📊 日報</b>",
+            f"結論：{escape(digest.trading_day)} 收盤摘要",
+            (
+                "指標："
+                f"今日總量={digest.total_rows} | 峰值={digest.peak_rows_per_min}/min | "
+                f"最大延遲={digest.max_lag_sec:.1f}s | 告警次數={digest.alert_count}"
+            ),
+            f"db：{escape(digest.db_path)} rows={digest.db_rows}",
+            f"主機：{escape(host_text)}",
+            f"sid={escape(snapshot.sid)}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
 
     def _render_health_plain(
         self,
@@ -554,13 +629,12 @@ class MessageRenderer:
         lines = [
             f"HK Tick Collector HEALTH {assessment.severity.value}",
             f"結論: {assessment.conclusion}",
-            f"影響: {assessment.impact}",
             (
-                f"freshness={_format_float(snapshot.drift_sec)}s "
-                f"persisted/min={snapshot.persisted_rows_per_min} "
-                f"queue={snapshot.queue_size}/{snapshot.queue_maxsize}"
+                f"指標: mode={_market_mode_label(assessment.market_mode)} "
+                f"drift={_format_float(snapshot.drift_sec)}s "
+                f"persisted/min={snapshot.persisted_rows_per_min} total={snapshot.db_rows}"
             ),
-            f"host={host_text} day={snapshot.trading_day} mode={assessment.market_mode}",
+            f"host={host_text} sid={snapshot.sid}",
         ]
         return RenderedMessage(text="\n".join(lines), parse_mode="")
 
@@ -576,16 +650,22 @@ class MessageRenderer:
         lines = [
             f"HK Tick Collector {event.code} {severity.value}",
             f"day={event.trading_day} mode={market_mode}",
-            f"host={host_text}",
+            f"host={host_text} eid={event.eid} sid={event.sid or 'n/a'}",
         ]
         lines.extend(event.summary_lines[:3])
+        if severity == NotifySeverity.ALERT and event.suggestions:
+            lines.extend(event.suggestions[:2])
+        elif severity == NotifySeverity.WARN and event.suggestions:
+            lines.extend(event.suggestions[:1])
         return RenderedMessage(text="\n".join(lines), parse_mode="")
 
     def _default_alert_headline(self, code: str, severity: NotifySeverity) -> str:
         if code.upper() == "PERSIST_STALL":
-            return "異常：持久化疑似停滯"
+            return "異常：持久化停滯，資料可能未落庫"
         if code.upper() == "DISCONNECT":
-            return "注意：與 OpenD 連線中斷，正在重連"
+            return "異常：與 OpenD 連線中斷"
+        if code.upper() == "SQLITE_BUSY":
+            return "異常：SQLite 鎖競爭升高"
         if severity == NotifySeverity.ALERT:
             return "異常：偵測到需要立即處理的事件"
         return "注意：偵測到風險事件"
@@ -595,6 +675,8 @@ class MessageRenderer:
             return "新資料可能無法寫入 SQLite，時序會持續落後"
         if code.upper() == "DISCONNECT":
             return "可能短暫影響即時資料完整性，重連成功後可恢復"
+        if code.upper() == "SQLITE_BUSY":
+            return "寫入吞吐可能下降，若持續將增加延遲與積壓"
         if severity == NotifySeverity.ALERT:
             return "資料可靠性可能受影響，建議立即排查"
         return "目前為退化狀態，建議持續觀察"
@@ -794,6 +876,11 @@ class TelegramNotifier:
 
         self._worker_task: asyncio.Task | None = None
         self._last_health_snapshot: HealthSnapshot | None = None
+        self._last_health_severity: NotifySeverity | None = None
+        self._last_health_sent_at: float | None = None
+        self._ok_milestones_sent: set[str] = set()
+        self._daily_digest_sent: set[str] = set()
+        self._digest_state: _DailyDigestState | None = None
 
         self._active = self._enabled and bool(self._chat_id) and bool(bot_token.strip())
         if self._enabled and not self._active:
@@ -843,25 +930,21 @@ class TelegramNotifier:
 
         now = self._now_monotonic()
         assessment = self._state_machine.assess_health(snapshot)
-        interval_sec = self._select_health_interval_sec(assessment.market_mode)
-        has_change = self._last_health_snapshot is None or self._has_significant_digest_change(
-            self._last_health_snapshot,
-            snapshot,
-        )
-
-        should_send, reason = self._state_machine.should_emit_health(
+        self._observe_digest(snapshot=snapshot)
+        should_send, reason = self._should_emit_health(
+            snapshot=snapshot,
             assessment=assessment,
             now=now,
-            interval_sec=interval_sec,
-            meaningful_change=has_change,
         )
         self._last_health_snapshot = snapshot
+        self._last_health_severity = assessment.severity
         if not should_send:
             logger.info(
-                "telegram_health_suppressed reason=%s severity=%s mode=%s",
+                "telegram_health_suppressed reason=%s severity=%s mode=%s sid=%s",
                 reason,
                 assessment.severity.value,
                 assessment.market_mode,
+                snapshot.sid,
             )
             return
 
@@ -876,9 +959,36 @@ class TelegramNotifier:
             kind="HEALTH",
             message=rendered,
             severity=assessment.severity,
-            fingerprint=f"HEALTH:{assessment.market_mode}",
+            fingerprint=f"HEALTH:{snapshot.trading_day}:{assessment.market_mode}",
             reason=reason,
+            sid=snapshot.sid,
+            eid=None,
         )
+        self._last_health_sent_at = now
+        if assessment.severity == NotifySeverity.OK:
+            self._mark_ok_milestone(snapshot=snapshot, market_mode=assessment.market_mode)
+            if (
+                assessment.market_mode == "after-hours"
+                and snapshot.trading_day not in self._daily_digest_sent
+                and self._digest_state is not None
+                and _is_after_close_window(snapshot.created_at)
+            ):
+                digest_message = self._renderer.render_daily_digest(
+                    snapshot=snapshot,
+                    digest=self._digest_state,
+                    hostname=self._hostname,
+                    instance_id=self._instance_id,
+                )
+                self._enqueue_message(
+                    kind="DAILY_DIGEST",
+                    message=digest_message,
+                    severity=NotifySeverity.OK,
+                    fingerprint=f"DAILY_DIGEST:{snapshot.trading_day}",
+                    reason="after_close_digest",
+                    sid=snapshot.sid,
+                    eid=None,
+                )
+                self._daily_digest_sent.add(snapshot.trading_day)
 
     def submit_alert(self, event: AlertEvent) -> None:
         if not self._active:
@@ -886,43 +996,96 @@ class TelegramNotifier:
 
         now = self._now_monotonic()
         severity = _severity_from(event.severity)
-        fingerprint = event.fingerprint or event.key or event.code
+        normalized = self._normalize_event_ids(event)
+        fingerprint = normalized.fingerprint or normalized.key or normalized.code
+        cooldown_sec = self._severity_cooldown_sec(severity)
+        escalation_steps = self._severity_escalation_steps(severity, cooldown_sec)
         should_send, reason = self._dedupe.evaluate(
             fingerprint=fingerprint,
             severity=severity,
             now=now,
-            cooldown_sec=self._alert_cooldown_sec,
-            escalation_steps=self._alert_escalation_steps,
+            cooldown_sec=cooldown_sec,
+            escalation_steps=escalation_steps,
+            event_id=normalized.eid,
+            snapshot_id=normalized.sid,
         )
         if not should_send:
             logger.info(
-                "telegram_alert_suppressed code=%s fingerprint=%s reason=%s cooldown_sec=%s",
-                event.code,
+                "telegram_alert_suppressed code=%s fingerprint=%s reason=%s cooldown_sec=%s eid=%s sid=%s",
+                normalized.code,
                 fingerprint,
                 reason,
-                self._alert_cooldown_sec,
+                cooldown_sec,
+                normalized.eid,
+                normalized.sid or "none",
             )
             return
 
-        mode = _infer_market_mode(event.created_at)
+        mode = _infer_market_mode(normalized.created_at)
         rendered = self._renderer.render_alert(
-            event=event,
+            event=normalized,
             hostname=self._hostname,
             instance_id=self._instance_id,
             market_mode=mode,
         )
+        if self._digest_state is not None and severity in {
+            NotifySeverity.WARN,
+            NotifySeverity.ALERT,
+        }:
+            self._digest_state.alert_count += 1
         self._enqueue_message(
-            kind=event.code,
+            kind=normalized.code,
             message=rendered,
             severity=severity,
             fingerprint=fingerprint,
             reason=reason,
+            sid=normalized.sid,
+            eid=normalized.eid,
         )
 
-    def _select_health_interval_sec(self, market_mode: str) -> int:
-        if _is_trading_mode(market_mode):
-            return self._health_trading_interval_sec
-        return self._health_offhours_interval_sec
+    def resolve_alert(
+        self,
+        *,
+        code: str,
+        fingerprint: str,
+        trading_day: str,
+        summary_lines: Sequence[str],
+        sid: str | None = None,
+        eid: str | None = None,
+    ) -> None:
+        if not self._active:
+            return
+        record = self._dedupe.resolve(fingerprint)
+        resolved_eid = (
+            eid or (record.last_event_id if record is not None else None) or _make_short_id("eid")
+        )
+        resolved_sid = sid or (record.last_snapshot_id if record is not None else None)
+        recovered = AlertEvent(
+            created_at=datetime.now(tz=HK_TZ),
+            code=code,
+            key=fingerprint,
+            fingerprint=fingerprint,
+            trading_day=trading_day,
+            severity=NotifySeverity.OK.value,
+            summary_lines=list(summary_lines),
+            suggestions=[],
+            sid=resolved_sid,
+            eid=resolved_eid,
+        )
+        rendered = self._renderer.render_recovered(
+            event=recovered,
+            hostname=self._hostname,
+            instance_id=self._instance_id,
+        )
+        self._enqueue_message(
+            kind=f"{code}_RECOVERED",
+            message=rendered,
+            severity=NotifySeverity.OK,
+            fingerprint=f"{fingerprint}:RECOVERED:{resolved_eid}",
+            reason="state_recovered",
+            sid=resolved_sid,
+            eid=resolved_eid,
+        )
 
     def _enqueue_message(
         self,
@@ -932,6 +1095,8 @@ class TelegramNotifier:
         severity: NotifySeverity,
         fingerprint: str,
         reason: str,
+        sid: str | None,
+        eid: str | None,
     ) -> bool:
         clipped = truncate_rendered_message(message)
         payload = _OutboundMessage(
@@ -939,25 +1104,113 @@ class TelegramNotifier:
             message=clipped,
             severity=severity,
             fingerprint=fingerprint,
+            sid=sid,
+            eid=eid,
         )
         try:
             self._queue.put_nowait(payload)
             logger.info(
-                "telegram_enqueue kind=%s severity=%s fingerprint=%s reason=%s",
+                "telegram_enqueue kind=%s severity=%s fingerprint=%s reason=%s eid=%s sid=%s",
                 kind,
                 severity.value,
                 fingerprint,
                 reason,
+                eid or "none",
+                sid or "none",
             )
             return True
         except asyncio.QueueFull:
             logger.error(
-                "telegram_queue_full kind=%s severity=%s fingerprint=%s dropped=1",
+                "telegram_queue_full kind=%s severity=%s fingerprint=%s dropped=1 eid=%s sid=%s",
                 kind,
                 severity.value,
                 fingerprint,
+                eid or "none",
+                sid or "none",
             )
             return False
+
+    def _should_emit_health(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        assessment: HealthAssessment,
+        now: float,
+    ) -> tuple[bool, str]:
+        previous = self._last_health_severity
+        state_changed = previous is not None and previous != assessment.severity
+        if previous is None:
+            return True, "bootstrap"
+        if state_changed:
+            return True, "state_changed"
+
+        elapsed = None if self._last_health_sent_at is None else (now - self._last_health_sent_at)
+        if assessment.severity == NotifySeverity.OK:
+            if self._should_send_ok_milestone(
+                snapshot=snapshot, market_mode=assessment.market_mode
+            ):
+                if assessment.market_mode == "pre-open":
+                    return True, "pre_open_once"
+                if assessment.market_mode == "after-hours":
+                    return True, "after_close_once"
+            return False, "ok_suppressed"
+
+        cadence_sec = WARN_CADENCE_SEC
+        if elapsed is None or elapsed >= cadence_sec:
+            return True, "warn_cadence"
+        return False, "warn_cooldown"
+
+    def _should_send_ok_milestone(self, *, snapshot: HealthSnapshot, market_mode: str) -> bool:
+        if market_mode not in {"pre-open", "after-hours"}:
+            return False
+        marker = f"{snapshot.trading_day}:{market_mode}"
+        return marker not in self._ok_milestones_sent
+
+    def _mark_ok_milestone(self, *, snapshot: HealthSnapshot, market_mode: str) -> None:
+        if market_mode not in {"pre-open", "after-hours"}:
+            return
+        self._ok_milestones_sent.add(f"{snapshot.trading_day}:{market_mode}")
+
+    def _normalize_event_ids(self, event: AlertEvent) -> AlertEvent:
+        sid = event.sid
+        if not sid and self._last_health_snapshot is not None:
+            sid = self._last_health_snapshot.sid
+        if not sid:
+            sid = _make_short_id("sid")
+        if event.sid == sid:
+            return event
+        return replace(event, sid=sid)
+
+    def _severity_cooldown_sec(self, severity: NotifySeverity) -> int:
+        if severity == NotifySeverity.ALERT:
+            return ALERT_CADENCE_SEC
+        if severity == NotifySeverity.WARN:
+            return WARN_CADENCE_SEC
+        return max(30, int(self._alert_cooldown_sec))
+
+    def _severity_escalation_steps(self, severity: NotifySeverity, cooldown_sec: int) -> list[int]:
+        values = [0]
+        for step in self._alert_escalation_steps:
+            item = max(0, int(step))
+            if item == 0 or item >= cooldown_sec:
+                values.append(item)
+        if severity == NotifySeverity.ALERT:
+            values.append(cooldown_sec)
+        if severity == NotifySeverity.WARN:
+            values.append(cooldown_sec)
+        return sorted(set(values))
+
+    def _observe_digest(self, *, snapshot: HealthSnapshot) -> None:
+        if self._digest_state is None or self._digest_state.trading_day != snapshot.trading_day:
+            self._digest_state = _DailyDigestState(trading_day=snapshot.trading_day)
+        state = self._digest_state
+        state.total_rows += max(0, int(snapshot.persisted_rows_per_min))
+        state.peak_rows_per_min = max(
+            state.peak_rows_per_min, max(0, int(snapshot.persisted_rows_per_min))
+        )
+        state.max_lag_sec = max(state.max_lag_sec, abs(snapshot.drift_sec or 0.0))
+        state.db_rows = max(state.db_rows, int(snapshot.db_rows))
+        state.db_path = str(snapshot.db_path)
 
     def _has_significant_digest_change(self, old: HealthSnapshot, new: HealthSnapshot) -> bool:
         old_queue_pct = _queue_utilization_pct(old)
@@ -1029,11 +1282,13 @@ class TelegramNotifier:
             )
             if result.ok:
                 logger.info(
-                    "telegram_send_ok kind=%s severity=%s fingerprint=%s attempt=%s",
+                    "telegram_send_ok kind=%s severity=%s fingerprint=%s attempt=%s eid=%s sid=%s",
                     payload.kind,
                     payload.severity.value,
                     payload.fingerprint,
                     attempt,
+                    payload.eid or "none",
+                    payload.sid or "none",
                 )
                 return
 
@@ -1043,25 +1298,29 @@ class TelegramNotifier:
                 and attempt < self._max_retries
             ):
                 logger.warning(
-                    "telegram_rate_limited kind=%s severity=%s fingerprint=%s retry_after=%s attempt=%s",
+                    "telegram_rate_limited kind=%s severity=%s fingerprint=%s retry_after=%s attempt=%s eid=%s sid=%s",
                     payload.kind,
                     payload.severity.value,
                     payload.fingerprint,
                     result.retry_after,
                     attempt,
+                    payload.eid or "none",
+                    payload.sid or "none",
                 )
                 await self._sleep(float(result.retry_after))
                 continue
 
             if attempt >= self._max_retries:
                 logger.error(
-                    "telegram_send_failed kind=%s severity=%s fingerprint=%s status=%s err=%s attempts=%s",
+                    "telegram_send_failed kind=%s severity=%s fingerprint=%s status=%s err=%s attempts=%s eid=%s sid=%s",
                     payload.kind,
                     payload.severity.value,
                     payload.fingerprint,
                     result.status_code,
                     result.error or "unknown",
                     attempt,
+                    payload.eid or "none",
+                    payload.sid or "none",
                 )
                 return
 

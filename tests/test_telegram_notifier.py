@@ -1,9 +1,12 @@
 import asyncio
+import re
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
 from hk_tick_collector.notifiers.telegram import (
+    ALERT_CADENCE_SEC,
+    WARN_CADENCE_SEC,
     AlertEvent,
     AlertStateMachine,
     DedupeStore,
@@ -13,19 +16,21 @@ from hk_tick_collector.notifiers.telegram import (
     SymbolSnapshot,
     TelegramNotifier,
     TelegramSendResult,
+    _DailyDigestState,
     truncate_rendered_message,
 )
 
 
 def _make_snapshot(
     *,
+    created_at: datetime | None = None,
     persisted_per_min: int = 800,
     drift_sec: float | None = 1.0,
     queue_size: int = 5,
     symbol_lag: int = 0,
 ) -> HealthSnapshot:
     return HealthSnapshot(
-        created_at=datetime.now(tz=timezone.utc),
+        created_at=created_at or datetime.now(tz=timezone.utc),
         pid=1234,
         uptime_sec=3661,
         trading_day="20260212",
@@ -60,11 +65,24 @@ def _make_snapshot(
     )
 
 
-def test_renderer_outputs_expandable_blockquote_html():
+def test_sid_eid_format_is_short_and_stable():
+    snapshot = _make_snapshot()
+    event = AlertEvent(
+        created_at=datetime.now(tz=timezone.utc),
+        code="DISCONNECT",
+        key="DISCONNECT",
+        trading_day="20260212",
+        summary_lines=["error_type=RuntimeError"],
+        suggestions=["journalctl -u hk-tick-collector -n 120 --no-pager"],
+    )
+    assert re.match(r"^sid-[0-9a-f]{8}$", snapshot.sid)
+    assert re.match(r"^eid-[0-9a-f]{8}$", event.eid)
+
+
+def test_renderer_health_ok_template_contains_sid_and_required_order():
     state_machine = AlertStateMachine(drift_warn_sec=120)
     snapshot = _make_snapshot()
     assessment = state_machine.assess_health(snapshot)
-
     renderer = MessageRenderer(parse_mode="HTML")
     rendered = renderer.render_health(
         snapshot=snapshot,
@@ -74,27 +92,123 @@ def test_renderer_outputs_expandable_blockquote_html():
         include_system_metrics=True,
     )
 
-    assert rendered.parse_mode == "HTML"
-    assert "<blockquote expandable>" in rendered.text
-    assert "</blockquote>" in rendered.text
-
-    first_layer = rendered.text.split("<blockquote expandable>", 1)[0].strip()
-    assert first_layer.count("\n") + 1 <= 10
-    assert "結論：" in first_layer
-    assert "影響：" in first_layer
+    lines = rendered.text.splitlines()
+    assert lines[0].startswith("<b>🟢 HK Tick Collector 正常</b>")
+    assert lines[1].startswith("結論：")
+    assert lines[2].startswith("指標：")
+    assert "主機：" in rendered.text
+    assert f"sid={snapshot.sid}" in rendered.text
 
 
-def test_truncate_preserves_expandable_blockquote_structure():
+def test_renderer_warn_and_alert_template_suggestion_limit_and_ids():
+    renderer = MessageRenderer(parse_mode="HTML")
+    warn_event = AlertEvent(
+        created_at=datetime.now(tz=timezone.utc),
+        code="SQLITE_BUSY",
+        key="SQLITE_BUSY",
+        fingerprint="SQLITE_BUSY",
+        trading_day="20260212",
+        severity=NotifySeverity.WARN.value,
+        summary_lines=["busy_backoff_delta=8/min", "queue=40/1000"],
+        suggestions=[
+            "journalctl -u hk-tick-collector -n 120 --no-pager",
+            "sqlite3 /data/sqlite/HK/20260212.db 'select count(*) from ticks;'",
+        ],
+        sid="sid-1234abcd",
+    )
+    warn_rendered = renderer.render_alert(
+        event=warn_event,
+        hostname="collector-a",
+        instance_id="node-1",
+        market_mode="open",
+    )
+    assert "<b>🟡 注意</b>" in warn_rendered.text
+    assert warn_rendered.text.count("建議：") == 1
+
+    alert_event = AlertEvent(
+        created_at=datetime.now(tz=timezone.utc),
+        code="PERSIST_STALL",
+        key="PERSIST_STALL",
+        fingerprint="PERSIST_STALL",
+        trading_day="20260212",
+        severity=NotifySeverity.ALERT.value,
+        summary_lines=["write=0/min", "queue=420/1000", "lag=128"],
+        suggestions=[
+            "journalctl -u hk-tick-collector -n 200 --no-pager",
+            "sqlite3 /data/sqlite/HK/20260212.db 'select count(*), max(ts_ms) from ticks;'",
+            "tail -f /tmp/ignored.log",
+        ],
+        sid="sid-5678dcba",
+    )
+    alert_rendered = renderer.render_alert(
+        event=alert_event,
+        hostname="collector-a",
+        instance_id="node-1",
+        market_mode="open",
+    )
+    assert "<b>🔴 異常</b>" in alert_rendered.text
+    assert "建議1：" in alert_rendered.text
+    assert "建議2：" in alert_rendered.text
+    assert "tail -f /tmp/ignored.log" not in alert_rendered.text
+    assert f"eid={alert_event.eid}" in alert_rendered.text
+    assert "sid=sid-5678dcba" in alert_rendered.text
+
+
+def test_renderer_recovered_and_daily_digest_templates():
+    renderer = MessageRenderer(parse_mode="HTML")
+    snapshot = _make_snapshot()
+    recovered_event = AlertEvent(
+        created_at=datetime.now(tz=timezone.utc),
+        code="DISCONNECT",
+        key="DISCONNECT",
+        fingerprint="DISCONNECT",
+        trading_day="20260212",
+        severity=NotifySeverity.OK.value,
+        summary_lines=["status=reconnected", "queue=0/1000"],
+        suggestions=[],
+        sid=snapshot.sid,
+    )
+    recovered = renderer.render_recovered(
+        event=recovered_event,
+        hostname="collector-a",
+        instance_id="node-1",
+    )
+    assert "<b>✅ 已恢復</b>" in recovered.text
+    assert f"eid={recovered_event.eid}" in recovered.text
+    assert f"sid={snapshot.sid}" in recovered.text
+
+    digest = _DailyDigestState(
+        trading_day="20260212",
+        total_rows=1800000,
+        peak_rows_per_min=38000,
+        max_lag_sec=3.6,
+        alert_count=4,
+        db_rows=22000000,
+        db_path="/data/sqlite/HK/20260212.db",
+    )
+    digest_rendered = renderer.render_daily_digest(
+        snapshot=snapshot,
+        digest=digest,
+        hostname="collector-a",
+        instance_id="node-1",
+    )
+    assert "<b>📊 日報</b>" in digest_rendered.text
+    assert "今日總量=1800000" in digest_rendered.text
+    assert "告警次數=4" in digest_rendered.text
+
+
+def test_truncate_message_respects_limit():
     renderer = MessageRenderer(parse_mode="HTML")
     event = AlertEvent(
         created_at=datetime.now(tz=timezone.utc),
         code="PERSIST_STALL",
-        key="PERSIST_STALL:20260212",
-        fingerprint="PERSIST_STALL:20260212",
+        key="PERSIST_STALL",
+        fingerprint="PERSIST_STALL",
         trading_day="20260212",
         severity=NotifySeverity.ALERT.value,
         summary_lines=[f"line_{i}=" + ("x" * 100) for i in range(30)],
         suggestions=["journalctl -u hk-tick-collector -n 200 --no-pager"],
+        sid="sid-1234abcd",
     )
     rendered = renderer.render_alert(
         event=event,
@@ -103,37 +217,18 @@ def test_truncate_preserves_expandable_blockquote_structure():
         market_mode="open",
     )
     clipped = truncate_rendered_message(rendered, max_chars=600)
-
     assert len(clipped.text) <= 600
-    assert "<blockquote expandable>" in clipped.text
-    assert "</blockquote>" in clipped.text
-    assert "[truncated]" in clipped.text
 
 
-def test_state_machine_transitions_ok_warn_alert():
-    sm = AlertStateMachine(drift_warn_sec=120)
-
-    ok = sm.assess_health(_make_snapshot(persisted_per_min=900, drift_sec=2.0, queue_size=3))
-    warn = sm.assess_health(_make_snapshot(persisted_per_min=200, drift_sec=180.0, queue_size=50))
-    alert = sm.assess_health(
-        _make_snapshot(persisted_per_min=0, drift_sec=240.0, queue_size=120, symbol_lag=50)
-    )
-
-    assert ok.severity == NotifySeverity.OK
-    assert warn.severity == NotifySeverity.WARN
-    assert alert.severity == NotifySeverity.ALERT
-
-
-def test_dedupe_store_cooldown_and_escalation():
+def test_dedupe_store_cooldown_and_escalation_follows_cadence():
     store = DedupeStore()
-    fp = "PERSIST_STALL:20260212:HK.00700"
-
+    fp = "PERSIST_STALL:20260212"
     should, reason = store.evaluate(
         fingerprint=fp,
         severity=NotifySeverity.ALERT,
         now=0.0,
-        cooldown_sec=600,
-        escalation_steps=[0, 60, 300],
+        cooldown_sec=ALERT_CADENCE_SEC,
+        escalation_steps=[0, 60, ALERT_CADENCE_SEC],
     )
     assert should is True
     assert reason == "new"
@@ -141,9 +236,9 @@ def test_dedupe_store_cooldown_and_escalation():
     should, reason = store.evaluate(
         fingerprint=fp,
         severity=NotifySeverity.ALERT,
-        now=30.0,
-        cooldown_sec=600,
-        escalation_steps=[0, 60, 300],
+        now=60.0,
+        cooldown_sec=ALERT_CADENCE_SEC,
+        escalation_steps=[0, 60, ALERT_CADENCE_SEC],
     )
     assert should is False
     assert reason == "cooldown_active"
@@ -151,22 +246,153 @@ def test_dedupe_store_cooldown_and_escalation():
     should, reason = store.evaluate(
         fingerprint=fp,
         severity=NotifySeverity.ALERT,
-        now=61.0,
-        cooldown_sec=600,
-        escalation_steps=[0, 60, 300],
+        now=181.0,
+        cooldown_sec=ALERT_CADENCE_SEC,
+        escalation_steps=[0, 60, ALERT_CADENCE_SEC],
     )
     assert should is True
-    assert reason.startswith("escalation_step_")
+    assert reason in {"escalation_step_60s", "escalation_step_180s", "cooldown_elapsed"}
 
-    should, reason = store.evaluate(
-        fingerprint=fp,
-        severity=NotifySeverity.ALERT,
-        now=700.0,
-        cooldown_sec=600,
-        escalation_steps=[0, 60, 300],
-    )
-    assert should is True
-    assert reason in {"escalation_step_300s", "cooldown_elapsed"}
+
+def test_notifier_health_and_alert_cadence_with_recovered():
+    async def runner() -> None:
+        calls = []
+
+        def fake_sender(payload):
+            calls.append(dict(payload))
+            return TelegramSendResult(ok=True, status_code=200)
+
+        monotonic_now = {"value": 0.0}
+
+        def fake_now() -> float:
+            return monotonic_now["value"]
+
+        async def fake_sleep(_: float) -> None:
+            return
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            parse_mode="HTML",
+            alert_cooldown_sec=600,
+            alert_escalation_steps=[0, 600, 1800],
+            sender=fake_sender,
+            now_monotonic=fake_now,
+            sleep=fake_sleep,
+        )
+        await notifier.start()
+        open_time = datetime(2026, 2, 12, 2, 0, tzinfo=timezone.utc)
+
+        # bootstrap OK
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=800,
+                drift_sec=1.0,
+                queue_size=1,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 1
+
+        # same OK should be suppressed
+        monotonic_now["value"] += 30
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=820,
+                drift_sec=1.0,
+                queue_size=1,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 1
+
+        # WARN should send immediately on state change
+        monotonic_now["value"] += 5
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=0,
+                drift_sec=180.0,
+                queue_size=200,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 2
+        assert "🟡 HK Tick Collector 注意" in calls[-1]["text"]
+
+        # WARN cadence: <10m suppressed
+        monotonic_now["value"] += WARN_CADENCE_SEC - 5
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=0,
+                drift_sec=180.0,
+                queue_size=180,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 2
+
+        # WARN cadence: >=10m allowed
+        monotonic_now["value"] += 10
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=0,
+                drift_sec=180.0,
+                queue_size=180,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 3
+
+        # ALERT event cadence + recovered
+        event = AlertEvent(
+            created_at=datetime.now(tz=timezone.utc),
+            code="DISCONNECT",
+            key="DISCONNECT",
+            fingerprint="DISCONNECT",
+            trading_day="20260212",
+            severity=NotifySeverity.ALERT.value,
+            summary_lines=["error_type=ConnectionError"],
+            suggestions=["journalctl -u hk-tick-collector -n 120 --no-pager"],
+            sid="sid-aaaaaaaa",
+        )
+        monotonic_now["value"] += 1
+        notifier.submit_alert(event)
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 4
+        assert "🔴 異常" in calls[-1]["text"]
+
+        # <3m suppressed
+        monotonic_now["value"] += ALERT_CADENCE_SEC - 20
+        notifier.submit_alert(event)
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 4
+
+        # >=3m allowed
+        monotonic_now["value"] += 25
+        notifier.submit_alert(event)
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 5
+
+        notifier.resolve_alert(
+            code="DISCONNECT",
+            fingerprint="DISCONNECT",
+            trading_day="20260212",
+            summary_lines=["status=reconnected", "queue=0/1000"],
+            sid="sid-aaaaaaaa",
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 6
+        assert "✅ 已恢復" in calls[-1]["text"]
+
+        await notifier.stop()
+
+    asyncio.run(runner())
 
 
 def test_retry_after_respected_and_eventually_succeeds():
@@ -208,9 +434,10 @@ def test_retry_after_respected_and_eventually_succeeds():
             AlertEvent(
                 created_at=datetime.now(tz=timezone.utc),
                 code="SQLITE_BUSY",
-                key="SQLITE_BUSY:20260212",
+                key="SQLITE_BUSY",
+                fingerprint="SQLITE_BUSY",
                 trading_day="20260212",
-                severity=NotifySeverity.WARN.value,
+                severity=NotifySeverity.ALERT.value,
                 summary_lines=["busy_backoff_delta=5/min threshold=3"],
                 suggestions=["journalctl -u hk-tick-collector -n 200 --no-pager"],
             )

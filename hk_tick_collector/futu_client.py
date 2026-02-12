@@ -116,6 +116,11 @@ class FutuQuoteClient:
         self._watchdog_last_heal_at: float | None = None
         self._watchdog_dumped = False
         self._last_busy_backoff_count = 0
+        self._last_snapshot_sid: str | None = None
+        self._sqlite_busy_active = False
+        self._sqlite_busy_eid: str | None = None
+        self._disconnect_active = False
+        self._disconnect_eid: str | None = None
 
     async def run_forever(self) -> None:
         backoff = ExponentialBackoff(
@@ -129,6 +134,21 @@ class FutuQuoteClient:
                 try:
                     await self._connect_and_subscribe()
                     backoff.reset()
+                    if self._disconnect_active and self._notifier is not None:
+                        trading_day = self._current_trading_day()
+                        self._notifier.resolve_alert(
+                            code="DISCONNECT",
+                            fingerprint="DISCONNECT",
+                            trading_day=trading_day,
+                            summary_lines=[
+                                f"host={self._config.futu_host}:{self._config.futu_port}",
+                                "status=reconnected",
+                            ],
+                            sid=self._last_snapshot_sid,
+                            eid=self._disconnect_eid,
+                        )
+                    self._disconnect_active = False
+                    self._disconnect_eid = None
                     poll_task = asyncio.create_task(self._poll_loop())
                     health_task = asyncio.create_task(self._health_loop())
                     monitor_task = asyncio.create_task(self._monitor_connection())
@@ -157,27 +177,35 @@ class FutuQuoteClient:
                     if self._notifier is not None:
                         trading_day = self._current_trading_day()
                         err_name = type(exc).__name__
-                        self._notifier.submit_alert(
-                            AlertEvent(
-                                created_at=datetime.now(tz=timezone.utc),
-                                code="DISCONNECT",
-                                key=f"DISCONNECT:{err_name}",
-                                fingerprint=f"DISCONNECT:{err_name}",
-                                trading_day=trading_day,
-                                severity=NotifySeverity.WARN.value,
-                                headline="注意：與 OpenD 連線中斷，系統正在嘗試重連",
-                                impact="短時間內可能有資料缺口，重連成功後可恢復",
-                                summary_lines=[
-                                    f"error_type={err_name}",
-                                    f"error={str(exc)[:200] if str(exc) else 'n/a'}",
-                                    f"host={self._config.futu_host}:{self._config.futu_port}",
-                                ],
-                                suggestions=[
-                                    "journalctl -u hk-tick-collector -n 120 --no-pager",
-                                    "systemctl status futu-opend --no-pager",
-                                ],
-                            )
+                        event = AlertEvent(
+                            created_at=datetime.now(tz=timezone.utc),
+                            code="DISCONNECT",
+                            key="DISCONNECT",
+                            fingerprint="DISCONNECT",
+                            trading_day=trading_day,
+                            severity=NotifySeverity.ALERT.value,
+                            headline="異常：與 OpenD 連線中斷，系統正在重連",
+                            impact="短時間內可能有資料缺口，重連成功後會自動恢復",
+                            summary_lines=[
+                                f"error_type={err_name}",
+                                f"error={str(exc)[:200] if str(exc) else 'n/a'}",
+                                f"host={self._config.futu_host}:{self._config.futu_port}",
+                            ],
+                            suggestions=[
+                                "journalctl -u hk-tick-collector -n 120 --no-pager",
+                                "systemctl status futu-opend --no-pager",
+                            ],
+                            sid=self._last_snapshot_sid,
                         )
+                        self._disconnect_active = True
+                        self._disconnect_eid = event.eid
+                        logger.warning(
+                            "alert_event code=DISCONNECT eid=%s sid=%s error_type=%s",
+                            event.eid,
+                            event.sid or "none",
+                            err_name,
+                        )
+                        self._notifier.submit_alert(event)
                 finally:
                     self._connected = False
                     for task in (poll_task, health_task, monitor_task):
@@ -324,7 +352,7 @@ class FutuQuoteClient:
                 drift_sec = self._drift_sec()
                 last_commit_age_sec = self._last_commit_age_sec(now=self._loop.time())
 
-                logger.info(
+                logger.debug(
                     "poll_stats symbol=%s fetched=%s accepted=%s enqueued=%s "
                     "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
                     "queue_size=%s queue_maxsize=%s fetched_last_seq=%s "
@@ -397,26 +425,38 @@ class FutuQuoteClient:
                     f" last_tick_age_sec={age if age is not None else 'none'}"
                 )
 
+            snapshot = await self._build_health_snapshot(
+                now=now,
+                queue_size=queue_size,
+                queue_maxsize=queue_maxsize,
+                persisted_rows_per_min=persisted_rows_per_min,
+                drift_sec=drift_sec,
+                push_rows_per_min=self._push_rows_since_report,
+                poll_fetched=self._poll_fetched_since_report,
+                poll_accepted=self._poll_accepted_since_report,
+                dropped_duplicate=self._dropped_duplicate_since_report,
+            )
+            self._last_snapshot_sid = snapshot.sid
             logger.info(
-                "health connected=%s queue=%s/%s push_rows_per_min=%s "
-                "poll_fetched=%s poll_accepted=%s poll_enqueued=%s "
-                "persisted_rows_per_min=%s ignored_rows_per_min=%s "
-                "queue_in=%s queue_out=%s db_commits_per_min=%s db_write_rate=%s "
-                "last_commit_monotonic_age_sec=%s ts_drift_sec=%s max_ts_utc=%s "
-                "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s symbols=%s",
+                "health sid=%s connected=%s queue=%s/%s persisted_rows_per_min=%s "
+                "ignored_rows_per_min=%s push_rows_per_min=%s poll_fetched=%s "
+                "poll_accepted=%s poll_enqueued=%s queue_in=%s queue_out=%s "
+                "db_commits_per_min=%s last_commit_age_sec=%s ts_drift_sec=%s "
+                "max_ts_utc=%s dropped_queue_full=%s dropped_duplicate=%s "
+                "dropped_filter=%s symbols=%s",
+                snapshot.sid,
                 self._connected,
                 queue_size,
                 queue_maxsize,
+                persisted_rows_per_min,
+                ignored_rows_per_min,
                 self._push_rows_since_report,
                 self._poll_fetched_since_report,
                 self._poll_accepted_since_report,
                 self._poll_enqueued_since_report,
-                persisted_rows_per_min,
-                ignored_rows_per_min,
                 queue_in_rows_per_min,
                 queue_out_rows_per_min,
                 db_commits_per_min,
-                persisted_rows_per_min,
                 f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
                 f"{drift_sec:.1f}" if drift_sec is not None else "none",
                 max_ts_utc,
@@ -435,40 +475,52 @@ class FutuQuoteClient:
                 and busy_backoff_delta >= self._config.telegram_sqlite_busy_alert_threshold
             ):
                 trading_day = self._current_trading_day()
-                self._notifier.submit_alert(
-                    AlertEvent(
-                        created_at=datetime.now(tz=timezone.utc),
-                        code="SQLITE_BUSY",
-                        key=f"SQLITE_BUSY:{trading_day}",
-                        fingerprint=f"SQLITE_BUSY:{trading_day}",
-                        trading_day=trading_day,
-                        severity=NotifySeverity.WARN.value,
-                        headline="注意：SQLite 鎖競爭升高",
-                        impact="目前仍可能持續寫入，但吞吐與延遲有退化風險",
-                        summary_lines=[
-                            f"busy_backoff_delta={busy_backoff_delta}/min threshold={self._config.telegram_sqlite_busy_alert_threshold}",
-                            f"queue={queue_size}/{queue_maxsize} persisted_per_min={persisted_rows_per_min}",
-                            f"last_exception_type={runtime.get('last_exception_type')}",
-                        ],
-                        suggestions=[
-                            "journalctl -u hk-tick-collector -n 200 --no-pager",
-                            f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*) from ticks;'",
-                        ],
-                    )
+                event = AlertEvent(
+                    created_at=datetime.now(tz=timezone.utc),
+                    code="SQLITE_BUSY",
+                    key="SQLITE_BUSY",
+                    fingerprint="SQLITE_BUSY",
+                    trading_day=trading_day,
+                    severity=NotifySeverity.ALERT.value,
+                    headline="異常：SQLite 鎖競爭升高",
+                    impact="寫入吞吐可能下降，若持續會造成延遲與積壓",
+                    summary_lines=[
+                        f"busy_backoff_delta={busy_backoff_delta}/min threshold={self._config.telegram_sqlite_busy_alert_threshold}",
+                        f"queue={queue_size}/{queue_maxsize} persisted_per_min={persisted_rows_per_min}",
+                        f"lag_sec={f'{drift_sec:.1f}' if drift_sec is not None else 'none'}",
+                    ],
+                    suggestions=[
+                        "journalctl -u hk-tick-collector -n 200 --no-pager",
+                        f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*), max(ts_ms) from ticks;'",
+                    ],
+                    sid=snapshot.sid,
                 )
+                self._sqlite_busy_active = True
+                self._sqlite_busy_eid = event.eid
+                logger.warning(
+                    "alert_event code=SQLITE_BUSY eid=%s sid=%s busy_backoff_delta=%s",
+                    event.eid,
+                    event.sid or "none",
+                    busy_backoff_delta,
+                )
+                self._notifier.submit_alert(event)
+            elif self._notifier is not None and self._sqlite_busy_active:
+                trading_day = self._current_trading_day()
+                self._notifier.resolve_alert(
+                    code="SQLITE_BUSY",
+                    fingerprint="SQLITE_BUSY",
+                    trading_day=trading_day,
+                    summary_lines=[
+                        f"queue={queue_size}/{queue_maxsize}",
+                        f"persisted_per_min={persisted_rows_per_min}",
+                    ],
+                    sid=snapshot.sid,
+                    eid=self._sqlite_busy_eid,
+                )
+                self._sqlite_busy_active = False
+                self._sqlite_busy_eid = None
 
             if self._notifier is not None:
-                snapshot = await self._build_health_snapshot(
-                    now=now,
-                    queue_size=queue_size,
-                    queue_maxsize=queue_maxsize,
-                    persisted_rows_per_min=persisted_rows_per_min,
-                    drift_sec=drift_sec,
-                    push_rows_per_min=self._push_rows_since_report,
-                    poll_fetched=self._poll_fetched_since_report,
-                    poll_accepted=self._poll_accepted_since_report,
-                    dropped_duplicate=self._dropped_duplicate_since_report,
-                )
                 self._notifier.submit_health(snapshot)
 
             await self._check_watchdog(
@@ -478,6 +530,7 @@ class FutuQuoteClient:
                 persisted_rows_per_min=persisted_rows_per_min,
                 queue_in_rows_per_min=queue_in_rows_per_min,
                 queue_out_rows_per_min=queue_out_rows_per_min,
+                snapshot_sid=snapshot.sid,
             )
 
             self._push_rows_since_report = 0
@@ -636,6 +689,7 @@ class FutuQuoteClient:
         persisted_rows_per_min: int,
         queue_in_rows_per_min: int,
         queue_out_rows_per_min: int,
+        snapshot_sid: str | None = None,
     ) -> None:
         if self._stop_event.is_set():
             return
@@ -771,6 +825,35 @@ class FutuQuoteClient:
             commit_age_sec=commit_age_sec,
             runtime=runtime,
         )
+        event: AlertEvent | None = None
+        if self._notifier is not None:
+            trading_day = self._current_trading_day()
+            persisted_parts = []
+            for symbol in self._config.symbols:
+                persisted_parts.append(f"{symbol}={self._last_persisted_seq.get(symbol, 'none')}")
+            event = AlertEvent(
+                created_at=datetime.now(tz=timezone.utc),
+                code="PERSIST_STALL",
+                key=f"PERSIST_STALL:{trading_day}:{','.join(self._config.symbols)}",
+                fingerprint=f"PERSIST_STALL:{trading_day}:{','.join(self._config.symbols)}",
+                trading_day=trading_day,
+                severity=NotifySeverity.ALERT.value,
+                headline="異常：持久化停滯，疑似停止寫入",
+                impact="新資料可能未落庫，延遲與積壓將持續上升",
+                summary_lines=[
+                    f"stall_sec={commit_age_sec:.1f}/{self._config.watchdog_stall_sec}",
+                    f"write=0/min queue={queue_size}/{queue_maxsize} lag={self._max_seq_lag()}",
+                    f"last_persisted_seq={' '.join(persisted_parts)}",
+                ],
+                suggestions=[
+                    "journalctl -u hk-tick-collector -n 200 --no-pager",
+                    f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*), max(ts_ms) from ticks;'",
+                ],
+                sid=snapshot_sid or self._last_snapshot_sid,
+                duration_sec=int(commit_age_sec),
+                threshold_sec=int(self._config.watchdog_stall_sec),
+            )
+
         logger.error(
             "WATCHDOG persistent_stall reason=%s upstream_active=%s poll_active=%s "
             "queue=%s/%s queue_threshold=%s queue_growth=%s check_elapsed_sec=%.1f "
@@ -779,7 +862,7 @@ class FutuQuoteClient:
             "dequeue_age_sec=%.1f commit_age_sec=%.1f last_commit_monotonic_age_sec=%s "
             "worker_alive=%s last_exception_type=%s last_exception_count=%s "
             "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
-            "max_seq_lag=%s ts_drift_sec=%s recovery_failures=%s",
+            "max_seq_lag=%s ts_drift_sec=%s recovery_failures=%s eid=%s sid=%s",
             reason,
             upstream_active,
             poll_active,
@@ -807,33 +890,18 @@ class FutuQuoteClient:
             self._max_seq_lag(),
             f"{drift_sec:.1f}" if drift_sec is not None else "none",
             self._watchdog_heal_failures,
+            event.eid if event is not None else "none",
+            event.sid if event is not None else (snapshot_sid or "none"),
         )
-        if self._notifier is not None:
-            trading_day = self._current_trading_day()
-            persisted_parts = []
-            for symbol in self._config.symbols:
-                persisted_parts.append(f"{symbol}={self._last_persisted_seq.get(symbol, 'none')}")
-            self._notifier.submit_alert(
-                AlertEvent(
-                    created_at=datetime.now(tz=timezone.utc),
-                    code="PERSIST_STALL",
-                    key=f"PERSIST_STALL:{trading_day}:{','.join(self._config.symbols)}",
-                    fingerprint=f"PERSIST_STALL:{trading_day}:{','.join(self._config.symbols)}",
-                    trading_day=trading_day,
-                    severity=NotifySeverity.ALERT.value,
-                    headline="異常：持久化停滯，疑似停止寫入",
-                    impact="新資料可能未落庫，延遲與積壓將持續上升",
-                    summary_lines=[
-                        f"stall_sec={commit_age_sec:.1f}/{self._config.watchdog_stall_sec}",
-                        f"queue={queue_size}/{queue_maxsize} max_seq_lag={self._max_seq_lag()} persisted_per_min={persisted_rows_per_min}",
-                        f"last_persisted_seq: {' '.join(persisted_parts)}",
-                    ],
-                    suggestions=[
-                        "journalctl -u hk-tick-collector -n 200 --no-pager",
-                        f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*) from ticks;'",
-                    ],
-                )
+        if self._notifier is not None and event is not None:
+            logger.error(
+                "alert_event code=%s eid=%s sid=%s reason=%s",
+                event.code,
+                event.eid,
+                event.sid or "none",
+                reason,
             )
+            self._notifier.submit_alert(event)
         raise SystemExit(WATCHDOG_EXIT_CODE)
 
     def _dump_threads_for_watchdog(

@@ -275,7 +275,7 @@ class SQLiteTickWriter:
             latency_ms = int((time.perf_counter() - start) * 1000)
             inserted = conn.total_changes - before
             ignored = max(0, len(rows_list) - inserted)
-            logger.info(
+            logger.debug(
                 "persist_ticks db_path=%s batch=%s inserted=%s ignored=%s commit_latency_ms=%s checkpoint=%s",
                 db_path,
                 len(rows_list),

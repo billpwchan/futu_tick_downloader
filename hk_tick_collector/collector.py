@@ -86,6 +86,12 @@ class AsyncTickCollector:
         self._busy_locked_count = 0
         self._busy_backoff_count = 0
         self._last_backoff_sec = 0.0
+        self._persist_summary_interval_sec = 5.0
+        self._persist_summary_started_at = time.monotonic()
+        self._persist_summary_inserted = 0
+        self._persist_summary_ignored = 0
+        self._persist_summary_batches = 0
+        self._persist_summary_commit_latencies_ms: list[int] = []
 
     async def start(self) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -319,6 +325,7 @@ class AsyncTickCollector:
 
             if buffer:
                 self._flush_buffer(writer, buffer, worker_stop_event=worker_stop_event)
+            self._emit_persist_summary(force=True)
         except _WorkerRestartRequested:
             self._requeue_rows(buffer)
             logger.warning(
@@ -411,6 +418,7 @@ class AsyncTickCollector:
                     self._last_commit_monotonic = now
                     self._last_commit_rows = persist_result.inserted
                     self._last_progress_at = now
+                self._accumulate_persist_summary(persist_result, now=now)
                 self._notify_observer(rows, persist_result)
                 return
             except Exception as exc:
@@ -535,6 +543,52 @@ class AsyncTickCollector:
             prev_dequeued = dequeued
             prev_committed = committed
             prev_at = now
+
+    def _accumulate_persist_summary(self, result: PersistResult, *, now: float) -> None:
+        self._persist_summary_inserted += max(0, int(result.inserted))
+        self._persist_summary_ignored += max(0, int(result.ignored))
+        self._persist_summary_batches += 1
+        self._persist_summary_commit_latencies_ms.append(max(0, int(result.commit_latency_ms)))
+        self._emit_persist_summary(force=False, now=now)
+
+    def _emit_persist_summary(self, *, force: bool, now: float | None = None) -> None:
+        if self._persist_summary_batches <= 0:
+            return
+        current = time.monotonic() if now is None else now
+        elapsed = max(0.001, current - self._persist_summary_started_at)
+        if not force and elapsed < self._persist_summary_interval_sec:
+            return
+
+        inserted_per_min = int((self._persist_summary_inserted / elapsed) * 60.0)
+        ignored_per_min = int((self._persist_summary_ignored / elapsed) * 60.0)
+        p50 = self._percentile(self._persist_summary_commit_latencies_ms, 0.50)
+        p95 = self._percentile(self._persist_summary_commit_latencies_ms, 0.95)
+        logger.info(
+            "persist_summary window_sec=%.1f inserted_per_min=%s ignored_per_min=%s "
+            "commit_latency_ms_p50=%s commit_latency_ms_p95=%s queue=%s/%s batches=%s",
+            elapsed,
+            inserted_per_min,
+            ignored_per_min,
+            p50,
+            p95,
+            self._queue.qsize(),
+            self._queue.maxsize,
+            self._persist_summary_batches,
+        )
+
+        self._persist_summary_started_at = current
+        self._persist_summary_inserted = 0
+        self._persist_summary_ignored = 0
+        self._persist_summary_batches = 0
+        self._persist_summary_commit_latencies_ms.clear()
+
+    @staticmethod
+    def _percentile(values: list[int], ratio: float) -> int:
+        if not values:
+            return 0
+        ordered = sorted(values)
+        idx = int((len(ordered) - 1) * max(0.0, min(1.0, ratio)))
+        return int(ordered[idx])
 
     def _normalize_persist_result(
         self,
