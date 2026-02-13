@@ -192,8 +192,8 @@ class FutuQuoteClient:
                                 f"host={self._config.futu_host}:{self._config.futu_port}",
                             ],
                             suggestions=[
-                                "journalctl -u hk-tick-collector -n 120 --no-pager",
-                                "systemctl status futu-opend --no-pager",
+                                'scripts/hk-tickctl logs --ops --since "20 minutes ago"',
+                                "sudo systemctl status futu-opend --no-pager",
                             ],
                             sid=self._last_snapshot_sid,
                         )
@@ -411,20 +411,6 @@ class FutuQuoteClient:
                     max_ts_utc,
                 )
 
-            parts = []
-            for symbol in self._config.symbols:
-                last_tick = self._last_tick_seen_at.get(symbol)
-                age = None if last_tick is None else round(now - last_tick, 1)
-                last_seen = self._last_seen_seq.get(symbol)
-                last_accepted = self._last_accepted_seq.get(symbol)
-                last_persisted = self._last_persisted_seq.get(symbol)
-                parts.append(
-                    f"{symbol}:last_seen_seq={last_seen if last_seen is not None else 'none'}"
-                    f" last_accepted_seq={last_accepted if last_accepted is not None else 'none'}"
-                    f" last_persisted_seq={last_persisted if last_persisted is not None else 'none'}"
-                    f" last_tick_age_sec={age if age is not None else 'none'}"
-                )
-
             snapshot = await self._build_health_snapshot(
                 now=now,
                 queue_size=queue_size,
@@ -463,8 +449,9 @@ class FutuQuoteClient:
                 self._dropped_queue_full_since_report,
                 self._dropped_duplicate_since_report,
                 self._dropped_filter_since_report,
-                " | ".join(parts),
+                len(snapshot.symbols),
             )
+            self._emit_health_symbols_rollup(now=now, snapshot=snapshot)
 
             runtime = self._collector.snapshot_runtime_state()
             busy_backoff_count = int(runtime.get("busy_backoff_count", 0))
@@ -490,8 +477,8 @@ class FutuQuoteClient:
                         f"lag_sec={f'{drift_sec:.1f}' if drift_sec is not None else 'none'}",
                     ],
                     suggestions=[
-                        "journalctl -u hk-tick-collector -n 200 --no-pager",
-                        f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*), max(ts_ms) from ticks;'",
+                        'scripts/hk-tickctl logs --ops --since "20 minutes ago"',
+                        "scripts/hk-tickctl db stats",
                     ],
                     sid=snapshot.sid,
                 )
@@ -846,8 +833,8 @@ class FutuQuoteClient:
                     f"last_persisted_seq={' '.join(persisted_parts)}",
                 ],
                 suggestions=[
-                    "journalctl -u hk-tick-collector -n 200 --no-pager",
-                    f"sqlite3 {db_path_for_trading_day(self._config.data_root, trading_day)} 'select count(*), max(ts_ms) from ticks;'",
+                    'scripts/hk-tickctl logs --ops --since "20 minutes ago"',
+                    "scripts/hk-tickctl db stats",
                 ],
                 sid=snapshot_sid or self._last_snapshot_sid,
                 duration_sec=int(commit_age_sec),
@@ -949,6 +936,51 @@ class FutuQuoteClient:
             last_persisted = self._last_persisted_seq.get(symbol, 0)
             max_lag = max(max_lag, last_seen - last_persisted)
         return max_lag
+
+    def _emit_health_symbols_rollup(self, *, now: float, snapshot: HealthSnapshot) -> None:
+        stale_candidates: list[tuple[str, float]] = []
+        lag_candidates: list[tuple[str, int]] = []
+        ages: list[float] = []
+        for item in snapshot.symbols:
+            if item.last_tick_age_sec is not None:
+                age = max(0.0, float(item.last_tick_age_sec))
+                stale_candidates.append((item.symbol, age))
+                ages.append(age)
+            lag_candidates.append((item.symbol, max(0, int(item.max_seq_lag))))
+
+        top_stale = sorted(stale_candidates, key=lambda pair: pair[1], reverse=True)[:5]
+        top_lag = sorted(lag_candidates, key=lambda pair: pair[1], reverse=True)[:5]
+
+        p50_age = self._percentile_float(ages, 0.50)
+        p95_age = self._percentile_float(ages, 0.95)
+        logger.debug(
+            "health_symbols_rollup sid=%s now_monotonic=%.1f symbols=%s age_p50=%s age_p95=%s "
+            "top5_stale=%s top5_lag=%s",
+            snapshot.sid,
+            now,
+            len(snapshot.symbols),
+            f"{p50_age:.1f}" if p50_age is not None else "none",
+            f"{p95_age:.1f}" if p95_age is not None else "none",
+            self._format_rollup_pairs(top_stale, is_age=True),
+            self._format_rollup_pairs(top_lag, is_age=False),
+        )
+
+    @staticmethod
+    def _percentile_float(values: Sequence[float], percentile: float) -> float | None:
+        if not values:
+            return None
+        clipped = max(0.0, min(1.0, float(percentile)))
+        ordered = sorted(values)
+        index = int((len(ordered) - 1) * clipped)
+        return float(ordered[index])
+
+    @staticmethod
+    def _format_rollup_pairs(pairs: Sequence[tuple[str, float | int]], *, is_age: bool) -> str:
+        if not pairs:
+            return "none"
+        if is_age:
+            return ",".join(f"{symbol}({float(value):.1f}s)" for symbol, value in pairs)
+        return ",".join(f"{symbol}({int(value)})" for symbol, value in pairs)
 
     def _dedupe_baseline_seq(self, symbol: str) -> Optional[int]:
         return self._last_persisted_seq.get(symbol)

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 import sys
 import types
@@ -561,3 +562,44 @@ def test_reconnect_triggers_resubscribe_and_close():
         assert any(ctx.closed for ctx in contexts)
 
     asyncio.run(runner())
+
+
+def test_health_log_info_is_compact_and_debug_has_rollup(caplog):
+    async def runner() -> None:
+        caplog.set_level(logging.DEBUG)
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        collector._pipeline = {
+            "persisted_rows": 1200,
+            "ignored_rows": 10,
+            "queue_in_rows": 1400,
+            "queue_out_rows": 1300,
+            "db_commits": 22,
+        }
+        client = FutuQuoteClient(
+            build_config(),
+            collector,
+            loop,
+            initial_last_seq={"HK.00700": 5},
+        )
+
+        sleep_calls = {"count": 0}
+
+        async def fake_sleep(_: float) -> None:
+            sleep_calls["count"] += 1
+            if sleep_calls["count"] >= 2:
+                client._stop_event.set()
+
+        client._sleep_with_stop = fake_sleep  # type: ignore[assignment]
+        await client._health_loop()
+
+    asyncio.run(runner())
+    health_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("health ")
+    ]
+    assert health_lines
+    assert "symbols=1" in health_lines[0]
+    assert "HK.00700:last_seen_seq=" not in health_lines[0]
+    assert any("health_symbols_rollup" in record.getMessage() for record in caplog.records)
