@@ -15,8 +15,10 @@ from hk_tick_collector.notifiers.telegram import (
     AlertStateMachine,
     DedupeStore,
     HealthSnapshot,
+    MessageComposer,
     MessageRenderer,
     NotifySeverity,
+    RenderMode,
     SymbolSnapshot,
     TelegramNotifier,
     TelegramSendResult,
@@ -35,6 +37,7 @@ def _make_snapshot(
     push_rows_per_min: int = 1000,
     poll_accepted: int = 180,
     symbols: list[SymbolSnapshot] | None = None,
+    sid: str = "sid-a1b2c3d4",
 ) -> HealthSnapshot:
     default_symbols = [
         SymbolSnapshot(
@@ -70,6 +73,7 @@ def _make_snapshot(
         system_load1=0.12,
         system_rss_mb=88.6,
         system_disk_free_gb=123.4,
+        sid=sid,
     )
 
 
@@ -275,6 +279,182 @@ def test_renderer_recovered_and_daily_digest_templates():
     assert "恢復次數=3" in digest_rendered.text
 
 
+def test_message_composer_product_health_phases_are_compact():
+    composer = MessageComposer(parse_mode="HTML", default_render_mode=RenderMode.PRODUCT)
+    sm = AlertStateMachine(drift_warn_sec=120)
+    host = "collector-a"
+    instance = "node-1"
+
+    pre_open = _make_snapshot(created_at=datetime(2026, 2, 12, 1, 20, tzinfo=timezone.utc))
+    pre_open_assessment = sm.assess_health(pre_open)
+    pre_open_msg = composer.render_health(
+        snapshot=pre_open,
+        assessment=pre_open_assessment,
+        hostname=host,
+        instance_id=instance,
+        include_system_metrics=True,
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert len(pre_open_msg.text.splitlines()) <= 6
+    assert "結論：" in pre_open_msg.text
+    assert "KPI：" in pre_open_msg.text
+    assert "市況：開盤前" in pre_open_msg.text
+    assert "主機：collector-a / node-1" in pre_open_msg.text
+
+    open_snap = _make_snapshot(created_at=datetime(2026, 2, 12, 2, 10, tzinfo=timezone.utc))
+    open_assessment = sm.assess_health(open_snap)
+    open_msg = composer.render_health(
+        snapshot=open_snap,
+        assessment=open_assessment,
+        hostname=host,
+        instance_id=instance,
+        include_system_metrics=True,
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert len(open_msg.text.splitlines()) <= 6
+    assert "市況：盤中" in open_msg.text
+
+    lunch_snap = _make_snapshot(
+        created_at=datetime(2026, 2, 12, 4, 10, tzinfo=timezone.utc),
+        persisted_per_min=0,
+        queue_size=0,
+        drift_sec=800.0,
+    )
+    lunch_assessment = sm.assess_health(lunch_snap)
+    lunch_msg = composer.render_health(
+        snapshot=lunch_snap,
+        assessment=lunch_assessment,
+        hostname=host,
+        instance_id=instance,
+        include_system_metrics=True,
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert "市況：午休 (market idle, normal)" in lunch_msg.text
+
+    after_close = _make_snapshot(
+        created_at=datetime(2026, 2, 12, 10, 30, tzinfo=timezone.utc),
+        persisted_per_min=0,
+        queue_size=0,
+        drift_sec=24000.0,
+    )
+    after_close_assessment = sm.assess_health(after_close)
+    after_close_msg = composer.render_health(
+        snapshot=after_close,
+        assessment=after_close_assessment,
+        hostname=host,
+        instance_id=instance,
+        include_system_metrics=True,
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert "市況：收盤後 (market idle, normal)" in after_close_msg.text
+
+    holiday_symbols = [
+        SymbolSnapshot(
+            symbol=f"HK.{i:05d}",
+            last_tick_age_sec=1200.0 + i,
+            last_persisted_seq=i,
+            max_seq_lag=0,
+        )
+        for i in range(50)
+    ]
+    holiday_assessment = None
+    for _ in range(3):
+        holiday_assessment = sm.assess_health(
+            _make_snapshot(
+                created_at=datetime(2026, 2, 12, 2, 30, tzinfo=timezone.utc),
+                persisted_per_min=0,
+                push_rows_per_min=0,
+                poll_accepted=0,
+                queue_size=0,
+                symbols=holiday_symbols,
+            )
+        )
+    assert holiday_assessment is not None
+    holiday_msg = composer.render_health(
+        snapshot=_make_snapshot(
+            created_at=datetime(2026, 2, 12, 2, 30, tzinfo=timezone.utc),
+            persisted_per_min=0,
+            push_rows_per_min=0,
+            poll_accepted=0,
+            queue_size=0,
+            symbols=holiday_symbols,
+        ),
+        assessment=holiday_assessment,
+        hostname=host,
+        instance_id=instance,
+        include_system_metrics=True,
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert "市況：休市日" in holiday_msg.text
+    assert len(holiday_msg.text.splitlines()) <= 6
+
+
+def test_message_composer_product_alert_recovered_digest_are_compact():
+    composer = MessageComposer(parse_mode="HTML", default_render_mode=RenderMode.PRODUCT)
+    host = "collector-a"
+    instance = "node-1"
+    event = AlertEvent(
+        created_at=datetime(2026, 2, 12, 2, 10, tzinfo=timezone.utc),
+        code="PERSIST_STALL",
+        key="PERSIST_STALL",
+        fingerprint="PERSIST_STALL",
+        trading_day="20260212",
+        severity=NotifySeverity.ALERT.value,
+        summary_lines=["lag_sec=88.3", "persisted_per_min=0", "queue=420/1000"],
+        suggestions=["scripts/hk-tickctl logs --ops --since '20 minutes ago'"],
+        sid="sid-a1b2c3d4",
+        eid="eid-aabbccdd",
+    )
+    alert_msg = composer.render_alert(
+        event=event,
+        hostname=host,
+        instance_id=instance,
+        market_mode="open",
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert len(alert_msg.text.splitlines()) <= 6
+    assert "KPI：延遲=88.3s | 寫入=0/min | 佇列=420/1000" in alert_msg.text
+
+    recovered = composer.render_recovered(
+        event=AlertEvent(
+            created_at=datetime(2026, 2, 12, 2, 12, tzinfo=timezone.utc),
+            code="PERSIST_STALL",
+            key="PERSIST_STALL",
+            fingerprint="PERSIST_STALL",
+            trading_day="20260212",
+            severity=NotifySeverity.OK.value,
+            summary_lines=["lag_sec=1.0", "persisted_per_min=12000", "queue=0/1000"],
+            suggestions=[],
+            sid="sid-a1b2c3d4",
+            eid="eid-aabbccdd",
+        ),
+        hostname=host,
+        instance_id=instance,
+        market_mode="open",
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert len(recovered.text.splitlines()) <= 6
+    assert "已恢復正常" in recovered.text
+
+    digest = composer.render_daily_digest(
+        snapshot=_make_snapshot(),
+        digest=_DailyDigestState(
+            trading_day="20260212",
+            total_rows=1000000,
+            peak_rows_per_min=28000,
+            alert_count=2,
+            recovered_count=2,
+            db_rows=1100000,
+            db_path="/data/sqlite/HK/20260212.db",
+        ),
+        hostname=host,
+        instance_id=instance,
+        render_mode=RenderMode.PRODUCT,
+    )
+    assert len(digest.text.splitlines()) <= 6
+    assert "KPI：總寫入=1000000 | 峰值吞吐=28000/min | 告警/恢復=2/2" in digest.text
+
+
 def test_truncate_message_respects_limit():
     renderer = MessageRenderer(parse_mode="HTML")
     event = AlertEvent(
@@ -399,7 +579,7 @@ def test_notifier_health_and_alert_cadence_with_recovered():
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 2
-        assert "persisted=" in calls[-1]["text"]
+        assert "寫入吞吐=" in calls[-1]["text"]
 
         # WARN should send immediately on state change
         monotonic_now["value"] += 5
@@ -413,7 +593,7 @@ def test_notifier_health_and_alert_cadence_with_recovered():
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 3
-        assert "🟡 HK Tick Collector 注意" in calls[-1]["text"]
+        assert "🟡 HK Tick 健康摘要" in calls[-1]["text"]
 
         # WARN cadence: <10m suppressed
         monotonic_now["value"] += WARN_CADENCE_SEC - 5
@@ -457,7 +637,7 @@ def test_notifier_health_and_alert_cadence_with_recovered():
         notifier.submit_alert(event)
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 5
-        assert "🔴 異常" in calls[-1]["text"]
+        assert "🔴 HK Tick 警報" in calls[-1]["text"]
 
         # <3m suppressed
         monotonic_now["value"] += ALERT_CADENCE_SEC - 20
@@ -480,14 +660,14 @@ def test_notifier_health_and_alert_cadence_with_recovered():
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 7
-        assert "✅ 已恢復" in calls[-1]["text"]
+        assert "✅ HK Tick 已恢復" in calls[-1]["text"]
 
         await notifier.stop()
 
     asyncio.run(runner())
 
 
-def test_notifier_after_hours_ok_cadence_and_mode_transition():
+def test_notifier_after_hours_ok_once_and_mode_transition():
     async def runner() -> None:
         calls = []
 
@@ -532,7 +712,7 @@ def test_notifier_after_hours_ok_cadence_and_mode_transition():
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 3  # HEALTH + DAILY_DIGEST
-        assert "距收盤=" in calls[-2]["text"]
+        assert "market idle, normal" in calls[-2]["text"]
 
         # after-hours cadence not reached yet
         monotonic_now["value"] += AFTER_HOURS_CADENCE_SEC - 1
@@ -544,7 +724,7 @@ def test_notifier_after_hours_ok_cadence_and_mode_transition():
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 3
 
-        # after-hours cadence reached
+        # after-hours default policy is once-per-phase
         monotonic_now["value"] += 2
         notifier.submit_health(
             _make_snapshot(
@@ -552,8 +732,7 @@ def test_notifier_after_hours_ok_cadence_and_mode_transition():
             )
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
-        assert len(calls) == 4
-        assert "距收盤=" in calls[-1]["text"]
+        assert len(calls) == 3
 
         await notifier.stop()
 
@@ -632,7 +811,7 @@ def test_state_machine_switches_to_holiday_closed_and_back_to_open():
 
 def test_preopen_open_afterhours_constants():
     assert PREOPEN_CADENCE_SEC == 1800
-    assert OPEN_CADENCE_SEC == 600
+    assert OPEN_CADENCE_SEC == 900
     assert AFTER_HOURS_CADENCE_SEC == 3600
 
 
@@ -709,7 +888,7 @@ def test_notifier_market_mode_change_to_holiday_closed_emits_immediately():
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 1
-        assert "狀態=盤中" in calls[-1]["text"]
+        assert "市況：盤中" in calls[-1]["text"]
 
         # still open mode candidate; suppressed by cadence
         monotonic_now["value"] += 60
@@ -742,7 +921,7 @@ def test_notifier_market_mode_change_to_holiday_closed_emits_immediately():
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 2
-        assert "狀態=休市日" in calls[-1]["text"]
+        assert "市況：休市日" in calls[-1]["text"]
 
         # traffic returns, mode switches back to open and emits immediately
         monotonic_now["value"] += 30
@@ -759,8 +938,113 @@ def test_notifier_market_mode_change_to_holiday_closed_emits_immediately():
         )
         await asyncio.wait_for(notifier._queue.join(), timeout=1)
         assert len(calls) == 3
-        assert "狀態=盤中" in calls[-1]["text"]
+        assert "市況：盤中" in calls[-1]["text"]
 
+        await notifier.stop()
+
+    asyncio.run(runner())
+
+
+def test_notifier_routes_health_and_alert_to_different_threads():
+    async def runner() -> None:
+        calls = []
+
+        def fake_sender(payload):
+            calls.append(dict(payload))
+            return TelegramSendResult(ok=True, status_code=200)
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            thread_health_id=101,
+            thread_ops_id=202,
+            parse_mode="HTML",
+            sender=fake_sender,
+            enable_callbacks=False,
+        )
+        await notifier.start()
+        open_time = datetime(2026, 2, 12, 2, 0, tzinfo=timezone.utc)
+
+        notifier.submit_health(_make_snapshot(created_at=open_time))
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert calls[-1].get("message_thread_id") == 101
+
+        event = AlertEvent(
+            created_at=open_time,
+            code="DISCONNECT",
+            key="DISCONNECT",
+            fingerprint="DISCONNECT",
+            trading_day="20260212",
+            severity=NotifySeverity.ALERT.value,
+            summary_lines=["error_type=ConnectionError"],
+            suggestions=["scripts/hk-tickctl logs --ops --since '20 minutes ago'"],
+            sid="sid-a1b2c3d4",
+            eid="eid-aabbccdd",
+        )
+        notifier.submit_alert(event)
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert calls[-1].get("message_thread_id") == 202
+
+        notifier.resolve_alert(
+            code="DISCONNECT",
+            fingerprint="DISCONNECT",
+            trading_day="20260212",
+            summary_lines=["queue=0/1000"],
+            sid="sid-a1b2c3d4",
+            eid="eid-aabbccdd",
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert calls[-1].get("message_thread_id") == 202
+        await notifier.stop()
+
+    asyncio.run(runner())
+
+
+def test_notifier_callback_buttons_send_ops_runbook_db_in_same_thread():
+    async def runner() -> None:
+        calls = []
+
+        def fake_sender(payload):
+            calls.append(dict(payload))
+            return TelegramSendResult(ok=True, status_code=200)
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            parse_mode="HTML",
+            sender=fake_sender,
+            enable_callbacks=False,
+        )
+        await notifier.start()
+        notifier._client.answer_callback_query = lambda **_: None  # type: ignore[method-assign]
+        open_time = datetime(2026, 2, 12, 2, 0, tzinfo=timezone.utc)
+        snapshot = _make_snapshot(created_at=open_time, sid="sid-11223344")
+        notifier.submit_health(snapshot)
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+
+        callback_message = {"chat": {"id": -100123}, "message_thread_id": 555}
+        await notifier._handle_callback(  # type: ignore[attr-defined]
+            {"id": "cb-1", "data": "d:s:sid-11223344", "message": callback_message}
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert calls[-1].get("message_thread_id") == 555
+        assert "top5_stale=" in calls[-1]["text"]
+
+        await notifier._handle_callback(  # type: ignore[attr-defined]
+            {"id": "cb-2", "data": "r:PERSIST_STALL", "message": callback_message}
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert calls[-1].get("message_thread_id") == 555
+        assert "Runbook" in calls[-1]["text"]
+
+        await notifier._handle_callback(  # type: ignore[attr-defined]
+            {"id": "cb-3", "data": "b:sid-11223344", "message": callback_message}
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert calls[-1].get("message_thread_id") == 555
+        assert "DB 摘要" in calls[-1]["text"]
         await notifier.stop()
 
     asyncio.run(runner())

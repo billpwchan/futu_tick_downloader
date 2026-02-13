@@ -40,7 +40,7 @@ FUTU_SYMBOLS=HK.00700,HK.00981
 DATA_ROOT=/data/sqlite/HK
 
 TG_ENABLED=1
-TG_BOT_TOKEN=<secret>
+TG_TOKEN=<secret>
 TG_CHAT_ID=-100xxxxxxxxxx
 INSTANCE_ID=hk-prod-a1
 ```
@@ -56,6 +56,7 @@ sudo systemctl status hk-tick-collector --no-pager
 建議驗證：
 
 ```bash
+scripts/hk-tickctl status
 scripts/hk-tickctl logs --since "10 minutes ago"
 scripts/hk-tickctl db stats
 ```
@@ -90,6 +91,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart hk-tick-collector
 scripts/hk-tickctl logs --ops --since "15 minutes ago"
 scripts/hk-tickctl db symbols --minutes 10
+scripts/hk-tickctl db symbol HK.00700 --last 20
 ```
 
 ## 7. 快速回滾
@@ -98,4 +100,3 @@ scripts/hk-tickctl db symbols --minutes 10
 2. 重新安裝套件
 3. `sudo systemctl restart hk-tick-collector`
 4. 若資料異常，使用 `.snapshot.db` 先做只讀比對，不要直接覆蓋線上 DB
-

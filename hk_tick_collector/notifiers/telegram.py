@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import socket
 import time
@@ -24,12 +25,12 @@ from hk_tick_collector import __version__ as PACKAGE_VERSION
 logger = logging.getLogger(__name__)
 
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
-NOTIFY_SCHEMA_VERSION = "v2.1"
+NOTIFY_SCHEMA_VERSION = "v2.2"
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 WARN_CADENCE_SEC = 600
 ALERT_CADENCE_SEC = 180
 PREOPEN_CADENCE_SEC = 1800
-OPEN_CADENCE_SEC = 600
+OPEN_CADENCE_SEC = 900
 LUNCH_CADENCE_SEC = 1800
 AFTER_HOURS_CADENCE_SEC = 3600
 HOLIDAY_CLOSED_CYCLES = 3
@@ -39,6 +40,13 @@ OPEN_STALE_SYMBOL_AGE_SEC = 10.0
 OFFHOURS_STALE_SYMBOL_AGE_SEC = 120.0
 OPEN_STALE_BUCKETS = (10.0, 30.0, 60.0)
 OFFHOURS_STALE_BUCKETS = (120.0, 300.0, 900.0)
+_CALLBACK_MAX_BYTES = 64
+_DEFAULT_RENDER_MODE = "product"
+
+
+class RenderMode(str, Enum):
+    PRODUCT = "product"
+    OPS = "ops"
 
 
 def _make_short_id(prefix: str) -> str:
@@ -121,6 +129,7 @@ class TelegramSendResult:
 class RenderedMessage:
     text: str
     parse_mode: str = "HTML"
+    reply_markup: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +149,8 @@ class _OutboundMessage:
     fingerprint: str
     sid: str | None
     eid: str | None
+    thread_id: int | None = None
+    chat_id: str | None = None
 
 
 @dataclass
@@ -206,6 +217,15 @@ def _severity_from(value: str | NotifySeverity) -> NotifySeverity:
 
 def _severity_rank(value: str | NotifySeverity) -> int:
     return _SEVERITY_RANK[_severity_from(value)]
+
+
+def _normalize_render_mode(value: str | RenderMode | None) -> RenderMode:
+    if isinstance(value, RenderMode):
+        return value
+    text = str(value or _DEFAULT_RENDER_MODE).strip().lower()
+    if text == RenderMode.OPS.value:
+        return RenderMode.OPS
+    return RenderMode.PRODUCT
 
 
 def _format_uptime(seconds: int) -> str:
@@ -939,6 +959,334 @@ class MessageRenderer:
         return "目前為退化狀態，建議持續觀察"
 
 
+class MessageComposer:
+    def __init__(
+        self,
+        *,
+        parse_mode: str = "HTML",
+        default_render_mode: str | RenderMode = _DEFAULT_RENDER_MODE,
+    ) -> None:
+        self._ops_renderer = MessageRenderer(parse_mode=parse_mode)
+        self._parse_mode = self._ops_renderer.parse_mode
+        self._default_render_mode = _normalize_render_mode(default_render_mode)
+
+    @property
+    def parse_mode(self) -> str:
+        return self._parse_mode
+
+    @property
+    def default_render_mode(self) -> RenderMode:
+        return self._default_render_mode
+
+    def render_health(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        assessment: HealthAssessment,
+        hostname: str,
+        instance_id: str | None,
+        include_system_metrics: bool,
+        digest: _DailyDigestState | None = None,
+        render_mode: str | RenderMode | None = None,
+    ) -> RenderedMessage:
+        mode = _normalize_render_mode(render_mode or self._default_render_mode)
+        if mode == RenderMode.OPS:
+            return self._ops_renderer.render_health(
+                snapshot=snapshot,
+                assessment=assessment,
+                hostname=hostname,
+                instance_id=instance_id,
+                include_system_metrics=include_system_metrics,
+                digest=digest,
+            )
+        return self._render_health_product(
+            snapshot=snapshot,
+            assessment=assessment,
+            hostname=hostname,
+            instance_id=instance_id,
+        )
+
+    def render_alert(
+        self,
+        *,
+        event: AlertEvent,
+        hostname: str,
+        instance_id: str | None,
+        market_mode: str,
+        render_mode: str | RenderMode | None = None,
+    ) -> RenderedMessage:
+        mode = _normalize_render_mode(render_mode or self._default_render_mode)
+        if mode == RenderMode.OPS:
+            return self._ops_renderer.render_alert(
+                event=event,
+                hostname=hostname,
+                instance_id=instance_id,
+                market_mode=market_mode,
+            )
+        return self._render_alert_product(
+            event=event,
+            hostname=hostname,
+            instance_id=instance_id,
+            market_mode=market_mode,
+        )
+
+    def render_recovered(
+        self,
+        *,
+        event: AlertEvent,
+        hostname: str,
+        instance_id: str | None,
+        market_mode: str,
+        render_mode: str | RenderMode | None = None,
+    ) -> RenderedMessage:
+        mode = _normalize_render_mode(render_mode or self._default_render_mode)
+        if mode == RenderMode.OPS:
+            return self._ops_renderer.render_recovered(
+                event=event,
+                hostname=hostname,
+                instance_id=instance_id,
+            )
+        return self._render_recovered_product(
+            event=event,
+            hostname=hostname,
+            instance_id=instance_id,
+            market_mode=market_mode,
+        )
+
+    def render_daily_digest(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        digest: _DailyDigestState,
+        hostname: str,
+        instance_id: str | None,
+        render_mode: str | RenderMode | None = None,
+    ) -> RenderedMessage:
+        mode = _normalize_render_mode(render_mode or self._default_render_mode)
+        if mode == RenderMode.OPS:
+            return self._ops_renderer.render_daily_digest(
+                snapshot=snapshot,
+                digest=digest,
+                hostname=hostname,
+                instance_id=instance_id,
+            )
+        return self._render_daily_digest_product(
+            snapshot=snapshot,
+            digest=digest,
+            hostname=hostname,
+            instance_id=instance_id,
+        )
+
+    def render_db_summary(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        hostname: str,
+        instance_id: str | None,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        lines = [
+            "<b>🗄️ DB 摘要</b>",
+            f"結論：{escape(snapshot.trading_day)} 資料庫狀態",
+            (
+                "指標："
+                f"rows={snapshot.db_rows} | "
+                f"queue={snapshot.queue_size}/{snapshot.queue_maxsize} | "
+                f"last_update_at={escape(snapshot.db_max_ts_utc)}"
+            ),
+            f"db：{escape(str(snapshot.db_path))}",
+            f"主機：{escape(host_text)}",
+            f"sid={escape(snapshot.sid)}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
+
+    def render_runbook(
+        self,
+        *,
+        code: str,
+        market_mode: str,
+        hostname: str,
+        instance_id: str | None,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        normalized = code.strip().upper() or "HEALTH"
+        title = f"📘 {normalized} Runbook"
+        steps = self._runbook_steps(normalized)
+        lines = [
+            f"<b>{escape(title)}</b>",
+            f"結論：{escape(self._runbook_conclusion(normalized))}",
+            f"市況：{escape(_market_mode_label(market_mode))}",
+            f"步驟：{escape(steps[0])}；{escape(steps[1])}",
+            f"指令：{escape(steps[2])}",
+            f"主機：{escape(host_text)}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
+
+    def _render_health_product(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        assessment: HealthAssessment,
+        hostname: str,
+        instance_id: str | None,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        lag_text = f"{_format_float(abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None)}s"
+        throughput_text = f"{max(0, int(snapshot.persisted_rows_per_min))}/min"
+        queue_text = f"{snapshot.queue_size}/{snapshot.queue_maxsize}"
+        icon = "🟢" if assessment.severity == NotifySeverity.OK else "🟡"
+        phase_text = _market_mode_label(assessment.market_mode)
+        if assessment.severity == NotifySeverity.OK and assessment.market_mode in {
+            "lunch-break",
+            "after-hours",
+            "holiday-closed",
+        }:
+            phase_text = f"{phase_text} (market idle, normal)"
+
+        lines = [
+            f"<b>{icon} HK Tick 健康摘要</b>",
+            f"結論：{escape(assessment.conclusion)}",
+            f"KPI：新鮮度延遲={escape(lag_text)} | 寫入吞吐={throughput_text} | 佇列={queue_text}",
+            f"市況：{escape(phase_text)}",
+            f"主機：{escape(host_text)}",
+            f"sid={escape(snapshot.sid)}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
+
+    def _render_alert_product(
+        self,
+        *,
+        event: AlertEvent,
+        hostname: str,
+        instance_id: str | None,
+        market_mode: str,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        severity = _severity_from(event.severity)
+        icon = "🔴" if severity == NotifySeverity.ALERT else "🟡"
+        title = "警報" if severity == NotifySeverity.ALERT else "注意"
+        headline = event.headline or self._ops_renderer._default_alert_headline(event.code, severity)
+        kpis = self._extract_event_kpis(event.summary_lines)
+        lines = [
+            f"<b>{icon} HK Tick {title}</b>",
+            f"結論：{escape(headline)}",
+            f"KPI：{escape(' | '.join(kpis))}",
+            f"市況：{escape(_market_mode_label(market_mode))}",
+            f"主機：{escape(host_text)}",
+            f"eid={escape(event.eid)} sid={escape(event.sid or 'n/a')}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
+
+    def _render_recovered_product(
+        self,
+        *,
+        event: AlertEvent,
+        hostname: str,
+        instance_id: str | None,
+        market_mode: str,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        kpis = self._extract_event_kpis(event.summary_lines)
+        lines = [
+            "<b>✅ HK Tick 已恢復</b>",
+            f"結論：{escape(event.code.upper())} 已恢復正常",
+            f"KPI：{escape(' | '.join(kpis))}",
+            f"市況：{escape(_market_mode_label(market_mode))}",
+            f"主機：{escape(host_text)}",
+            f"eid={escape(event.eid)} sid={escape(event.sid or 'n/a')}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
+
+    def _render_daily_digest_product(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        digest: _DailyDigestState,
+        hostname: str,
+        instance_id: str | None,
+    ) -> RenderedMessage:
+        host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
+        lines = [
+            "<b>📊 HK Tick 日報</b>",
+            f"結論：{escape(digest.trading_day)} 收盤摘要",
+            (
+                "KPI："
+                f"總寫入={digest.total_rows} | "
+                f"峰值吞吐={digest.peak_rows_per_min}/min | "
+                f"告警/恢復={digest.alert_count}/{digest.recovered_count}"
+            ),
+            "市況：收盤後 (market idle, normal)",
+            f"主機：{escape(host_text)}",
+            f"sid={escape(snapshot.sid)}",
+        ]
+        return RenderedMessage(text="\n".join(lines), parse_mode=self._parse_mode)
+
+    def _extract_event_kpis(self, summary_lines: Sequence[str]) -> list[str]:
+        queue: str | None = None
+        lag: str | None = None
+        persist: str | None = None
+        for raw in summary_lines:
+            text = raw.strip()
+            if not queue:
+                matched = re.search(r"queue[=:]([0-9]+/[0-9]+)", text)
+                if matched:
+                    queue = f"佇列={matched.group(1)}"
+            if not lag:
+                matched = re.search(r"(lag|lag_sec|drift|drift_sec)[=:]([0-9.]+)", text)
+                if matched:
+                    lag = f"延遲={matched.group(2)}s"
+            if not persist:
+                matched = re.search(r"(persisted_per_min|persist|min|write)[=:]([0-9.]+)", text)
+                if matched:
+                    persist = f"寫入={matched.group(2)}/min"
+        parts = [item for item in [lag, persist, queue] if item]
+        if len(parts) >= 3:
+            return parts[:3]
+        fallback = [line.strip() for line in summary_lines if line.strip()]
+        for item in fallback:
+            if len(parts) >= 3:
+                break
+            if item not in parts:
+                parts.append(item[:56])
+        while len(parts) < 3:
+            parts.append("n/a")
+        return parts[:3]
+
+    def _runbook_conclusion(self, code: str) -> str:
+        if code == "PERSIST_STALL":
+            return "寫入可能停滯，需先確認 queue 與 DB 最新時間戳"
+        if code == "SQLITE_BUSY":
+            return "SQLite 鎖競爭升高，需確認是否有並行寫入"
+        if code == "DISCONNECT":
+            return "與 OpenD 連線中斷，先確認 OpenD 服務狀態"
+        return "請先確認最新 health 與告警事件是否持續"
+
+    def _runbook_steps(self, code: str) -> list[str]:
+        if code == "PERSIST_STALL":
+            return [
+                "先看最近 20 分鐘告警與 persist 指標",
+                "再確認 DB max(ts_ms) 是否持續前進",
+                'scripts/hk-tickctl logs --ops --since "20 minutes ago"; scripts/hk-tickctl db stats; sudo systemctl status hk-tick-collector --no-pager',
+            ]
+        if code == "SQLITE_BUSY":
+            return [
+                "先檢查 busy backoff 是否持續增加",
+                "再確認 queue 與寫入吞吐是否惡化",
+                'scripts/hk-tickctl logs --ops --since "20 minutes ago"; scripts/hk-tickctl db stats; lsof /data/sqlite/HK/*.db',
+            ]
+        if code == "DISCONNECT":
+            return [
+                "先確認 OpenD 與 collector service 狀態",
+                "觀察重連後是否出現已恢復訊息",
+                'sudo systemctl status futu-opend --no-pager; scripts/hk-tickctl logs --ops --since "20 minutes ago"; sudo systemctl status hk-tick-collector --no-pager',
+            ]
+        return [
+            "先確認是否為暫時性波動",
+            "若持續超過 10 分鐘再執行恢復動作",
+            'scripts/hk-tickctl status; scripts/hk-tickctl logs --ops --since "20 minutes ago"; scripts/hk-tickctl db stats',
+        ]
+
+
 class TelegramClient:
     def __init__(
         self,
@@ -963,6 +1311,7 @@ class TelegramClient:
         text: str,
         parse_mode: str,
         thread_id: int | None,
+        reply_markup: dict[str, Any] | None = None,
     ) -> TelegramSendResult:
         payload: Dict[str, str | int] = {
             "chat_id": chat_id,
@@ -973,7 +1322,44 @@ class TelegramClient:
             payload["parse_mode"] = parse_mode
         if thread_id is not None:
             payload["message_thread_id"] = int(thread_id)
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=True)
         return self._sender(payload)
+
+    def answer_callback_query(
+        self,
+        *,
+        callback_query_id: str,
+        text: str | None = None,
+    ) -> None:
+        payload: Dict[str, str | int] = {
+            "callback_query_id": callback_query_id,
+            "cache_time": 0,
+        }
+        if text:
+            payload["text"] = text
+        self._post_json(endpoint="answerCallbackQuery", payload=payload)
+
+    def get_updates(
+        self,
+        *,
+        offset: int,
+        timeout_sec: int = 15,
+    ) -> list[dict[str, Any]]:
+        payload: Dict[str, str | int] = {
+            "offset": int(offset),
+            "timeout": max(1, int(timeout_sec)),
+            "allowed_updates": json.dumps(["callback_query"]),
+        }
+        data = self._post_json(endpoint="getUpdates", payload=payload)
+        result = data.get("result")
+        if not isinstance(result, list):
+            return []
+        updates: list[dict[str, Any]] = []
+        for item in result:
+            if isinstance(item, dict):
+                updates.append(item)
+        return updates
 
     def _send_via_http(self, payload: Dict[str, str | int]) -> TelegramSendResult:
         url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
@@ -999,6 +1385,21 @@ class TelegramClient:
                 status_code=0,
                 error=f"{type(exc).__name__}: {self._sanitize_text(str(exc))}",
             )
+
+    def _post_json(self, *, endpoint: str, payload: Dict[str, str | int]) -> dict[str, Any]:
+        url = f"https://api.telegram.org/bot{self._bot_token}/{endpoint}"
+        encoded = urllib.parse.urlencode(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=encoded, method="POST")
+        request.add_header("Content-Type", "application/x-www-form-urlencoded")
+        try:
+            with urllib.request.urlopen(request, timeout=self._request_timeout_sec) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                parsed = json.loads(body) if body else {}
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception:
+            logger.debug("telegram_client_post_json_failed endpoint=%s", endpoint, exc_info=True)
+        return {}
 
     def _parse_send_response(self, status_code: int, body: str) -> TelegramSendResult:
         payload: Dict[str, Any] = {}
@@ -1053,10 +1454,16 @@ class TelegramNotifier:
         bot_token: str,
         chat_id: str,
         thread_id: int | None = None,
+        thread_health_id: int | None = None,
+        thread_ops_id: int | None = None,
         parse_mode: str = "HTML",
+        default_render_mode: str | RenderMode = _DEFAULT_RENDER_MODE,
         health_interval_sec: int | None = None,
         health_trading_interval_sec: int | None = None,
         health_offhours_interval_sec: int | None = None,
+        health_lunch_once: bool = True,
+        health_after_close_once: bool = True,
+        health_holiday_mode: str = "daily",
         digest_interval_sec: int | None = None,
         alert_cooldown_sec: int = 600,
         alert_escalation_steps: Sequence[int] | None = None,
@@ -1073,10 +1480,14 @@ class TelegramNotifier:
         sender: Optional[Callable[[Dict[str, str | int]], TelegramSendResult]] = None,
         now_monotonic: Callable[[], float] = time.monotonic,
         sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+        enable_callbacks: bool = True,
     ) -> None:
         self._enabled = bool(enabled)
         self._chat_id = chat_id.strip()
         self._thread_id = thread_id
+        self._thread_health_id = thread_health_id
+        self._thread_ops_id = thread_ops_id
+        self._default_render_mode = _normalize_render_mode(default_render_mode)
         self._include_system_metrics = bool(include_system_metrics)
         self._instance_id = instance_id.strip() if instance_id else None
         self._alert_cooldown_sec = max(30, int(alert_cooldown_sec))
@@ -1084,19 +1495,24 @@ class TelegramNotifier:
         self._max_retries = max(1, int(max_retries))
         self._now_monotonic = now_monotonic
         self._sleep = sleep or asyncio.sleep
+        self._enable_callbacks = bool(enable_callbacks and sender is None)
+        self._health_lunch_once = bool(health_lunch_once)
+        self._health_after_close_once = bool(health_after_close_once)
+        holiday_mode_text = health_holiday_mode.strip().lower()
+        self._health_holiday_mode = (
+            "disabled" if holiday_mode_text == "disabled" else "daily"
+        )
 
         base_interval = health_interval_sec
         if base_interval is None:
             base_interval = digest_interval_sec if digest_interval_sec is not None else 600
         self._health_interval_sec = max(30, int(base_interval))
-        self._health_trading_interval_sec = max(
-            30,
-            int(
-                health_trading_interval_sec
-                if health_trading_interval_sec is not None
-                else self._health_interval_sec
-            ),
+        trading_interval = int(
+            health_trading_interval_sec
+            if health_trading_interval_sec is not None
+            else self._health_interval_sec
         )
+        self._health_trading_interval_sec = min(1800, max(900, trading_interval))
         self._health_offhours_interval_sec = max(
             30,
             int(
@@ -1111,7 +1527,10 @@ class TelegramNotifier:
             request_timeout_sec=request_timeout_sec,
             sender=sender,
         )
-        self._renderer = MessageRenderer(parse_mode=parse_mode)
+        self._composer = MessageComposer(
+            parse_mode=parse_mode,
+            default_render_mode=self._default_render_mode,
+        )
         self._state_machine = AlertStateMachine(drift_warn_sec=drift_warn_sec)
         self._dedupe = DedupeStore()
         self._hostname = socket.gethostname()
@@ -1133,12 +1552,19 @@ class TelegramNotifier:
         self._digest_drift_threshold_sec = max(1.0, float(digest_drift_threshold_sec))
 
         self._worker_task: asyncio.Task | None = None
+        self._callback_task: asyncio.Task | None = None
+        self._callback_offset = 0
         self._last_health_snapshot: HealthSnapshot | None = None
         self._last_health_severity: NotifySeverity | None = None
         self._last_health_market_mode: str | None = None
         self._last_health_sent_at: float | None = None
         self._daily_digest_sent: set[str] = set()
         self._digest_state: _DailyDigestState | None = None
+        self._phase_once_sent: set[str] = set()
+        self._cached_snapshots: Dict[str, tuple[HealthSnapshot, HealthAssessment]] = {}
+        self._cached_snapshot_order: Deque[str] = deque()
+        self._cached_events: Dict[str, AlertEvent] = {}
+        self._cached_event_order: Deque[str] = deque()
 
         self._active = self._enabled and bool(self._chat_id) and bool(bot_token.strip())
         if self._enabled and not self._active:
@@ -1159,18 +1585,21 @@ class TelegramNotifier:
             return
         logger.info(
             "telegram_notifier_started notify_schema=%s version=%s chat_id=%s thread_id=%s "
-            "parse_mode=%s token=%s rate_limit_per_min=%s cadence_ok_preopen=%s "
-            "cadence_ok_open=%s cadence_ok_lunch=%s cadence_ok_after_hours=%s "
-            "cadence_warn=%s cadence_alert=%s",
+            "thread_health_id=%s thread_ops_id=%s parse_mode=%s render_mode_default=%s "
+            "token=%s rate_limit_per_min=%s cadence_ok_preopen=%s cadence_ok_open=%s "
+            "cadence_ok_lunch=%s cadence_ok_after_hours=%s cadence_warn=%s cadence_alert=%s",
             NOTIFY_SCHEMA_VERSION,
             self._collector_version,
             self._chat_id,
             self._thread_id if self._thread_id is not None else "none",
-            self._renderer.parse_mode or "none",
+            self._thread_health_id if self._thread_health_id is not None else "none",
+            self._thread_ops_id if self._thread_ops_id is not None else "none",
+            self._composer.parse_mode or "none",
+            self._default_render_mode.value,
             self._client.masked_token,
             self._rate_limiter.limit_per_window,
             PREOPEN_CADENCE_SEC,
-            OPEN_CADENCE_SEC,
+            self._health_trading_interval_sec,
             LUNCH_CADENCE_SEC,
             AFTER_HOURS_CADENCE_SEC,
             WARN_CADENCE_SEC,
@@ -1179,18 +1608,28 @@ class TelegramNotifier:
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="telegram-notifier-worker"
         )
+        if self._enable_callbacks:
+            self._callback_task = asyncio.create_task(
+                self._callback_loop(), name="telegram-notifier-callbacks"
+            )
 
     async def stop(self) -> None:
-        if self._worker_task is None:
+        if self._worker_task is None and self._callback_task is None:
             return
         try:
-            await self._queue.put(None)
-            await asyncio.wait_for(self._worker_task, timeout=15.0)
+            if self._worker_task is not None:
+                await self._queue.put(None)
+                await asyncio.wait_for(self._worker_task, timeout=15.0)
         except asyncio.TimeoutError:
             logger.error("telegram_notifier_stop_timeout")
-            self._worker_task.cancel()
-            await asyncio.gather(self._worker_task, return_exceptions=True)
+            if self._worker_task is not None:
+                self._worker_task.cancel()
+                await asyncio.gather(self._worker_task, return_exceptions=True)
         finally:
+            if self._callback_task is not None:
+                self._callback_task.cancel()
+                await asyncio.gather(self._callback_task, return_exceptions=True)
+                self._callback_task = None
             self._worker_task = None
 
     def submit_health(self, snapshot: HealthSnapshot) -> None:
@@ -1199,6 +1638,7 @@ class TelegramNotifier:
 
         now = self._now_monotonic()
         assessment = self._state_machine.assess_health(snapshot)
+        self._cache_health_snapshot(snapshot=snapshot, assessment=assessment)
         self._observe_digest(snapshot=snapshot)
         should_send, reason = self._should_emit_health(
             snapshot=snapshot,
@@ -1218,13 +1658,20 @@ class TelegramNotifier:
             )
             return
 
-        rendered = self._renderer.render_health(
+        rendered = self._composer.render_health(
             snapshot=snapshot,
             assessment=assessment,
             hostname=self._hostname,
             instance_id=self._instance_id,
             include_system_metrics=self._include_system_metrics,
             digest=self._digest_state,
+            render_mode=self._default_render_mode,
+        )
+        rendered = self._attach_buttons(
+            message=rendered,
+            details_callback=self._make_callback_data("d:s", snapshot.sid),
+            runbook_callback=self._make_callback_data("r", "HEALTH"),
+            db_callback=self._make_callback_data("b", snapshot.sid),
         )
         self._enqueue_message(
             kind="HEALTH",
@@ -1243,11 +1690,18 @@ class TelegramNotifier:
                 and self._digest_state is not None
                 and _is_after_close_window(snapshot.created_at)
             ):
-                digest_message = self._renderer.render_daily_digest(
+                digest_message = self._composer.render_daily_digest(
                     snapshot=snapshot,
                     digest=self._digest_state,
                     hostname=self._hostname,
                     instance_id=self._instance_id,
+                    render_mode=self._default_render_mode,
+                )
+                digest_message = self._attach_buttons(
+                    message=digest_message,
+                    details_callback=self._make_callback_data("d:s", snapshot.sid),
+                    runbook_callback=self._make_callback_data("r", "HEALTH"),
+                    db_callback=self._make_callback_data("b", snapshot.sid),
                 )
                 self._enqueue_message(
                     kind="DAILY_DIGEST",
@@ -1292,11 +1746,19 @@ class TelegramNotifier:
             return
 
         mode = _infer_market_mode(normalized.created_at)
-        rendered = self._renderer.render_alert(
+        rendered = self._composer.render_alert(
             event=normalized,
             hostname=self._hostname,
             instance_id=self._instance_id,
             market_mode=mode,
+            render_mode=self._default_render_mode,
+        )
+        self._cache_event(normalized)
+        rendered = self._attach_buttons(
+            message=rendered,
+            details_callback=self._make_callback_data("d:e", normalized.eid),
+            runbook_callback=self._make_callback_data("r", normalized.code.upper()),
+            db_callback=self._make_callback_data("b", normalized.sid or "none"),
         )
         if self._digest_state is not None and severity in {
             NotifySeverity.WARN,
@@ -1342,10 +1804,20 @@ class TelegramNotifier:
             sid=resolved_sid,
             eid=resolved_eid,
         )
-        rendered = self._renderer.render_recovered(
+        mode = _infer_market_mode(recovered.created_at)
+        self._cache_event(recovered)
+        rendered = self._composer.render_recovered(
             event=recovered,
             hostname=self._hostname,
             instance_id=self._instance_id,
+            market_mode=mode,
+            render_mode=self._default_render_mode,
+        )
+        rendered = self._attach_buttons(
+            message=rendered,
+            details_callback=self._make_callback_data("d:e", recovered.eid),
+            runbook_callback=self._make_callback_data("r", recovered.code.upper()),
+            db_callback=self._make_callback_data("b", recovered.sid or "none"),
         )
         self._enqueue_message(
             kind=f"{code}_RECOVERED",
@@ -1369,8 +1841,15 @@ class TelegramNotifier:
         reason: str,
         sid: str | None,
         eid: str | None,
+        thread_id: int | None = None,
+        chat_id: str | None = None,
     ) -> bool:
         clipped = truncate_rendered_message(message)
+        resolved_thread_id = (
+            int(thread_id)
+            if thread_id is not None
+            else self._select_thread_id(kind=kind, severity=severity)
+        )
         payload = _OutboundMessage(
             kind=kind,
             message=clipped,
@@ -1378,25 +1857,29 @@ class TelegramNotifier:
             fingerprint=fingerprint,
             sid=sid,
             eid=eid,
+            thread_id=resolved_thread_id,
+            chat_id=chat_id.strip() if chat_id else self._chat_id,
         )
         try:
             self._queue.put_nowait(payload)
             logger.info(
-                "telegram_enqueue kind=%s severity=%s fingerprint=%s reason=%s eid=%s sid=%s",
+                "telegram_enqueue kind=%s severity=%s fingerprint=%s reason=%s thread_id=%s eid=%s sid=%s",
                 kind,
                 severity.value,
                 fingerprint,
                 reason,
+                resolved_thread_id if resolved_thread_id is not None else "none",
                 eid or "none",
                 sid or "none",
             )
             return True
         except asyncio.QueueFull:
             logger.error(
-                "telegram_queue_full kind=%s severity=%s fingerprint=%s dropped=1 eid=%s sid=%s",
+                "telegram_queue_full kind=%s severity=%s fingerprint=%s dropped=1 thread_id=%s eid=%s sid=%s",
                 kind,
                 severity.value,
                 fingerprint,
+                resolved_thread_id if resolved_thread_id is not None else "none",
                 eid or "none",
                 sid or "none",
             )
@@ -1409,13 +1892,41 @@ class TelegramNotifier:
         assessment: HealthAssessment,
         now: float,
     ) -> tuple[bool, str]:
+        phase_key = f"{snapshot.trading_day}:{assessment.market_mode}"
+        if assessment.severity == NotifySeverity.OK:
+            if assessment.market_mode == "holiday-closed" and self._health_holiday_mode == "disabled":
+                return False, "holiday_disabled"
+            if assessment.market_mode == "pre-open" and phase_key in self._phase_once_sent:
+                return False, "preopen_once"
+            if (
+                assessment.market_mode == "lunch-break"
+                and self._health_lunch_once
+                and phase_key in self._phase_once_sent
+            ):
+                return False, "lunch_once"
+            if (
+                assessment.market_mode == "after-hours"
+                and self._health_after_close_once
+                and phase_key in self._phase_once_sent
+            ):
+                return False, "after_hours_once"
+            if (
+                assessment.market_mode == "holiday-closed"
+                and self._health_holiday_mode == "daily"
+                and phase_key in self._phase_once_sent
+            ):
+                return False, "holiday_daily_once"
+
         if self._last_health_severity is None:
+            self._mark_phase_once_sent(snapshot=snapshot, assessment=assessment)
             return True, "bootstrap"
 
         if self._last_health_market_mode != assessment.market_mode:
+            self._mark_phase_once_sent(snapshot=snapshot, assessment=assessment)
             return True, "market_mode_changed"
 
         if self._last_health_severity != assessment.severity:
+            self._mark_phase_once_sent(snapshot=snapshot, assessment=assessment)
             return True, "state_changed"
 
         elapsed = None if self._last_health_sent_at is None else (now - self._last_health_sent_at)
@@ -1424,6 +1935,7 @@ class TelegramNotifier:
             severity=assessment.severity,
         )
         if elapsed is None or elapsed >= cadence_sec:
+            self._mark_phase_once_sent(snapshot=snapshot, assessment=assessment)
             if assessment.severity == NotifySeverity.WARN:
                 return True, "warn_cadence"
             if assessment.severity == NotifySeverity.ALERT:
@@ -1440,14 +1952,31 @@ class TelegramNotifier:
             return ALERT_CADENCE_SEC
         if severity == NotifySeverity.WARN:
             return WARN_CADENCE_SEC
-        mode_to_cadence = {
-            "pre-open": PREOPEN_CADENCE_SEC,
-            "open": OPEN_CADENCE_SEC,
-            "lunch-break": LUNCH_CADENCE_SEC,
-            "after-hours": AFTER_HOURS_CADENCE_SEC,
-            "holiday-closed": AFTER_HOURS_CADENCE_SEC,
-        }
-        return mode_to_cadence.get(market_mode, OPEN_CADENCE_SEC)
+        if market_mode == "open":
+            return self._health_trading_interval_sec
+        if market_mode in {"lunch-break", "after-hours", "holiday-closed"}:
+            return self._health_offhours_interval_sec
+        return PREOPEN_CADENCE_SEC
+
+    def _mark_phase_once_sent(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        assessment: HealthAssessment,
+    ) -> None:
+        if assessment.severity != NotifySeverity.OK:
+            return
+        if assessment.market_mode == "pre-open":
+            self._phase_once_sent.add(f"{snapshot.trading_day}:pre-open")
+            return
+        if assessment.market_mode == "lunch-break" and self._health_lunch_once:
+            self._phase_once_sent.add(f"{snapshot.trading_day}:lunch-break")
+            return
+        if assessment.market_mode == "after-hours" and self._health_after_close_once:
+            self._phase_once_sent.add(f"{snapshot.trading_day}:after-hours")
+            return
+        if assessment.market_mode == "holiday-closed" and self._health_holiday_mode == "daily":
+            self._phase_once_sent.add(f"{snapshot.trading_day}:holiday-closed")
 
     def _normalize_event_ids(self, event: AlertEvent) -> AlertEvent:
         sid = event.sid
@@ -1539,6 +2068,242 @@ class TelegramNotifier:
         rhs = abs(after) if use_abs else after
         return (lhs < threshold <= rhs) or (lhs >= threshold > rhs)
 
+    def _select_thread_id(self, *, kind: str, severity: NotifySeverity) -> int | None:
+        if kind in {"HEALTH", "DAILY_DIGEST"}:
+            if self._thread_health_id is not None:
+                return int(self._thread_health_id)
+            return self._thread_id
+        if kind.endswith("_RECOVERED") or severity in {
+            NotifySeverity.WARN,
+            NotifySeverity.ALERT,
+        }:
+            if self._thread_ops_id is not None:
+                return int(self._thread_ops_id)
+            return self._thread_id
+        return self._thread_id
+
+    def _cache_health_snapshot(
+        self,
+        *,
+        snapshot: HealthSnapshot,
+        assessment: HealthAssessment,
+    ) -> None:
+        self._cached_snapshots[snapshot.sid] = (snapshot, assessment)
+        self._cached_snapshot_order.append(snapshot.sid)
+        while len(self._cached_snapshot_order) > 128:
+            oldest = self._cached_snapshot_order.popleft()
+            self._cached_snapshots.pop(oldest, None)
+
+    def _cache_event(self, event: AlertEvent) -> None:
+        self._cached_events[event.eid] = event
+        self._cached_event_order.append(event.eid)
+        while len(self._cached_event_order) > 128:
+            oldest = self._cached_event_order.popleft()
+            self._cached_events.pop(oldest, None)
+
+    def _make_callback_data(self, prefix: str, value: str) -> str:
+        normalized = f"{prefix}:{value}".strip()
+        if len(normalized.encode("utf-8")) <= _CALLBACK_MAX_BYTES:
+            return normalized
+        clipped = normalized.encode("utf-8")[:_CALLBACK_MAX_BYTES]
+        return clipped.decode("utf-8", errors="ignore")
+
+    def _attach_buttons(
+        self,
+        *,
+        message: RenderedMessage,
+        details_callback: str,
+        runbook_callback: str,
+        db_callback: str,
+    ) -> RenderedMessage:
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "Details", "callback_data": details_callback},
+                    {"text": "Runbook", "callback_data": runbook_callback},
+                    {"text": "DB", "callback_data": db_callback},
+                ]
+            ]
+        }
+        return RenderedMessage(
+            text=message.text,
+            parse_mode=message.parse_mode,
+            reply_markup=keyboard,
+        )
+
+    async def _callback_loop(self) -> None:
+        while True:
+            try:
+                updates = await asyncio.to_thread(
+                    self._client.get_updates,
+                    offset=self._callback_offset,
+                    timeout_sec=15,
+                )
+                for update in updates:
+                    update_id = update.get("update_id")
+                    if isinstance(update_id, int):
+                        self._callback_offset = max(self._callback_offset, update_id + 1)
+                    callback = update.get("callback_query")
+                    if isinstance(callback, dict):
+                        await self._handle_callback(callback)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("telegram_callback_loop_failed")
+                await self._sleep(1.0)
+
+    async def _handle_callback(self, callback: dict[str, Any]) -> None:
+        callback_id = str(callback.get("id") or "").strip()
+        data = str(callback.get("data") or "").strip()
+        message = callback.get("message")
+        chat_id = self._chat_id
+        thread_id: int | None = None
+        if isinstance(message, dict):
+            chat = message.get("chat")
+            if isinstance(chat, dict) and chat.get("id") is not None:
+                chat_id = str(chat.get("id"))
+            raw_thread = message.get("message_thread_id")
+            if isinstance(raw_thread, int):
+                thread_id = raw_thread
+
+        if callback_id:
+            await asyncio.to_thread(
+                self._client.answer_callback_query,
+                callback_query_id=callback_id,
+            )
+        if not data:
+            return
+
+        outbound = self._build_callback_outbound(
+            data=data,
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+        if outbound is None:
+            return
+        self._enqueue_message(
+            kind=outbound.kind,
+            message=outbound.message,
+            severity=outbound.severity,
+            fingerprint=outbound.fingerprint,
+            reason="button_callback",
+            sid=outbound.sid,
+            eid=outbound.eid,
+            thread_id=outbound.thread_id,
+            chat_id=outbound.chat_id,
+        )
+
+    def _build_callback_outbound(
+        self,
+        *,
+        data: str,
+        chat_id: str,
+        thread_id: int | None,
+    ) -> _OutboundMessage | None:
+        if data.startswith("d:s:"):
+            sid = data.split(":", 2)[-1]
+            cached = self._cached_snapshots.get(sid)
+            if cached is None:
+                return None
+            snapshot, assessment = cached
+            message = self._composer.render_health(
+                snapshot=snapshot,
+                assessment=assessment,
+                hostname=self._hostname,
+                instance_id=self._instance_id,
+                include_system_metrics=self._include_system_metrics,
+                digest=self._digest_state,
+                render_mode=RenderMode.OPS,
+            )
+            return _OutboundMessage(
+                kind="OPS_DETAILS",
+                message=message,
+                severity=assessment.severity,
+                fingerprint=f"DETAILS:{sid}",
+                sid=sid,
+                eid=None,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            )
+        if data.startswith("d:e:"):
+            eid = data.split(":", 2)[-1]
+            event = self._cached_events.get(eid)
+            if event is None:
+                return None
+            mode = _infer_market_mode(event.created_at)
+            severity = _severity_from(event.severity)
+            if severity == NotifySeverity.OK:
+                message = self._composer.render_recovered(
+                    event=event,
+                    hostname=self._hostname,
+                    instance_id=self._instance_id,
+                    market_mode=mode,
+                    render_mode=RenderMode.OPS,
+                )
+            else:
+                message = self._composer.render_alert(
+                    event=event,
+                    hostname=self._hostname,
+                    instance_id=self._instance_id,
+                    market_mode=mode,
+                    render_mode=RenderMode.OPS,
+                )
+            return _OutboundMessage(
+                kind="OPS_DETAILS",
+                message=message,
+                severity=severity,
+                fingerprint=f"DETAILS:{eid}",
+                sid=event.sid,
+                eid=eid,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            )
+        if data.startswith("r:"):
+            code = data.split(":", 1)[-1] or "HEALTH"
+            market_mode = (
+                self._last_health_market_mode
+                if self._last_health_market_mode is not None
+                else "after-hours"
+            )
+            message = self._composer.render_runbook(
+                code=code,
+                market_mode=market_mode,
+                hostname=self._hostname,
+                instance_id=self._instance_id,
+            )
+            return _OutboundMessage(
+                kind="RUNBOOK",
+                message=message,
+                severity=NotifySeverity.OK,
+                fingerprint=f"RUNBOOK:{code}",
+                sid=self._last_health_snapshot.sid if self._last_health_snapshot else None,
+                eid=None,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            )
+        if data.startswith("b:"):
+            sid = data.split(":", 1)[-1]
+            cached = self._cached_snapshots.get(sid)
+            snapshot = cached[0] if cached is not None else self._last_health_snapshot
+            if snapshot is None:
+                return None
+            message = self._composer.render_db_summary(
+                snapshot=snapshot,
+                hostname=self._hostname,
+                instance_id=self._instance_id,
+            )
+            return _OutboundMessage(
+                kind="DB_STATS",
+                message=message,
+                severity=NotifySeverity.OK,
+                fingerprint=f"DB:{snapshot.sid}",
+                sid=snapshot.sid,
+                eid=None,
+                thread_id=thread_id,
+                chat_id=chat_id,
+            )
+        return None
+
     async def _worker_loop(self) -> None:
         while True:
             payload = await self._queue.get()
@@ -1556,10 +2321,11 @@ class TelegramNotifier:
             await self._wait_for_rate_limit_slot()
             result = await asyncio.to_thread(
                 self._client.send_message,
-                chat_id=self._chat_id,
+                chat_id=payload.chat_id or self._chat_id,
                 text=payload.message.text,
                 parse_mode=payload.message.parse_mode,
-                thread_id=self._thread_id,
+                thread_id=payload.thread_id,
+                reply_markup=payload.message.reply_markup,
             )
             if result.ok:
                 logger.info(

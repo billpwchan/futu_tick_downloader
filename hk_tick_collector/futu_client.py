@@ -36,6 +36,7 @@ POLL_RECENT_KEY_LIMIT = 500
 HEALTH_LOG_INTERVAL_SEC = 60
 WATCHDOG_EXIT_CODE = 1
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
+POLL_STATS_SAMPLE_SEC = 60.0
 
 
 class FutuTickerHandler(TickerHandlerBase):
@@ -121,6 +122,7 @@ class FutuQuoteClient:
         self._sqlite_busy_eid: str | None = None
         self._disconnect_active = False
         self._disconnect_eid: str | None = None
+        self._last_poll_stats_log_at: float = 0.0
 
     async def run_forever(self) -> None:
         backoff = ExponentialBackoff(
@@ -352,32 +354,44 @@ class FutuQuoteClient:
                 drift_sec = self._drift_sec()
                 last_commit_age_sec = self._last_commit_age_sec(now=self._loop.time())
 
-                logger.debug(
-                    "poll_stats symbol=%s fetched=%s accepted=%s enqueued=%s "
-                    "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
-                    "queue_size=%s queue_maxsize=%s fetched_last_seq=%s "
-                    "queue_in=%s queue_out=%s last_commit_monotonic_age_sec=%s "
-                    "db_write_rate=%s ts_drift_sec=%s "
-                    "last_seen_seq=%s last_accepted_seq=%s last_persisted_seq=%s",
-                    symbol,
-                    fetched,
-                    accepted,
-                    enqueued,
-                    dropped_queue_full,
-                    dropped_duplicate,
-                    dropped_filter,
-                    self._collector.queue_size(),
-                    self._collector.queue_maxsize(),
-                    fetched_last_seq,
-                    pipeline["queue_in_rows"],
-                    pipeline["queue_out_rows"],
-                    f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
-                    pipeline["persisted_rows"],
-                    f"{drift_sec:.1f}" if drift_sec is not None else "none",
-                    self._last_seen_seq.get(symbol),
-                    self._last_accepted_seq.get(symbol),
-                    self._last_persisted_seq.get(symbol),
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "poll_stats symbol=%s fetched=%s accepted=%s enqueued=%s "
+                        "dropped_queue_full=%s dropped_duplicate=%s dropped_filter=%s "
+                        "queue_size=%s queue_maxsize=%s fetched_last_seq=%s "
+                        "queue_in=%s queue_out=%s last_commit_monotonic_age_sec=%s "
+                        "db_write_rate=%s ts_drift_sec=%s "
+                        "last_seen_seq=%s last_accepted_seq=%s last_persisted_seq=%s",
+                        symbol,
+                        fetched,
+                        accepted,
+                        enqueued,
+                        dropped_queue_full,
+                        dropped_duplicate,
+                        dropped_filter,
+                        self._collector.queue_size(),
+                        self._collector.queue_maxsize(),
+                        fetched_last_seq,
+                        pipeline["queue_in_rows"],
+                        pipeline["queue_out_rows"],
+                        f"{last_commit_age_sec:.1f}" if last_commit_age_sec is not None else "none",
+                        pipeline["persisted_rows"],
+                        f"{drift_sec:.1f}" if drift_sec is not None else "none",
+                        self._last_seen_seq.get(symbol),
+                        self._last_accepted_seq.get(symbol),
+                        self._last_persisted_seq.get(symbol),
+                    )
+                elif (now := self._loop.time()) - self._last_poll_stats_log_at >= POLL_STATS_SAMPLE_SEC:
+                    self._last_poll_stats_log_at = now
+                    logger.info(
+                        "poll_stats_sample symbol=%s queue=%s/%s persisted_per_min=%s lag_sec=%s phase=%s",
+                        symbol,
+                        self._collector.queue_size(),
+                        self._collector.queue_maxsize(),
+                        pipeline["persisted_rows"],
+                        f"{drift_sec:.1f}" if drift_sec is not None else "none",
+                        self._market_phase(now),
+                    )
 
                 await self._sleep_with_stop(0.05)
 
@@ -423,12 +437,13 @@ class FutuQuoteClient:
                 dropped_duplicate=self._dropped_duplicate_since_report,
             )
             self._last_snapshot_sid = snapshot.sid
+            phase = self._market_phase(now)
             logger.info(
                 "health sid=%s connected=%s queue=%s/%s persisted_rows_per_min=%s "
                 "ignored_rows_per_min=%s push_rows_per_min=%s poll_fetched=%s "
                 "poll_accepted=%s poll_enqueued=%s queue_in=%s queue_out=%s "
                 "db_commits_per_min=%s last_commit_age_sec=%s ts_drift_sec=%s "
-                "max_ts_utc=%s dropped_queue_full=%s dropped_duplicate=%s "
+                "max_ts_utc=%s dropped_queue_full=%s dropped_duplicate=%s phase=%s "
                 "dropped_filter=%s symbols=%s",
                 snapshot.sid,
                 self._connected,
@@ -448,6 +463,7 @@ class FutuQuoteClient:
                 max_ts_utc,
                 self._dropped_queue_full_since_report,
                 self._dropped_duplicate_since_report,
+                phase,
                 self._dropped_filter_since_report,
                 len(snapshot.symbols),
             )
@@ -1037,6 +1053,21 @@ class FutuQuoteClient:
         if ts_ms is None:
             return "none"
         return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat()
+
+    def _market_phase(self, _now_monotonic: float | None = None) -> str:
+        local = datetime.now(tz=timezone.utc).astimezone(HK_TZ)
+        if local.weekday() >= 5:
+            return "after-hours"
+        hour, minute = local.hour, local.minute
+        if (hour, minute) < (9, 30):
+            return "pre-open"
+        if (9, 30) <= (hour, minute) < (12, 0):
+            return "open"
+        if (12, 0) <= (hour, minute) < (13, 0):
+            return "lunch-break"
+        if (13, 0) <= (hour, minute) < (16, 0):
+            return "open"
+        return "after-hours"
 
     def _current_trading_day(self) -> str:
         return datetime.now(tz=HK_TZ).strftime("%Y%m%d")

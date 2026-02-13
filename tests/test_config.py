@@ -53,8 +53,14 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.telegram_enabled is False
     assert cfg.telegram_rate_limit_per_min == 18
     assert cfg.telegram_thread_id is None
+    assert cfg.telegram_thread_health_id is None
+    assert cfg.telegram_thread_ops_id is None
+    assert cfg.telegram_mode_default == "product"
     assert cfg.telegram_parse_mode == "HTML"
-    assert cfg.telegram_health_interval_sec == 600
+    assert cfg.telegram_health_interval_sec == 900
+    assert cfg.telegram_health_lunch_once is True
+    assert cfg.telegram_health_after_close_once is True
+    assert cfg.telegram_health_holiday_mode == "daily"
     assert cfg.telegram_alert_escalation_steps == [0, 600, 1800]
 
 
@@ -75,13 +81,19 @@ def test_config_supports_tg_aliases(monkeypatch):
     monkeypatch.setattr(config_module, "_load_dotenv", lambda: None)
     _clear_env(monkeypatch)
     monkeypatch.setenv("TG_ENABLED", "1")
-    monkeypatch.setenv("TG_BOT_TOKEN", "token")
+    monkeypatch.setenv("TG_TOKEN", "token")
     monkeypatch.setenv("TG_CHAT_ID", "-1001")
     monkeypatch.setenv("TG_MESSAGE_THREAD_ID", "9")
+    monkeypatch.setenv("TG_THREAD_HEALTH_ID", "11")
+    monkeypatch.setenv("TG_THREAD_OPS_ID", "12")
+    monkeypatch.setenv("TG_MODE_DEFAULT", "ops")
     monkeypatch.setenv("TG_PARSE_MODE", "HTML")
     monkeypatch.setenv("HEALTH_INTERVAL_SEC", "700")
-    monkeypatch.setenv("HEALTH_TRADING_INTERVAL_SEC", "500")
+    monkeypatch.setenv("HEALTH_TRADING_INTERVAL_SEC", "1500")
     monkeypatch.setenv("HEALTH_OFFHOURS_INTERVAL_SEC", "1800")
+    monkeypatch.setenv("TG_HEALTH_LUNCH_ONCE", "0")
+    monkeypatch.setenv("TG_HEALTH_AFTER_CLOSE_ONCE", "0")
+    monkeypatch.setenv("TG_HEALTH_HOLIDAY_MODE", "disabled")
     monkeypatch.setenv("ALERT_COOLDOWN_SEC", "900")
     monkeypatch.setenv("ALERT_ESCALATION_STEPS", "0,300,900")
 
@@ -90,10 +102,16 @@ def test_config_supports_tg_aliases(monkeypatch):
     assert cfg.telegram_bot_token == "token"
     assert cfg.telegram_chat_id == "-1001"
     assert cfg.telegram_thread_id == 9
+    assert cfg.telegram_thread_health_id == 11
+    assert cfg.telegram_thread_ops_id == 12
+    assert cfg.telegram_mode_default == "ops"
     assert cfg.telegram_parse_mode == "HTML"
     assert cfg.telegram_health_interval_sec == 700
-    assert cfg.telegram_health_trading_interval_sec == 500
+    assert cfg.telegram_health_trading_interval_sec == 1500
     assert cfg.telegram_health_offhours_interval_sec == 1800
+    assert cfg.telegram_health_lunch_once is False
+    assert cfg.telegram_health_after_close_once is False
+    assert cfg.telegram_health_holiday_mode == "disabled"
     assert cfg.telegram_alert_cooldown_sec == 900
     assert cfg.telegram_alert_escalation_steps == [0, 300, 900]
 

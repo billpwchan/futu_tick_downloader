@@ -60,15 +60,21 @@
 | `SQLITE_SYNCHRONOUS` | `NORMAL` | SQLite fsync 安全模式 | `NORMAL`/`FULL` | `OFF` 會提高崩潰毀損風險 | 高耐久需求用 `FULL` |
 | `SQLITE_WAL_AUTOCHECKPOINT` | `1000` | WAL 自動 checkpoint 頁數 | `500-2000` | 太高會導致 WAL 膨脹 | 依寫入量與磁碟 IO 調整 |
 | `TG_ENABLED` | `false` | 是否啟用 Telegram notifier worker | `0/1` | 關閉時不改變主流程行為 | Bot/chat 驗證完成後再開 |
-| `TG_BOT_TOKEN` | 空 | Telegram bot token | secret | 缺失或錯誤會停用 notifier | 存於私密 env／secret manager |
+| `TG_TOKEN` | 空 | Telegram bot token（`TG_BOT_TOKEN` 為舊別名） | secret | 缺失或錯誤會停用 notifier | 存於私密 env／secret manager |
 | `TG_CHAT_ID` | 空 | 目標群組/頻道 chat id | 群組 id（常為負數） | 設錯會觸發 `400/403` | 需填真實目標 |
-| `TG_MESSAGE_THREAD_ID` | 空 | 可選群組 topic id | 正整數 | 設錯會觸發 `400` | 使用 forum topics 時填寫 |
+| `TG_MESSAGE_THREAD_ID` | 空 | 單 topic 舊設定（回退用途） | 正整數 | 設錯會觸發 `400` | 僅未分流時使用 |
+| `TG_THREAD_HEALTH_ID` | 空 | HEALTH / DIGEST topic id | 正整數 | 設錯會觸發 `400` | 使用 forum topic 分流時設定 |
+| `TG_THREAD_OPS_ID` | 空 | WARN / ALERT / RECOVERED topic id | 正整數 | 設錯會觸發 `400` | 使用 forum topic 分流時設定 |
+| `TG_MODE_DEFAULT` | `product` | 預設通知模式 | `product`/`ops` | `ops` 訊息更長更技術向 | 需要工程群組直讀時改 `ops` |
 | `TG_PARSE_MODE` | `HTML` | Telegram parse mode | `HTML` | 非 HTML 會失去 expandable 區塊 | 建議保持 `HTML` |
-| `HEALTH_INTERVAL_SEC` | `600` | 舊版 HEALTH 節奏參數（相容保留） | 正整數秒 | v2.1 內建固定節奏，不再建議調整 | 僅舊部署相容 |
-| `HEALTH_TRADING_INTERVAL_SEC` | `600` | 舊版盤中 HEALTH 參數（相容保留） | 正整數秒 | v2.1 內建固定節奏，不再建議調整 | 僅舊部署相容 |
-| `HEALTH_OFFHOURS_INTERVAL_SEC` | `1800` | 舊版盤後 HEALTH 參數（相容保留） | 正整數秒 | v2.1 內建固定節奏，不再建議調整 | 僅舊部署相容 |
-| `ALERT_COOLDOWN_SEC` | `600` | 舊版告警冷卻參數（相容保留） | 正整數秒 | v2.1 使用內建告警節奏 | 僅舊部署相容 |
-| `ALERT_ESCALATION_STEPS` | `0,600,1800` | 舊版升級補發參數（相容保留） | 逗號整數 | v2.1 使用內建告警節奏 | 僅舊部署相容 |
+| `HEALTH_INTERVAL_SEC` | `900` | 基礎 HEALTH cadence（盤中用作預設） | 正整數秒 | 影響正常心跳頻率 | 想提高/降低盤中摘要頻率 |
+| `HEALTH_TRADING_INTERVAL_SEC` | `900` | 盤中 HEALTH cadence | `900-1800` | 太短會增加噪音 | 建議 15-30 分鐘 |
+| `HEALTH_OFFHOURS_INTERVAL_SEC` | `1800` | 非盤中 cadence（若非 once） | 正整數秒 | 太短會增加噪音 | 午休/盤後需周期更新時 |
+| `TG_HEALTH_LUNCH_ONCE` | `true` | 午休是否只發一次 | `0/1` | 關閉後依 offhours cadence 發送 | 需要午休持續心跳時關閉 |
+| `TG_HEALTH_AFTER_CLOSE_ONCE` | `true` | 盤後是否只發一次 | `0/1` | 關閉後依 offhours cadence 發送 | 需要盤後持續心跳時關閉 |
+| `TG_HEALTH_HOLIDAY_MODE` | `daily` | 休市日發送策略 | `daily`/`disabled` | `disabled` 完全不發休市摘要 | 非交易日不想推送時 |
+| `ALERT_COOLDOWN_SEC` | `600` | WARN 事件持續提醒最小間隔 | 正整數秒 | 太短會洗版 | 建議維持 600 |
+| `ALERT_ESCALATION_STEPS` | `0,600,1800` | fingerprint 事件升級補發節點 | 逗號整數 | 太密會增加事件量 | 需要更強提醒節奏時 |
 | `TG_RATE_LIMIT_PER_MIN` | `18` | 本地 sender 每分鐘上限 | `1-20` | 太高可能觸發 Telegram 限流 | 建議低於軟上限 |
 | `TG_INCLUDE_SYSTEM_METRICS` | `true` | 摘要是否附 `load1/rss/disk` | `0/1` | 關閉可縮短訊息 | 需精簡訊息時關閉 |
 | `TG_DIGEST_QUEUE_CHANGE_PCT` | `20` | 判定「有意義變化」的 queue 變化門檻 | `5-50` | 太低會增加摘要頻率 | 依噪音容忍度調整 |
@@ -83,7 +89,8 @@
 
 - 舊版 `TELEGRAM_*` 仍可使用（向後相容）。
 - 新增部署建議改用 `TG_*`。
-- v2.1 通知節奏已固定產品化（OK/WARN/ALERT/RECOVERED 與時段心跳）；`HEALTH_*` 與 `ALERT_*` 目前僅保留舊部署相容，不建議當作主要調參入口。
+- v2.2 預設為 Product Mode，可透過 `TG_MODE_DEFAULT=ops` 切換。
+- `HEALTH_*` 與 `ALERT_*` 在 v2.2 仍為有效調參入口。
 
 ## 生產基線範本
 
@@ -120,13 +127,19 @@ SQLITE_SYNCHRONOUS=NORMAL
 SQLITE_WAL_AUTOCHECKPOINT=1000
 
 TG_ENABLED=1
-TG_BOT_TOKEN=<secret>
+TG_TOKEN=<secret>
 TG_CHAT_ID=-1001234567890
 TG_MESSAGE_THREAD_ID=
+TG_THREAD_HEALTH_ID=
+TG_THREAD_OPS_ID=
+TG_MODE_DEFAULT=product
 TG_PARSE_MODE=HTML
-HEALTH_INTERVAL_SEC=600
-HEALTH_TRADING_INTERVAL_SEC=600
+HEALTH_INTERVAL_SEC=900
+HEALTH_TRADING_INTERVAL_SEC=900
 HEALTH_OFFHOURS_INTERVAL_SEC=1800
+TG_HEALTH_LUNCH_ONCE=1
+TG_HEALTH_AFTER_CLOSE_ONCE=1
+TG_HEALTH_HOLIDAY_MODE=daily
 ALERT_COOLDOWN_SEC=600
 ALERT_ESCALATION_STEPS=0,600,1800
 TG_RATE_LIMIT_PER_MIN=18

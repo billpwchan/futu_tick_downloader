@@ -129,13 +129,19 @@ sudo systemctl status hk-tick-collector --no-pager
 
 ```dotenv
 TG_ENABLED=1
-TG_BOT_TOKEN=<secret>
+TG_TOKEN=<secret>
 TG_CHAT_ID=-1001234567890
 TG_MESSAGE_THREAD_ID=
+TG_THREAD_HEALTH_ID=1234
+TG_THREAD_OPS_ID=5678
+TG_MODE_DEFAULT=product
 TG_PARSE_MODE=HTML
-HEALTH_INTERVAL_SEC=600
-HEALTH_TRADING_INTERVAL_SEC=600
+HEALTH_INTERVAL_SEC=900
+HEALTH_TRADING_INTERVAL_SEC=900
 HEALTH_OFFHOURS_INTERVAL_SEC=1800
+TG_HEALTH_LUNCH_ONCE=1
+TG_HEALTH_AFTER_CLOSE_ONCE=1
+TG_HEALTH_HOLIDAY_MODE=daily
 ALERT_COOLDOWN_SEC=600
 ALERT_ESCALATION_STEPS=0,600,1800
 TG_RATE_LIMIT_PER_MIN=18
@@ -145,73 +151,57 @@ INSTANCE_ID=hk-prod-a1
 
 目前通知策略：
 
-- `HEALTH OK`：盤前每 30 分鐘、盤中每 10 分鐘、午休每 30 分鐘、盤後每 60 分鐘
+- `HEALTH OK`：盤前一次、盤中每 15-30 分鐘、午休/收盤後一次（可調）
 - `HEALTH WARN`：切換即發；持續最多每 10 分鐘 1 條；恢復即發 OK
 - `ALERT`：切換即發；持續最多每 3 分鐘 1 條；恢復即發 `RECOVERED`
 - `DAILY DIGEST`：收盤後 1 條日報
 - `holiday-closed`：休市日降噪模式（盤中零流量且高齡資料連續觀測）
-- 每條訊息都會帶 `sid`，事件告警另帶 `eid`
+- 支援 Telegram topic 路由：`HEALTH/DIGEST -> health topic`，`WARN/ALERT/RECOVERED -> ops topic`
+- 訊息含按鈕：`Details`（同 topic 展開 Ops 細節）、`Runbook`、`DB`
 
 設定與排障細節請見：[`docs/telegram-notify.md`](docs/telegram-notify.md)
 
 <a id="notification-examples"></a>
 ## 產品化通知示例
 
+Before（舊版，容易誤判）：
+
 ```text
 🟢 HK Tick Collector 正常
-結論：正常：盤中採集與寫入穩定
-指標：狀態=盤中 | ingest_lag=1.2s | persisted=24100/min | queue=0/50000 | symbols=1000 | stale_symbols=2 | p95_age=1.8s | p99_age=3.2s
-進度：ingest/min=24320 | persist/min=24100 | write_eff=99.1% | stale_symbols=2 | stale_bucket(>=10s/>=30s/>=60s)=2/0/0 | top5_stale=HK.01234(12.3s),HK.00981(11.7s),HK.00700(10.2s),HK.09988(8.6s),HK.00175(8.2s)
+結論：正常：午休狀態平穩
+指標：狀態=午休 | symbols=1000 | stale_symbols=1000 | queue=0/50000 | last_update_at=...
+進度：... stale_bucket(>=120s/>=300s/>=900s)=1000/1000/0 ...
+```
+
+After（Product Mode，6 行內）：
+
+```text
+🟢 HK Tick 健康摘要
+結論：正常：午休狀態平穩
+KPI：新鮮度延遲=2.1s | 寫入吞吐=0/min | 佇列=0/50000
+市況：午休 (market idle, normal)
 主機：ip-10-0-1-12 / hk-prod-a1
-資源：load1=0.22 rss=145.3MB disk_free=87.30GB
 sid=sid-12ab34cd
 ```
 
 ```text
-🟡 注意
-結論：注意：盤中品質指標退化
-指標：狀態=盤中 | ingest_lag=48.2s | persisted=9200/min | queue=3200/50000 | symbols=1000 | stale_symbols=127 | p95_age=26.1s | p99_age=40.4s
-進度：ingest/min=20100 | persist/min=9200 | write_eff=45.8% | stale_symbols=127 | stale_bucket(>=10s/>=30s/>=60s)=127/34/7 | top5_stale=HK.09988(78.2s),HK.01398(70.1s),HK.00700(69.8s),HK.00981(67.3s),HK.00175(65.9s)
-建議：scripts/hk-tickctl logs --ops --since "20 minutes ago"
-主機：ip-10-0-1-12 / hk-prod-a1
-sid=sid-34de56fa
-```
-
-```text
-🔴 異常
+🔴 HK Tick 警報
 結論：異常：持久化停滯，資料可能未落庫
-指標：事件=PERSIST_STALL | 持續=242s/180s | 影響=新資料可能無法寫入 SQLite，時序會持續落後 | write=0/min | queue=8542/50000 | lag=412
-建議1：scripts/hk-tickctl logs --ops --since "20 minutes ago"
-建議2：scripts/hk-tickctl db stats
+KPI：延遲=88.3s | 寫入=0/min | 佇列=420/50000
+市況：盤中
 主機：ip-10-0-1-12 / hk-prod-a1
 eid=eid-a1b2c3d4 sid=sid-34de56fa
 ```
 
-```text
-✅ 已恢復
-結論：DISCONNECT 已恢復正常
-指標：status=reconnected | queue=0/50000
-主機：ip-10-0-1-12 / hk-prod-a1
-eid=eid-a1b2c3d4 sid=sid-34de56fa
-```
+Ops Mode（按 `Details` 展開）會提供 `p95/p99/stale bucket/topN` 與診斷上下文。
 
 ```text
-📊 日報
+📊 HK Tick 日報
 結論：20260212 收盤摘要
-指標：今日總量=18100234 | 峰值=39800/min | 最大延遲=4.2s | 告警次數=3 | 恢復次數=3
-db：/data/sqlite/HK/20260212.db rows=321001245
+KPI：總寫入=18100234 | 峰值吞吐=39800/min | 告警/恢復=3/3
+市況：收盤後 (market idle, normal)
 主機：ip-10-0-1-12 / hk-prod-a1
 sid=sid-9f8e7d6c
-```
-
-```text
-🟢 HK Tick Collector 正常
-結論：正常：休市日服務平穩
-指標：狀態=休市日 | market=holiday-closed | symbols=1000 | close_snapshot_ok=true | db_growth_today=+0 rows | last_update_at=2026-02-14T01:00:00+00:00 | p50_age=1240.0s
-進度：ingest/min=0 | persist/min=0 | write_eff=0.0% | stale_symbols=1000 | stale_bucket(>=120s/>=300s/>=900s)=1000/1000/1000 | top5_stale=HK.00700(1880.1s),HK.00981(1879.9s),HK.01398(1879.7s),HK.09988(1879.6s),HK.00005(1879.3s)
-主機：ip-10-0-1-12 / hk-prod-a1
-資源：load1=0.09 rss=132.2MB disk_free=86.40GB
-sid=sid-4fff2233
 ```
 
 <a id="data-model-and-guarantees"></a>
@@ -260,6 +250,15 @@ sudo systemctl restart hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
 
+維運捷徑（建議）：
+
+```bash
+scripts/hk-tickctl status
+scripts/hk-tickctl logs --ops --since "20 minutes ago"
+scripts/hk-tickctl db stats
+scripts/hk-tickctl db symbol HK.00700 --last 20
+```
+
 查看日誌：
 
 ```bash
@@ -288,8 +287,8 @@ scripts/hk-tickctl doctor --since "6 hours ago"
 <a id="faq-section"></a>
 ## FAQ（常見問題）
 
-Q1. 為什麼 journal 看不到 `poll_stats`？  
-A1. `poll_stats` 已降為 `DEBUG`；預設 `INFO` 只看 `health` 與 `persist_summary` 聚合訊號。
+Q1. 為什麼 journal 幾乎看不到 `poll_stats`？  
+A1. 預設改為 `poll_stats_sample`（每分鐘 1 條）；若要看逐 symbol 細節請暫時切 `LOG_LEVEL=DEBUG`。
 
 Q2. 為什麼正常時 Telegram 幾乎不發訊息？  
 A2. 這是設計目標。正常態只在啟動、開盤前、收盤後與狀態切換發送，避免群組噪音。
@@ -298,10 +297,10 @@ Q3. 收到告警後第一步該做什麼？
 A3. 先執行 `scripts/hk-tickctl logs --ops --since "20 minutes ago"`，再用訊息內的 `eid/sid` 反查 journal。
 
 Q4. Telegram 沒收到訊息怎麼查？  
-A4. 依序檢查 `TG_BOT_TOKEN`、`TG_CHAT_ID`、群組權限、`getUpdates`/`getWebhookInfo`。
+A4. 依序檢查 `TG_TOKEN`、`TG_CHAT_ID`、群組權限、`getUpdates`/`getWebhookInfo`，以及 topic `message_thread_id` 是否正確。
 
-Q5. 怎麼確認現在跑的是不是新通知版本（v2.1）？  
-A5. 執行 `scripts/hk-tickctl doctor --since "6 hours ago"`；若看到 `notify_schema=v2.1` 與 `HEALTH sid=...`，代表已切到新版。
+Q5. 怎麼確認現在跑的是不是新通知版本（v2.2）？  
+A5. 執行 `scripts/hk-tickctl doctor --since "6 hours ago"`；若看到 `notify_schema=v2.2` 與 `HEALTH sid=...`，代表已切到新版。
 
 <a id="troubleshooting"></a>
 ## 故障排除

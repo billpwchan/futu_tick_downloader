@@ -153,10 +153,16 @@ class Config:
     telegram_bot_token: str
     telegram_chat_id: str
     telegram_thread_id: int | None
+    telegram_thread_health_id: int | None
+    telegram_thread_ops_id: int | None
+    telegram_mode_default: str
     telegram_parse_mode: str
     telegram_health_interval_sec: int
     telegram_health_trading_interval_sec: int
     telegram_health_offhours_interval_sec: int
+    telegram_health_lunch_once: bool
+    telegram_health_after_close_once: bool
+    telegram_health_holiday_mode: str
     telegram_alert_cooldown_sec: int
     telegram_alert_escalation_steps: List[int]
     telegram_rate_limit_per_min: int
@@ -207,17 +213,27 @@ class Config:
             sqlite_synchronous=os.getenv("SQLITE_SYNCHRONOUS", "NORMAL"),
             sqlite_wal_autocheckpoint=_get_env_int("SQLITE_WAL_AUTOCHECKPOINT", 1000),
             telegram_enabled=_get_env_bool_alias(("TG_ENABLED", "TELEGRAM_ENABLED"), False),
-            telegram_bot_token=_get_env_text_alias(("TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"), ""),
+            telegram_bot_token=_get_env_text_alias(
+                ("TG_TOKEN", "TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
+                "",
+            ),
             telegram_chat_id=_get_env_text_alias(("TG_CHAT_ID", "TELEGRAM_CHAT_ID"), ""),
             telegram_thread_id=_get_env_optional_int_alias(
                 ("TG_MESSAGE_THREAD_ID", "TELEGRAM_THREAD_ID")
             ),
+            telegram_thread_health_id=_get_env_optional_int_alias(
+                ("TG_THREAD_HEALTH_ID", "TELEGRAM_THREAD_HEALTH_ID")
+            ),
+            telegram_thread_ops_id=_get_env_optional_int_alias(
+                ("TG_THREAD_OPS_ID", "TELEGRAM_THREAD_OPS_ID")
+            ),
+            telegram_mode_default=_get_env_text_alias(("TG_MODE_DEFAULT",), "product").lower(),
             telegram_parse_mode=_get_env_text_alias(
                 ("TG_PARSE_MODE", "TELEGRAM_PARSE_MODE"), "HTML"
             ),
             telegram_health_interval_sec=_get_env_int_alias(
                 ("TG_HEALTH_INTERVAL_SEC", "HEALTH_INTERVAL_SEC", "TELEGRAM_DIGEST_INTERVAL_SEC"),
-                600,
+                900,
             ),
             telegram_health_trading_interval_sec=_get_env_int_alias(
                 ("TG_HEALTH_TRADING_INTERVAL_SEC", "HEALTH_TRADING_INTERVAL_SEC"),
@@ -227,7 +243,7 @@ class Config:
                         "HEALTH_INTERVAL_SEC",
                         "TELEGRAM_DIGEST_INTERVAL_SEC",
                     ),
-                    600,
+                    900,
                 ),
             ),
             telegram_health_offhours_interval_sec=_get_env_int_alias(
@@ -238,9 +254,18 @@ class Config:
                         "HEALTH_INTERVAL_SEC",
                         "TELEGRAM_DIGEST_INTERVAL_SEC",
                     ),
-                    600,
+                    900,
                 ),
             ),
+            telegram_health_lunch_once=_get_env_bool_alias(("TG_HEALTH_LUNCH_ONCE",), True),
+            telegram_health_after_close_once=_get_env_bool_alias(
+                ("TG_HEALTH_AFTER_CLOSE_ONCE",),
+                True,
+            ),
+            telegram_health_holiday_mode=_get_env_text_alias(
+                ("TG_HEALTH_HOLIDAY_MODE",),
+                "daily",
+            ).lower(),
             telegram_alert_cooldown_sec=_get_env_int_alias(
                 ("TG_ALERT_COOLDOWN_SEC", "ALERT_COOLDOWN_SEC", "TELEGRAM_ALERT_COOLDOWN_SEC"),
                 600,

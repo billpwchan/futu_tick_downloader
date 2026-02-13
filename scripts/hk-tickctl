@@ -10,17 +10,21 @@ usage() {
 hk-tickctl - HK Tick Collector 維運工具
 
 用法:
+  hk-tickctl status [--since "<time>"]
   hk-tickctl logs [--ops] [--since "<time>"] [--no-follow]
   hk-tickctl doctor [--since "<time>"]
   hk-tickctl db stats [--db <path>] [--day YYYYMMDD]
   hk-tickctl db symbols [--db <path>] [--day YYYYMMDD] [--minutes N]
+  hk-tickctl db symbol <SYMBOL> [--db <path>] [--day YYYYMMDD] [--last N]
 
 範例:
+  hk-tickctl status
   hk-tickctl logs
   hk-tickctl doctor --since "6 hours ago"
   hk-tickctl logs --ops --since "30 minutes ago"
   hk-tickctl db stats --day 20260212
   hk-tickctl db symbols --minutes 15
+  hk-tickctl db symbol HK.00700 --last 20
 EOF
 }
 
@@ -87,6 +91,63 @@ run_logs() {
   else
     journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager \
       | grep -E "${pattern}" || true
+  fi
+}
+
+run_status() {
+  local since="20 minutes ago"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since)
+        since="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "[FAIL] unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  require_cmd systemctl
+  require_cmd journalctl
+  require_cmd grep
+
+  local active_status
+  active_status="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
+  if [[ -z "${active_status}" ]]; then
+    active_status="unknown"
+  fi
+
+  local logs
+  logs="$(journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager 2>/dev/null || true)"
+  local health_line
+  health_line="$(printf '%s\n' "${logs}" | grep -E "health sid=" | tail -n 1 || true)"
+  local alert_line
+  alert_line="$(
+    printf '%s\n' "${logs}" \
+      | grep -E "telegram_enqueue kind=.* severity=(WARN|ALERT)|telegram_send_failed|WATCHDOG persistent_stall|alert_event code=" \
+      | tail -n 1 || true
+  )"
+
+  echo "hk-tickctl status"
+  echo "service=${SERVICE_NAME} status=${active_status} since=${since}"
+  if [[ -n "${health_line}" ]]; then
+    echo "[INFO] latest health:"
+    echo "${health_line}"
+  else
+    echo "[WARN] no health line in selected window"
+  fi
+  if [[ -n "${alert_line}" ]]; then
+    echo "[INFO] latest alert/watchdog:"
+    echo "${alert_line}"
+  else
+    echo "[OK] no WARN/ALERT/WATCHDOG in selected window"
   fi
 }
 
@@ -195,6 +256,73 @@ ORDER BY symbol;
 SQL
 }
 
+run_db_symbol() {
+  local symbol=""
+  local db_path=""
+  local day="${DAY_DEFAULT}"
+  local last="20"
+  if [[ $# -lt 1 ]]; then
+    echo "[FAIL] symbol is required" >&2
+    usage
+    exit 1
+  fi
+  symbol="$1"
+  shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --db)
+        db_path="${2:-}"
+        shift 2
+        ;;
+      --day)
+        day="${2:-}"
+        shift 2
+        ;;
+      --last)
+        last="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "[FAIL] unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  require_cmd sqlite3
+  local db
+  db="$(db_path_from_args "${db_path}" "${day}")"
+  if [[ ! -f "${db}" ]]; then
+    echo "[FAIL] db not found: ${db}" >&2
+    exit 1
+  fi
+
+  local symbol_sql
+  symbol_sql="${symbol//\'/''}"
+
+  sqlite3 "file:${db}?mode=ro" <<SQL
+.headers on
+.mode column
+SELECT
+  symbol,
+  datetime(ts_ms/1000,'unixepoch') AS ts_utc,
+  price,
+  volume,
+  turnover,
+  seq
+FROM ticks
+WHERE symbol='${symbol_sql}'
+ORDER BY ts_ms DESC
+LIMIT ${last};
+SQL
+}
+
 run_doctor() {
   local since="6 hours ago"
   while [[ $# -gt 0 ]]; do
@@ -268,7 +396,7 @@ run_doctor() {
   fi
 
   if [[ -n "${schema_line}" && "${sid_ok}" == "1" ]]; then
-    echo "[PASS] deployment likely on notify_schema=v2.1+ (sid present)"
+    echo "[PASS] deployment likely on notify_schema=v2.2+ (sid present)"
   else
     echo "[CHECK] deployment may be old or not fully enabled; verify branch/commit and restart service"
   fi
@@ -285,6 +413,10 @@ main() {
   fi
 
   case "$1" in
+    status)
+      shift
+      run_status "$@"
+      ;;
     logs)
       shift
       run_logs "$@"
@@ -307,6 +439,10 @@ main() {
         symbols)
           shift
           run_db_symbols "$@"
+          ;;
+        symbol)
+          shift
+          run_db_symbol "$@"
           ;;
         *)
           echo "[FAIL] unknown db subcommand: $1" >&2

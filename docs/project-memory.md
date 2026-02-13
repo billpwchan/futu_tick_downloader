@@ -14,12 +14,15 @@
 - `persist_summary`：每 5 秒聚合寫入品質
 - `WATCHDOG`：停滯恢復與致命退出
 - Telegram：`HEALTH OK/WARN`、`ALERT`、`RECOVERED`、`DAILY DIGEST`
-- HEALTH v2.1：固定 `結論 -> 指標 -> 進度 -> 主機 -> 資源 -> sid`
+- HEALTH v2.2：`Product(<=6 行)` + `Ops(Details 展開)`
+- Product 模板固定：`結論 -> KPI(最多3) -> 市況 -> 主機 -> sid`
+- topic routing：`HEALTH/DIGEST` 與 `WARN/ALERT/RECOVERED` 可分 thread
 - `holiday-closed`：休市日降噪模式（盤中零流量且高齡資料連續觀測）
 
 ## 3. 排障入口
 
 - 快速看狀態：`scripts/hk-tickctl logs`
+- 快速健康：`scripts/hk-tickctl status`
 - 工程深挖：`scripts/hk-tickctl logs --ops`
 - 部署驗證：`scripts/hk-tickctl doctor --since "6 hours ago"`
 - DB 速查：`scripts/hk-tickctl db stats`

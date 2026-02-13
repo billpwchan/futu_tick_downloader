@@ -7,6 +7,7 @@
 ## 1.1 INFO（預設值班視角）
 
 - `health ... sid=...`：每分鐘一條固定欄位摘要（不展開全量 symbol）
+- `poll_stats_sample ...`：每分鐘一條抽樣（含 symbol/queue/persisted_per_min/lag/phase）
 - `persist_summary ...`：每 5 秒一條聚合摘要
 - `WATCHDOG ...`：恢復、失敗、停滯等關鍵事件
 - `telegram_*`：通知送達/抑制/失敗
@@ -21,13 +22,13 @@
 
 ## 2. Telegram 降噪節奏
 
-- `HEALTH OK`：盤前每 30 分鐘、盤中每 10 分鐘、午休每 30 分鐘、盤後每 60 分鐘
+- `HEALTH OK`：盤前一次、盤中每 15-30 分鐘、午休/盤後一次（可調）
 - `HEALTH WARN`：狀態切換即發；持續最多每 10 分鐘 1 條；恢復即發 OK
 - `ALERT`：狀態切換即發；持續最多每 3 分鐘 1 條
 - `RECOVERED`：事件恢復立即發（含原 `eid`）
 - `DAILY DIGEST`：收盤後 1 條日報
 
-所有事件告警都使用 fingerprint 去重 + cooldown。
+所有事件告警都使用 fingerprint 去重 + cooldown + escalation ladder。
 
 盤後/休市語義：
 
@@ -37,7 +38,8 @@
 
 ## 3. 健康摘要欄位（HEALTH）
 
-固定順序：`結論 -> 指標 -> 進度 -> 主機 -> 資源 -> sid`
+Product 固定順序：`結論 -> KPI(最多3) -> 市況 -> 主機 -> sid`  
+Ops 固定順序：`結論 -> 指標 -> 進度 -> 主機 -> sid`
 
 - `ingest/min`：`push_rows_per_min + poll_accepted`
 - `persist/min`：每分鐘落盤量

@@ -14,6 +14,7 @@ sudo systemctl status futu-opend --no-pager
 ### 1.2 看日誌（用戶視圖）
 
 ```bash
+scripts/hk-tickctl status
 scripts/hk-tickctl logs
 ```
 
@@ -28,9 +29,10 @@ scripts/hk-tickctl logs --ops --since "30 minutes ago"
 ```bash
 scripts/hk-tickctl db stats
 scripts/hk-tickctl db symbols --minutes 10
+scripts/hk-tickctl db symbol HK.00700 --last 20
 ```
 
-### 1.5 驗證部署是否為新通知版本（v2.1）
+### 1.5 驗證部署是否為新通知版本（v2.2）
 
 ```bash
 scripts/hk-tickctl doctor --since "6 hours ago"
@@ -38,9 +40,10 @@ scripts/hk-tickctl doctor --since "6 hours ago"
 
 預期：
 
-- 出現 `telegram_notifier_started notify_schema=v2.1`
+- 出現 `telegram_notifier_started notify_schema=v2.2`
 - `HEALTH` enqueue 帶 `sid`
 - WARN/ALERT enqueue 帶 `eid sid`
+- 若有 topic routing，`HEALTH` 與 `ALERT` thread id 應不同
 
 ## 2. HEALTH 欄位速讀
 
@@ -156,6 +159,7 @@ curl -s "https://api.telegram.org/bot${TOKEN}/deleteWebhook"
 - Bot 必須在群組內
 - Bot 必須有發言權限
 - chat_id / thread_id 必須與目標群組一致
+- callback buttons 需要 bot 可接收 callback query（避免隱私/權限阻擋）
 
 ## 5. sid/eid 關聯排障
 
