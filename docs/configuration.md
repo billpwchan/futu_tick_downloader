@@ -64,11 +64,11 @@
 | `TG_CHAT_ID` | 空 | 目標群組/頻道 chat id | 群組 id（常為負數） | 設錯會觸發 `400/403` | 需填真實目標 |
 | `TG_MESSAGE_THREAD_ID` | 空 | 可選群組 topic id | 正整數 | 設錯會觸發 `400` | 使用 forum topics 時填寫 |
 | `TG_PARSE_MODE` | `HTML` | Telegram parse mode | `HTML` | 非 HTML 會失去 expandable 區塊 | 建議保持 `HTML` |
-| `HEALTH_INTERVAL_SEC` | `600` | HEALTH 固定節奏（共用基線） | `300-1800` | 太小會增加噪音 | 依值班偏好調整 |
-| `HEALTH_TRADING_INTERVAL_SEC` | `600` | 交易時段 HEALTH 週期 | `300-1200` | 太小會增加噪音 | 盤中節奏調整 |
-| `HEALTH_OFFHOURS_INTERVAL_SEC` | `1800` | 非交易時段 HEALTH 週期 | `900-3600` | 太小會造成夜間噪音 | 夜間建議拉長 |
-| `ALERT_COOLDOWN_SEC` | `600` | 同 fingerprint 冷卻時間窗 | `300-1800` | 太小會重複刷告警 | 依事件頻率調整 |
-| `ALERT_ESCALATION_STEPS` | `0,600,1800` | 告警升級補發時間點（秒） | 逗號整數 | 設太密會增加噪音 | 依值班策略調整 |
+| `HEALTH_INTERVAL_SEC` | `600` | 舊版 HEALTH 節奏參數（相容保留） | 正整數秒 | v2.1 內建固定節奏，不再建議調整 | 僅舊部署相容 |
+| `HEALTH_TRADING_INTERVAL_SEC` | `600` | 舊版盤中 HEALTH 參數（相容保留） | 正整數秒 | v2.1 內建固定節奏，不再建議調整 | 僅舊部署相容 |
+| `HEALTH_OFFHOURS_INTERVAL_SEC` | `1800` | 舊版盤後 HEALTH 參數（相容保留） | 正整數秒 | v2.1 內建固定節奏，不再建議調整 | 僅舊部署相容 |
+| `ALERT_COOLDOWN_SEC` | `600` | 舊版告警冷卻參數（相容保留） | 正整數秒 | v2.1 使用內建告警節奏 | 僅舊部署相容 |
+| `ALERT_ESCALATION_STEPS` | `0,600,1800` | 舊版升級補發參數（相容保留） | 逗號整數 | v2.1 使用內建告警節奏 | 僅舊部署相容 |
 | `TG_RATE_LIMIT_PER_MIN` | `18` | 本地 sender 每分鐘上限 | `1-20` | 太高可能觸發 Telegram 限流 | 建議低於軟上限 |
 | `TG_INCLUDE_SYSTEM_METRICS` | `true` | 摘要是否附 `load1/rss/disk` | `0/1` | 關閉可縮短訊息 | 需精簡訊息時關閉 |
 | `TG_DIGEST_QUEUE_CHANGE_PCT` | `20` | 判定「有意義變化」的 queue 變化門檻 | `5-50` | 太低會增加摘要頻率 | 依噪音容忍度調整 |
@@ -82,8 +82,8 @@
 相容性說明：
 
 - 舊版 `TELEGRAM_*` 仍可使用（向後相容）。
-- 新增部署建議改用 `TG_*` + `HEALTH_*` + `ALERT_*`。
-- 產品化通知策略已內建固定節奏（OK/WARN/ALERT/RECOVERED）；`HEALTH_*` 與 `ALERT_*` 主要保留向後相容，不建議再依舊版高頻模式調整。
+- 新增部署建議改用 `TG_*`。
+- v2.1 通知節奏已固定產品化（OK/WARN/ALERT/RECOVERED 與時段心跳）；`HEALTH_*` 與 `ALERT_*` 目前僅保留舊部署相容，不建議當作主要調參入口。
 
 ## 生產基線範本
 

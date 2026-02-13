@@ -149,6 +149,7 @@ INSTANCE_ID=hk-prod-a1
 - `HEALTH WARN`：切換即發；持續最多每 10 分鐘 1 條；恢復即發 OK
 - `ALERT`：切換即發；持續最多每 3 分鐘 1 條；恢復即發 `RECOVERED`
 - `DAILY DIGEST`：收盤後 1 條日報
+- `holiday-closed`：休市日降噪模式（盤中零流量且高齡資料連續觀測）
 - 每條訊息都會帶 `sid`，事件告警另帶 `eid`
 
 設定與排障細節請見：[`docs/telegram-notify.md`](docs/telegram-notify.md)
@@ -159,7 +160,8 @@ INSTANCE_ID=hk-prod-a1
 ```text
 🟢 HK Tick Collector 正常
 結論：正常：盤中採集與寫入穩定
-指標：狀態=盤中 | ingest_lag=1.2s | persisted=24100/min | queue=0/50000 | symbols=1000 | stale_symbols=2 | p95_age=1.8s
+指標：狀態=盤中 | ingest_lag=1.2s | persisted=24100/min | queue=0/50000 | symbols=1000 | stale_symbols=2 | p95_age=1.8s | p99_age=3.2s
+進度：ingest/min=24320 | persist/min=24100 | write_eff=99.1% | stale_symbols=2 | stale_bucket(>=10s/>=30s/>=60s)=2/0/0 | top5_stale=HK.01234(12.3s),HK.00981(11.7s),HK.00700(10.2s),HK.09988(8.6s),HK.00175(8.2s)
 主機：ip-10-0-1-12 / hk-prod-a1
 資源：load1=0.22 rss=145.3MB disk_free=87.30GB
 sid=sid-12ab34cd
@@ -168,8 +170,9 @@ sid=sid-12ab34cd
 ```text
 🟡 注意
 結論：注意：盤中品質指標退化
-指標：狀態=盤中 | ingest_lag=48.2s | persisted=9200/min | queue=3200/50000 | symbols=1000 | stale_symbols=127 | p95_age=26.1s
-建議：journalctl -u hk-tick-collector -n 120 --no-pager
+指標：狀態=盤中 | ingest_lag=48.2s | persisted=9200/min | queue=3200/50000 | symbols=1000 | stale_symbols=127 | p95_age=26.1s | p99_age=40.4s
+進度：ingest/min=20100 | persist/min=9200 | write_eff=45.8% | stale_symbols=127 | stale_bucket(>=10s/>=30s/>=60s)=127/34/7 | top5_stale=HK.09988(78.2s),HK.01398(70.1s),HK.00700(69.8s),HK.00981(67.3s),HK.00175(65.9s)
+建議：scripts/hk-tickctl logs --ops --since "20 minutes ago"
 主機：ip-10-0-1-12 / hk-prod-a1
 sid=sid-34de56fa
 ```
@@ -178,8 +181,8 @@ sid=sid-34de56fa
 🔴 異常
 結論：異常：持久化停滯，資料可能未落庫
 指標：事件=PERSIST_STALL | 持續=242s/180s | 影響=新資料可能無法寫入 SQLite，時序會持續落後 | write=0/min | queue=8542/50000 | lag=412
-建議1：journalctl -u hk-tick-collector -n 200 --no-pager
-建議2：sqlite3 /data/sqlite/HK/20260212.db 'select count(*), max(ts_ms) from ticks;'
+建議1：scripts/hk-tickctl logs --ops --since "20 minutes ago"
+建議2：scripts/hk-tickctl db stats
 主機：ip-10-0-1-12 / hk-prod-a1
 eid=eid-a1b2c3d4 sid=sid-34de56fa
 ```
@@ -199,6 +202,16 @@ eid=eid-a1b2c3d4 sid=sid-34de56fa
 db：/data/sqlite/HK/20260212.db rows=321001245
 主機：ip-10-0-1-12 / hk-prod-a1
 sid=sid-9f8e7d6c
+```
+
+```text
+🟢 HK Tick Collector 正常
+結論：正常：休市日服務平穩
+指標：狀態=休市日 | market=holiday-closed | symbols=1000 | close_snapshot_ok=true | db_growth_today=+0 rows | last_update_at=2026-02-14T01:00:00+00:00 | p50_age=1240.0s
+進度：ingest/min=0 | persist/min=0 | write_eff=0.0% | stale_symbols=1000 | stale_bucket(>=120s/>=300s/>=900s)=1000/1000/1000 | top5_stale=HK.00700(1880.1s),HK.00981(1879.9s),HK.01398(1879.7s),HK.09988(1879.6s),HK.00005(1879.3s)
+主機：ip-10-0-1-12 / hk-prod-a1
+資源：load1=0.09 rss=132.2MB disk_free=86.40GB
+sid=sid-4fff2233
 ```
 
 <a id="data-model-and-guarantees"></a>
@@ -266,6 +279,12 @@ sqlite3 "file:${DB}?mode=ro" \
 
 更多 SQL 範例：[`scripts/query_examples.sql`](scripts/query_examples.sql)
 
+部署版本驗證：
+
+```bash
+scripts/hk-tickctl doctor --since "6 hours ago"
+```
+
 <a id="faq-section"></a>
 ## FAQ（常見問題）
 
@@ -280,6 +299,9 @@ A3. 先執行 `scripts/hk-tickctl logs --ops --since "20 minutes ago"`，再用�
 
 Q4. Telegram 沒收到訊息怎麼查？  
 A4. 依序檢查 `TG_BOT_TOKEN`、`TG_CHAT_ID`、群組權限、`getUpdates`/`getWebhookInfo`。
+
+Q5. 怎麼確認現在跑的是不是新通知版本（v2.1）？  
+A5. 執行 `scripts/hk-tickctl doctor --since "6 hours ago"`；若看到 `notify_schema=v2.1` 與 `HEALTH sid=...`，代表已切到新版。
 
 <a id="troubleshooting"></a>
 ## 故障排除

@@ -6,7 +6,7 @@
 
 ## 1.1 INFO（預設值班視角）
 
-- `health ... sid=...`：每分鐘一條固定欄位摘要
+- `health ... sid=...`：每分鐘一條固定欄位摘要（不展開全量 symbol）
 - `persist_summary ...`：每 5 秒一條聚合摘要
 - `WATCHDOG ...`：恢復、失敗、停滯等關鍵事件
 - `telegram_*`：通知送達/抑制/失敗
@@ -15,6 +15,7 @@
 
 - `poll_stats ...`：逐 symbol 輪詢細節
 - `persist_ticks ...`：每個 batch 寫入細節
+- `health_symbols_rollup ...`：symbol age/lag 分位數與 top5
 
 建議：平時 `LOG_LEVEL=INFO`，僅在故障排查短時間切 `DEBUG`。
 
@@ -28,12 +29,24 @@
 
 所有事件告警都使用 fingerprint 去重 + cooldown。
 
-盤後語義：
+盤後/休市語義：
 
-- 不把大幅度 `drift_sec` 直接視為異常（避免出現數萬秒延遲的誤導訊號）
+- 不把大幅度 `drift_sec` 直接視為異常（避免出現數萬秒延遲誤導）
 - 改用 `距收盤`、`last_update_at`、`close_snapshot_ok`、`db_growth_today`
+- 盤中時段若連續多個週期出現零流量且整體 age 高，轉為 `holiday-closed`
 
-## 3. sid/eid 關聯規範
+## 3. 健康摘要欄位（HEALTH）
+
+固定順序：`結論 -> 指標 -> 進度 -> 主機 -> 資源 -> sid`
+
+- `ingest/min`：`push_rows_per_min + poll_accepted`
+- `persist/min`：每分鐘落盤量
+- `write_eff`：`persist/min / max(1, ingest/min)`
+- `stale_symbols`：超過門檻數
+- `stale_bucket(...)`：stale 分桶（盤中與非盤中門檻不同）
+- `top5_stale`：最慢 5 個 symbol
+
+## 4. sid/eid 關聯規範
 
 - `sid`：每次 health snapshot 的短 ID，出現在：
   - `health` journal 摘要
@@ -42,7 +55,7 @@
   - `alert_event` 與 `WATCHDOG persistent_stall` journal
   - ALERT / RECOVERED Telegram
 
-## 4. 實戰查詢
+## 5. 實戰查詢
 
 使用者視角：
 
@@ -54,6 +67,12 @@ scripts/hk-tickctl logs --since "20 minutes ago"
 
 ```bash
 scripts/hk-tickctl logs --ops --since "20 minutes ago"
+```
+
+版本與部署驗證：
+
+```bash
+scripts/hk-tickctl doctor --since "6 hours ago"
 ```
 
 用 `sid/eid` 反查：
