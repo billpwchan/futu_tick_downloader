@@ -11,11 +11,13 @@ hk-tickctl - HK Tick Collector 維運工具
 
 用法:
   hk-tickctl logs [--ops] [--since "<time>"] [--no-follow]
+  hk-tickctl doctor [--since "<time>"]
   hk-tickctl db stats [--db <path>] [--day YYYYMMDD]
   hk-tickctl db symbols [--db <path>] [--day YYYYMMDD] [--minutes N]
 
 範例:
   hk-tickctl logs
+  hk-tickctl doctor --since "6 hours ago"
   hk-tickctl logs --ops --since "30 minutes ago"
   hk-tickctl db stats --day 20260212
   hk-tickctl db symbols --minutes 15
@@ -74,7 +76,7 @@ run_logs() {
 
   local pattern
   if [[ "${ops}" == "1" ]]; then
-    pattern="health|persist_summary|WATCHDOG|ERROR|Traceback|telegram_|sqlite_busy|poll_stats|persist_ticks"
+    pattern="health|health_symbols_rollup|persist_summary|WATCHDOG|ERROR|Traceback|telegram_|sqlite_busy|poll_stats|persist_ticks"
   else
     pattern="health|persist_summary|WATCHDOG|ERROR|Traceback|telegram_send_failed|telegram_alert_suppressed"
   fi
@@ -193,6 +195,89 @@ ORDER BY symbol;
 SQL
 }
 
+run_doctor() {
+  local since="6 hours ago"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since)
+        since="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "[FAIL] unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+
+  require_cmd systemctl
+  require_cmd journalctl
+  require_cmd grep
+
+  local active_status
+  active_status="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
+  if [[ -z "${active_status}" ]]; then
+    active_status="unknown"
+  fi
+
+  local logs
+  logs="$(journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager 2>/dev/null || true)"
+
+  local schema_line
+  schema_line="$(printf '%s\n' "${logs}" | grep -E "telegram_notifier_started.*notify_schema=" | tail -n 1 || true)"
+  local health_enqueue
+  health_enqueue="$(printf '%s\n' "${logs}" | grep -E "telegram_enqueue kind=HEALTH " | tail -n 1 || true)"
+  local warn_or_alert_enqueue
+  warn_or_alert_enqueue="$(printf '%s\n' "${logs}" | grep -E "telegram_enqueue kind=.* severity=(WARN|ALERT)" | tail -n 1 || true)"
+
+  local sid_ok="0"
+  if [[ -n "${health_enqueue}" ]] && printf '%s' "${health_enqueue}" | grep -q "sid="; then
+    sid_ok="1"
+  fi
+  local eid_ok="0"
+  if [[ -n "${warn_or_alert_enqueue}" ]] && printf '%s' "${warn_or_alert_enqueue}" | grep -q "eid="; then
+    eid_ok="1"
+  fi
+
+  echo "hk-tickctl doctor"
+  echo "service=${SERVICE_NAME} status=${active_status} since=${since}"
+  if [[ -n "${schema_line}" ]]; then
+    echo "[OK] found notify schema line"
+    echo "${schema_line}"
+  else
+    echo "[WARN] notify schema line missing (may be old code or TG not enabled)"
+  fi
+
+  if [[ -n "${health_enqueue}" ]]; then
+    echo "[INFO] latest HEALTH enqueue:"
+    echo "${health_enqueue}"
+  else
+    echo "[WARN] no HEALTH enqueue found in selected window"
+  fi
+
+  if [[ -n "${warn_or_alert_enqueue}" ]]; then
+    echo "[INFO] latest WARN/ALERT enqueue:"
+    echo "${warn_or_alert_enqueue}"
+  else
+    echo "[INFO] no WARN/ALERT enqueue in selected window"
+  fi
+
+  if [[ -n "${schema_line}" && "${sid_ok}" == "1" ]]; then
+    echo "[PASS] deployment likely on notify_schema=v2.1+ (sid present)"
+  else
+    echo "[CHECK] deployment may be old or not fully enabled; verify branch/commit and restart service"
+  fi
+
+  if [[ -n "${warn_or_alert_enqueue}" && "${eid_ok}" != "1" ]]; then
+    echo "[CHECK] WARN/ALERT enqueue without eid detected; inspect notifier version"
+  fi
+}
+
 main() {
   if [[ $# -lt 1 ]]; then
     usage
@@ -203,6 +288,10 @@ main() {
     logs)
       shift
       run_logs "$@"
+      ;;
+    doctor)
+      shift
+      run_doctor "$@"
       ;;
     db)
       shift
