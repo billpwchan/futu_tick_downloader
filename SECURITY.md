@@ -1,25 +1,34 @@
-# 安全政策
+# 安全政策（Security Policy）
 
 ## 支援版本
 
-安全修補原則上僅提供給 `main` 最新 minor 版本。
-
-| 版本 | 是否支援 |
+| 版本範圍 | 安全修補支援 |
 |---|---|
-| latest | :white_check_mark: |
-| older tags | :x: |
+| `main` 最新版本 | 支援 |
+| 已淘汰舊 tag | 原則上不支援（可視影響評估） |
 
-## 通報弱點
+## 回報方式
 
-請勿在公開 GitHub issue 回報安全弱點。
+請不要在公開 Issue 直接揭露漏洞細節。
 
-請透過以下管道私下通報：security@hk-tick-collector.example.com
+- 聯絡信箱：`security@hk-tick-collector.example.com`
+- 主旨建議：`[SECURITY] <簡短標題>`
 
-建議附上：
+## 建議回報內容
 
-- 受影響版本／commit
-- 影響範圍摘要
-- 重現步驟或 PoC
-- 建議修補方式（若已具備）
+- 受影響版本 / commit
+- 攻擊面與影響範圍（資料完整性、可用性、機密性）
+- 可重現步驟（PoC）
+- 暫時緩解方式（若有）
 
-我們會在 3 個工作天內回覆並協調揭露流程。
+## 回應 SLA
+
+- `24 小時內`：確認收到（ack）
+- `3 個工作天內`：初步分級與處理窗口
+- `14 天內`：提供修補計畫或替代緩解
+
+## 負責揭露（Responsible Disclosure）
+
+- 修補未完成前，請勿公開 exploit 細節。
+- 維護者修補與驗證後，會協調公告時間。
+- 若為高風險議題，將優先發補丁再公開 changelog。

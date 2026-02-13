@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+title: HK Tick Collector
+message: "如果本專案對你的研究或報告有幫助，請使用以下資訊引用。"
+type: software
+authors:
+  - family-names: Maintainers
+    given-names: HK Tick Collector
+affiliation: Open Source Community
+repository-code: "https://github.com/billpwchan/futu_tick_downloader"
+url: "https://github.com/billpwchan/futu_tick_downloader"
+license: Apache-2.0
+version: 0.1.0
+date-released: 2026-02-13
+keywords:
+  - futu
+  - opend
+  - tick
+  - sqlite
+  - systemd

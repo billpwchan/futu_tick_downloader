@@ -1,28 +1,24 @@
-## 摘要
+## 動機（Why）
 
 -
 
-## 變更內容
+## 主要變更（What）
 
 -
 
-## 向後相容
+## 測試證據（How Verified）
 
-- [ ] 預設執行期行為無破壞性變更
-- [ ] 既有 systemd ExecStart 路徑仍可用（`python -m hk_tick_collector.main`）
+- [ ] `make lint`
+- [ ] `make test`
+- [ ] （如適用）`scripts/hk-tickctl status`
+- [ ] （如適用）`scripts/hk-tickctl db stats`
 
-## 測試計畫
+## 相容性與風險（Compatibility / Risk）
 
-- [ ] `pytest -q`
-- [ ] `pre-commit run -a`
-- [ ] （如適用）手動 `systemd` 驗證
+- [ ] 預設行為無破壞性變更
+- [ ] 若有配置變更，已更新 `.env.example` / `deploy/env/.env.example`
+- [ ] 若有操作變更，已更新 `README.md` 與 `docs/04-運維 Runbook.md`
 
-## 維運檢查清單
-
-- [ ] 若行為或可觀測性變更，已更新 docs/runbook
-- [ ] 若設定變更，已更新 `.env.example`
-- [ ] 若 schema 變更，已補 migration 說明
-
-## 部署備註
+## 部署與回滾（Deploy / Rollback）
 
 -

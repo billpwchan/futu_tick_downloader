@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 使用與維運問題
+  - name: 使用問題（先看文件）
     url: https://github.com/billpwchan/futu_tick_downloader/discussions
-    about: 一般使用、設定與故障排除問題請在此提問。
-  - name: 安全性通報
+    about: 請先閱讀 README FAQ、docs/_index.md 與 docs/04-運維 Runbook.md
+  - name: 安全通報（私下）
     url: mailto:security@hk-tick-collector.example.com
-    about: 安全弱點請透過私下管道通報。
+    about: 安全漏洞請勿公開披露，請依 SECURITY.md 通報

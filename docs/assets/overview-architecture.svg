@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="HK Tick Collector 架構總覽">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#eef4ff"/>
+      <stop offset="100%" stop-color="#f6fff2"/>
+    </linearGradient>
+    <style>
+      .title { font: 700 34px 'Noto Sans TC', sans-serif; fill: #1b2a4a; }
+      .label { font: 600 20px 'Noto Sans TC', sans-serif; fill: #1f2f3f; }
+      .small { font: 500 16px 'Noto Sans TC', sans-serif; fill: #334155; }
+      .box { fill: #ffffff; stroke: #3b82f6; stroke-width: 2; rx: 14; }
+      .box2 { fill: #ffffff; stroke: #10b981; stroke-width: 2; rx: 14; }
+      .box3 { fill: #ffffff; stroke: #f59e0b; stroke-width: 2; rx: 14; }
+      .arrow { stroke: #1e293b; stroke-width: 2.5; marker-end: url(#m); }
+    </style>
+    <marker id="m" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#1e293b" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="640" fill="url(#bg)"/>
+  <text x="40" y="60" class="title">HK Tick Collector Architecture</text>
+
+  <rect x="40" y="110" width="220" height="90" class="box"/>
+  <text x="70" y="165" class="label">Futu OpenD</text>
+
+  <rect x="40" y="240" width="220" height="90" class="box"/>
+  <text x="80" y="295" class="label">Poll Fallback</text>
+
+  <rect x="40" y="370" width="220" height="90" class="box"/>
+  <text x="70" y="425" class="label">Mock Replay</text>
+
+  <rect x="330" y="180" width="270" height="120" class="box2"/>
+  <text x="360" y="235" class="label">Mapper / Validator</text>
+  <text x="360" y="265" class="small">資料清洗、欄位標準化</text>
+
+  <rect x="660" y="180" width="220" height="120" class="box2"/>
+  <text x="700" y="235" class="label">Queue</text>
+  <text x="700" y="265" class="small">批次緩衝</text>
+
+  <rect x="930" y="150" width="280" height="120" class="box2"/>
+  <text x="965" y="205" class="label">Persist Worker Thread</text>
+  <text x="965" y="235" class="small">SQLite WAL 寫入</text>
+
+  <rect x="930" y="320" width="280" height="120" class="box3"/>
+  <text x="980" y="375" class="label">Health + Watchdog</text>
+  <text x="980" y="405" class="small">狀態監測 / 自癒</text>
+
+  <rect x="930" y="490" width="280" height="100" class="box3"/>
+  <text x="1000" y="548" class="label">Telegram Notifier</text>
+
+  <rect x="660" y="390" width="220" height="120" class="box2"/>
+  <text x="690" y="445" class="label">SQLite WAL</text>
+  <text x="690" y="475" class="small">YYYYMMDD.db</text>
+
+  <line x1="260" y1="155" x2="330" y2="220" class="arrow"/>
+  <line x1="260" y1="285" x2="330" y2="240" class="arrow"/>
+  <line x1="260" y1="415" x2="330" y2="260" class="arrow"/>
+  <line x1="600" y1="240" x2="660" y2="240" class="arrow"/>
+  <line x1="880" y1="240" x2="930" y2="210" class="arrow"/>
+  <line x1="1070" y1="270" x2="1070" y2="320" class="arrow"/>
+  <line x1="1070" y1="440" x2="1070" y2="490" class="arrow"/>
+  <line x1="930" y1="210" x2="880" y2="430" class="arrow"/>
+</svg>

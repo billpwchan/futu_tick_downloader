@@ -137,7 +137,7 @@ def main() -> int:
     compress_level = min(max(args.compress_level, 0), 9)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
     try:
         symbols = list_symbols(conn)
         if not symbols:

@@ -1,15 +1,18 @@
-# 貢獻指南
+# 貢獻指南（繁體中文主版）
 
-感謝你參與 `hk-tick-collector`。
+感謝你願意改進 `HK Tick Collector`。
 
-## 範圍
+## 專案原則
 
-本專案是面向生產環境的採集服務，優先考量穩定性與執行期安全。
+- 不破壞現有功能：預設執行行為需維持相容。
+- 文件同步：行為、部署、配置變更必須同步更新 docs。
+- 可驗證：每個關鍵變更都要有可執行驗證命令。
+- 不提交 secrets：僅維護 `.env.example` / `deploy/env/.env.example`。
 
 ## 開發環境
 
 ```bash
-git clone <YOUR_FORK_OR_REPO_URL>
+git clone https://github.com/billpwchan/futu_tick_downloader.git
 cd futu_tick_downloader
 python3 -m venv .venv
 . .venv/bin/activate
@@ -17,50 +20,37 @@ pip install -U pip
 pip install -e .[dev]
 ```
 
-## 程式碼風格與品質
-
-送出 PR 前請執行：
+## 本機工作流
 
 ```bash
-pre-commit run -a
-pytest -q
+make setup
+make lint
+make test
 ```
 
-工具鏈：
+## 程式碼與測試要求
 
-- ruff（`ruff check`、`ruff format`）
-- pytest（含 `pyproject.toml` 的 coverage 設定）
+- 行為變更必須補測試（pytest）。
+- `ruff check` 與 `ruff format --check` 必須通過。
+- 新增命令或運維流程時，請同步更新：
+- `README.md` 的「常用命令」
+- `docs/04-運維 Runbook.md`
 
-## 測試要求
+## Commit 與 PR 規範
 
-- 任何會影響行為的變更，都要新增或更新測試。
-- CI 測試不得依賴即時 Futu OpenD。
-- 優先使用可重現測試與暫存 SQLite 檔案。
+1. 單一 PR 聚焦單一目的，避免混雜重構。
+2. PR 描述需包含：動機、風險、測試證據、回滾方式。
+3. 若有配置變更，請附 `.env` 升級說明。
+4. 若有 schema / 索引變更，請附資料相容性說明。
 
-## 向後相容
+## 版本與發版
 
-- 預設情境下不得破壞既有執行期行為。
-- 必須維持 `python -m hk_tick_collector.main` 生產入口可用。
-- 新入口需採加法設計（例如 console script 別名）。
+- 採用 SemVer。
+- 變更記錄採 Keep a Changelog（見 `CHANGELOG.md`）。
+- 發版流程：`docs/08-發版流程.md`。
 
-## Pull Request 流程
+## 建議先讀
 
-1. 使用小而可審閱的 commit。
-2. 必要時更新文件與變更記錄（`CHANGELOG.md`）。
-3. 依 PR 範本填寫測試證據與部署注意事項。
-4. 確認 CI 全綠。
-
-## Commit / 版本策略
-
-- 發版遵循 SemVer。
-- `CHANGELOG.md` 採 Keep a Changelog 格式。
-
-## 回報問題
-
-請使用 issue template，並盡量提供：
-
-- 作業系統與 Python 版本
-- 已去敏的環境設定
-- 近期日誌（`journalctl` 節錄）
-- DB 大小與 PRAGMA 資訊
-- 可重現步驟
+- 文件入口：`docs/_index.md`
+- 開發者導覽：`docs/07-貢獻指南（開發者）.md`
+- Runbook：`docs/04-運維 Runbook.md`

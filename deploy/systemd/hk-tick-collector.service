@@ -1,5 +1,5 @@
 [Unit]
-Description=HK Tick Collector (Futu OpenD to SQLite)
+Description=HK Tick Collector (Futu OpenD -> SQLite WAL)
 After=network-online.target futu-opend.service
 Wants=network-online.target
 Requires=futu-opend.service
@@ -11,23 +11,30 @@ Type=simple
 User=hkcollector
 Group=hkcollector
 WorkingDirectory=/opt/futu_tick_downloader
-EnvironmentFile=/opt/futu_tick_downloader/.env
+EnvironmentFile=-/etc/hk-tick-collector.env
 ExecStart=/opt/futu_tick_downloader/.venv/bin/python -m hk_tick_collector.main
 Restart=always
-RestartSec=5
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=120
 KillSignal=SIGINT
-TimeoutStopSec=180
 LimitNOFILE=65535
+Nice=5
 UMask=0027
 
-# Security hardening
+# Security hardening (保守配置，避免鎖死維運)
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
+PrivateDevices=true
+ProtectSystem=full
 ProtectHome=true
 ProtectControlGroups=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 ReadWritePaths=/data/sqlite/HK /opt/futu_tick_downloader
 
 [Install]

@@ -4,10 +4,18 @@ title: "[Feature] "
 labels: [enhancement]
 body:
   - type: textarea
-    id: problem
+    id: scenario
     attributes:
-      label: 問題陳述
-      description: 這要解決哪個生產或開發痛點？
+      label: 使用情境
+      description: 你在什麼場景遇到痛點？
+    validations:
+      required: true
+
+  - type: textarea
+    id: value
+    attributes:
+      label: 期望價值
+      description: 這個功能帶來的具體收益（可量化更好）。
     validations:
       required: true
 
@@ -15,26 +23,20 @@ body:
     id: proposal
     attributes:
       label: 建議方案
-      description: 你希望調整什麼？
+      description: 你希望怎麼做？
     validations:
       required: true
-
-  - type: textarea
-    id: compatibility
-    attributes:
-      label: 向後相容
-      description: 是否有執行期行為變更？是否有預設安全路徑？
-      placeholder: 預設行為不變／僅新增不破壞
-    validations:
-      required: true
-
-  - type: textarea
-    id: ops
-    attributes:
-      label: 維運影響
-      description: 對 systemd 部署、日誌、runbook 或故障排除的影響。
 
   - type: textarea
     id: alternatives
     attributes:
-      label: 其他替代方案
+      label: 替代方案
+      description: 你考慮過哪些替代方式？
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: 相容性與維運影響
+      description: 是否影響既有部署、runbook、通知語義？
+    validations:
+      required: true

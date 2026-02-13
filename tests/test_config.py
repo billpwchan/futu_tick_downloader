@@ -77,7 +77,7 @@ def test_config_bool_and_list_parsing(monkeypatch):
     assert cfg.watchdog_stall_sec == 240
 
 
-def test_config_supports_tg_aliases(monkeypatch):
+def test_config_parses_telegram_env(monkeypatch):
     monkeypatch.setattr(config_module, "_load_dotenv", lambda: None)
     _clear_env(monkeypatch)
     monkeypatch.setenv("TG_ENABLED", "1")
@@ -114,6 +114,19 @@ def test_config_supports_tg_aliases(monkeypatch):
     assert cfg.telegram_health_holiday_mode == "disabled"
     assert cfg.telegram_alert_cooldown_sec == 900
     assert cfg.telegram_alert_escalation_steps == [0, 300, 900]
+
+
+def test_config_ignores_legacy_telegram_aliases(monkeypatch):
+    monkeypatch.setattr(config_module, "_load_dotenv", lambda: None)
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_ENABLED", "1")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "legacy-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-10099")
+
+    cfg = Config.from_env()
+    assert cfg.telegram_enabled is False
+    assert cfg.telegram_bot_token == ""
+    assert cfg.telegram_chat_id == ""
 
 
 @pytest.mark.parametrize(

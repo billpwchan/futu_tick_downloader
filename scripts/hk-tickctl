@@ -6,7 +6,7 @@ DATA_ROOT="${DATA_ROOT:-/data/sqlite/HK}"
 DAY_DEFAULT="$(TZ=Asia/Hong_Kong date +%Y%m%d)"
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 hk-tickctl - HK Tick Collector 維運工具
 
 用法:
@@ -16,22 +16,34 @@ hk-tickctl - HK Tick Collector 維運工具
   hk-tickctl db stats [--db <path>] [--day YYYYMMDD]
   hk-tickctl db symbols [--db <path>] [--day YYYYMMDD] [--minutes N]
   hk-tickctl db symbol <SYMBOL> [--db <path>] [--day YYYYMMDD] [--last N]
+  hk-tickctl export [--db <path>] [--day YYYYMMDD] [--out <tar.gz>]
+  hk-tickctl tg test [--token <token>] [--chat-id <chat_id>] [--thread-id <id>] [--text <msg>]
 
 範例:
   hk-tickctl status
-  hk-tickctl logs
-  hk-tickctl doctor --since "6 hours ago"
-  hk-tickctl logs --ops --since "30 minutes ago"
-  hk-tickctl db stats --day 20260212
-  hk-tickctl db symbols --minutes 15
-  hk-tickctl db symbol HK.00700 --last 20
-EOF
+  hk-tickctl logs --ops --since "20 minutes ago"
+  hk-tickctl db stats --day 20260213
+  hk-tickctl export --day 20260213 --out /tmp/hk-20260213.tar.gz
+  hk-tickctl tg test
+USAGE
+}
+
+fail() {
+  echo "[失敗] $*" >&2
+  exit 1
+}
+
+info() {
+  echo "[資訊] $*"
+}
+
+ok() {
+  echo "[完成] $*"
 }
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    echo "[FAIL] command not found: $1" >&2
-    exit 1
+    fail "找不到命令: $1"
   fi
 }
 
@@ -43,6 +55,32 @@ db_path_from_args() {
     return
   fi
   printf '%s/%s.db\n' "${DATA_ROOT}" "${day}"
+}
+
+file_size_bytes() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    printf '0\n'
+    return
+  fi
+  if stat -f%z "${path}" >/dev/null 2>&1; then
+    stat -f%z "${path}"
+    return
+  fi
+  stat -c%s "${path}"
+}
+
+sha256_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${path}" | awk '{print $1}'
+    return
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+    return
+  fi
+  fail "缺少 shasum/sha256sum，無法計算校驗碼"
 }
 
 run_logs() {
@@ -69,14 +107,13 @@ run_logs() {
         exit 0
         ;;
       *)
-        echo "[FAIL] unknown argument: $1" >&2
-        usage
-        exit 1
+        fail "未知參數: $1"
         ;;
     esac
   done
 
   require_cmd journalctl
+  require_cmd grep
 
   local pattern
   if [[ "${ops}" == "1" ]]; then
@@ -85,6 +122,7 @@ run_logs() {
     pattern="health|persist_summary|WATCHDOG|ERROR|Traceback|telegram_send_failed|telegram_alert_suppressed"
   fi
 
+  info "服務=${SERVICE_NAME} since=${since} ops=${ops}"
   if [[ "${follow}" == "1" ]]; then
     journalctl -u "${SERVICE_NAME}" --since "${since}" -f --no-pager \
       | grep -E --line-buffered "${pattern}" || true
@@ -107,9 +145,7 @@ run_status() {
         exit 0
         ;;
       *)
-        echo "[FAIL] unknown argument: $1" >&2
-        usage
-        exit 1
+        fail "未知參數: $1"
         ;;
     esac
   done
@@ -118,36 +154,34 @@ run_status() {
   require_cmd journalctl
   require_cmd grep
 
-  local active_status
-  active_status="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
-  if [[ -z "${active_status}" ]]; then
-    active_status="unknown"
-  fi
+  local service_status
+  service_status="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
+  [[ -n "${service_status}" ]] || service_status="unknown"
+
+  local opend_status
+  opend_status="$(systemctl is-active futu-opend 2>/dev/null || true)"
+  [[ -n "${opend_status}" ]] || opend_status="unknown"
 
   local logs
   logs="$(journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager 2>/dev/null || true)"
   local health_line
   health_line="$(printf '%s\n' "${logs}" | grep -E "health sid=" | tail -n 1 || true)"
   local alert_line
-  alert_line="$(
-    printf '%s\n' "${logs}" \
-      | grep -E "telegram_enqueue kind=.* severity=(WARN|ALERT)|telegram_send_failed|WATCHDOG persistent_stall|alert_event code=" \
-      | tail -n 1 || true
-  )"
+  alert_line="$(printf '%s\n' "${logs}" | grep -E "severity=(WARN|ALERT)|WATCHDOG persistent_stall|telegram_send_failed|alert_event code=" | tail -n 1 || true)"
 
-  echo "hk-tickctl status"
-  echo "service=${SERVICE_NAME} status=${active_status} since=${since}"
+  echo "=== HK Tick 狀態 ==="
+  echo "collector=${service_status} opend=${opend_status} time_window=${since}"
+
   if [[ -n "${health_line}" ]]; then
-    echo "[INFO] latest health:"
-    echo "${health_line}"
+    echo "[健康] ${health_line}"
   else
-    echo "[WARN] no health line in selected window"
+    echo "[健康] 選定時間內沒有 health 訊息"
   fi
+
   if [[ -n "${alert_line}" ]]; then
-    echo "[INFO] latest alert/watchdog:"
-    echo "${alert_line}"
+    echo "[告警] ${alert_line}"
   else
-    echo "[OK] no WARN/ALERT/WATCHDOG in selected window"
+    echo "[告警] 選定時間內無 WARN/ALERT/WATCHDOG"
   fi
 }
 
@@ -169,9 +203,7 @@ run_db_stats() {
         exit 0
         ;;
       *)
-        echo "[FAIL] unknown argument: $1" >&2
-        usage
-        exit 1
+        fail "未知參數: $1"
         ;;
     esac
   done
@@ -179,21 +211,38 @@ run_db_stats() {
   require_cmd sqlite3
   local db
   db="$(db_path_from_args "${db_path}" "${day}")"
-  if [[ ! -f "${db}" ]]; then
-    echo "[FAIL] db not found: ${db}" >&2
-    exit 1
-  fi
+  [[ -f "${db}" ]] || fail "找不到 DB: ${db}"
 
-  sqlite3 "file:${db}?mode=ro" <<'SQL'
-.headers on
-.mode column
+  local rows max_ts max_ts_utc drift index_count page_bytes
+  IFS='|' read -r rows max_ts max_ts_utc drift index_count page_bytes < <(
+    sqlite3 -separator '|' "file:${db}?mode=ro" "
 SELECT
   COUNT(*) AS rows,
-  MAX(ts_ms) AS max_ts_ms,
-  datetime(MAX(ts_ms)/1000,'unixepoch') AS max_ts_utc,
-  ROUND(strftime('%s','now') - MAX(ts_ms)/1000.0, 3) AS drift_sec
+  IFNULL(MAX(ts_ms), 0) AS max_ts_ms,
+  IFNULL(datetime(MAX(ts_ms)/1000,'unixepoch'),'n/a') AS max_ts_utc,
+  IFNULL(ROUND(strftime('%s','now') - MAX(ts_ms)/1000.0, 3), 0) AS drift_sec,
+  (SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='ticks') AS index_count,
+  (SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()) AS approx_bytes
 FROM ticks;
-SQL
+"
+  )
+
+  local db_size wal_size shm_size
+  db_size="$(file_size_bytes "${db}")"
+  wal_size="$(file_size_bytes "${db}-wal")"
+  shm_size="$(file_size_bytes "${db}-shm")"
+
+  echo "=== DB 統計 ==="
+  echo "db=${db}"
+  echo "rows=${rows}"
+  echo "max_ts_ms=${max_ts}"
+  echo "max_ts_utc=${max_ts_utc}"
+  echo "drift_sec=${drift}"
+  echo "indices=${index_count}"
+  echo "approx_bytes_sqlite=${page_bytes}"
+  echo "file_bytes_db=${db_size}"
+  echo "file_bytes_wal=${wal_size}"
+  echo "file_bytes_shm=${shm_size}"
 }
 
 run_db_symbols() {
@@ -219,9 +268,7 @@ run_db_symbols() {
         exit 0
         ;;
       *)
-        echo "[FAIL] unknown argument: $1" >&2
-        usage
-        exit 1
+        fail "未知參數: $1"
         ;;
     esac
   done
@@ -229,10 +276,7 @@ run_db_symbols() {
   require_cmd sqlite3
   local db
   db="$(db_path_from_args "${db_path}" "${day}")"
-  if [[ ! -f "${db}" ]]; then
-    echo "[FAIL] db not found: ${db}" >&2
-    exit 1
-  fi
+  [[ -f "${db}" ]] || fail "找不到 DB: ${db}"
 
   sqlite3 "file:${db}?mode=ro" <<SQL
 .headers on
@@ -249,7 +293,7 @@ SELECT
     SUM(CASE WHEN t.ts_ms >= (SELECT n - (${minutes} * 60000) FROM now_ms) THEN 1 ELSE 0 END)
     * 1.0 / ${minutes},
     2
-  ) AS write_rate_per_min_last_${minutes}m
+  ) AS growth_per_min_last_${minutes}m
 FROM ticks t
 GROUP BY t.symbol
 ORDER BY symbol;
@@ -261,11 +305,8 @@ run_db_symbol() {
   local db_path=""
   local day="${DAY_DEFAULT}"
   local last="20"
-  if [[ $# -lt 1 ]]; then
-    echo "[FAIL] symbol is required" >&2
-    usage
-    exit 1
-  fi
+
+  [[ $# -ge 1 ]] || fail "缺少 symbol"
   symbol="$1"
   shift
 
@@ -288,9 +329,7 @@ run_db_symbol() {
         exit 0
         ;;
       *)
-        echo "[FAIL] unknown argument: $1" >&2
-        usage
-        exit 1
+        fail "未知參數: $1"
         ;;
     esac
   done
@@ -298,10 +337,7 @@ run_db_symbol() {
   require_cmd sqlite3
   local db
   db="$(db_path_from_args "${db_path}" "${day}")"
-  if [[ ! -f "${db}" ]]; then
-    echo "[FAIL] db not found: ${db}" >&2
-    exit 1
-  fi
+  [[ -f "${db}" ]] || fail "找不到 DB: ${db}"
 
   local symbol_sql
   symbol_sql="${symbol//\'/''}"
@@ -323,6 +359,161 @@ LIMIT ${last};
 SQL
 }
 
+run_export() {
+  local db_path=""
+  local day="${DAY_DEFAULT}"
+  local out=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --db)
+        db_path="${2:-}"
+        shift 2
+        ;;
+      --day)
+        day="${2:-}"
+        shift 2
+        ;;
+      --out)
+        out="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "未知參數: $1"
+        ;;
+    esac
+  done
+
+  require_cmd tar
+  local db
+  db="$(db_path_from_args "${db_path}" "${day}")"
+  [[ -f "${db}" ]] || fail "找不到 DB: ${db}"
+
+  if [[ -z "${out}" ]]; then
+    out="/tmp/hk-${day}.tar.gz"
+  fi
+
+  local out_dir
+  out_dir="$(dirname "${out}")"
+  mkdir -p "${out_dir}"
+
+  local base dir
+  dir="$(dirname "${db}")"
+  base="$(basename "${db}")"
+
+  local files=("${base}")
+  [[ -f "${db}-wal" ]] && files+=("${base}-wal")
+  [[ -f "${db}-shm" ]] && files+=("${base}-shm")
+
+  tar -C "${dir}" -czf "${out}" "${files[@]}"
+
+  local checksum
+  checksum="$(sha256_file "${out}")"
+  printf '%s  %s\n' "${checksum}" "$(basename "${out}")" > "${out}.sha256"
+
+  ok "已匯出: ${out}"
+  info "sha256: ${checksum}"
+  info "校驗檔: ${out}.sha256"
+}
+
+run_tg_test() {
+  local token="${TG_TOKEN:-${TG_BOT_TOKEN:-}}"
+  local chat_id="${TG_CHAT_ID:-}"
+  local thread_id="${TG_MESSAGE_THREAD_ID:-}"
+  local text=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token)
+        token="${2:-}"
+        shift 2
+        ;;
+      --chat-id)
+        chat_id="${2:-}"
+        shift 2
+        ;;
+      --thread-id)
+        thread_id="${2:-}"
+        shift 2
+        ;;
+      --text)
+        text="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "未知參數: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "${token}" ]] || fail "缺少 TG_TOKEN（可用 env 或 --token）"
+  [[ -n "${chat_id}" ]] || fail "缺少 TG_CHAT_ID（可用 env 或 --chat-id）"
+
+  if [[ -z "${text}" ]]; then
+    text="✅ HK Tick Collector 測試通知\n結論：Telegram 設定可用\n建議：可開始驗證 health / alert 訊息"
+  fi
+
+  require_cmd python3
+
+  TG_TOKEN="${token}" TG_CHAT_ID="${chat_id}" TG_THREAD_ID="${thread_id}" TG_TEXT="${text}" python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.parse
+import urllib.request
+
+token = os.environ["TG_TOKEN"].strip()
+chat_id = os.environ["TG_CHAT_ID"].strip()
+thread_id = os.environ.get("TG_THREAD_ID", "").strip()
+text = os.environ["TG_TEXT"]
+
+url = f"https://api.telegram.org/bot{token}/sendMessage"
+payload = {
+    "chat_id": chat_id,
+    "text": text,
+    "parse_mode": "HTML",
+}
+if thread_id:
+    try:
+        payload["message_thread_id"] = int(thread_id)
+    except ValueError:
+        print("[失敗] thread_id 需為整數", file=sys.stderr)
+        raise SystemExit(2)
+
+data = urllib.parse.urlencode(payload).encode("utf-8")
+req = urllib.request.Request(url, data=data, method="POST")
+
+try:
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+except Exception as exc:  # noqa: BLE001
+    print(f"[失敗] Telegram 呼叫失敗: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    result = json.loads(body)
+except json.JSONDecodeError:
+    print("[失敗] Telegram 回傳非 JSON", file=sys.stderr)
+    print(body)
+    raise SystemExit(1)
+
+if not result.get("ok"):
+    print(f"[失敗] Telegram API 回應: {body}", file=sys.stderr)
+    raise SystemExit(1)
+
+message_id = result.get("result", {}).get("message_id", "n/a")
+print(f"[完成] Telegram 測試訊息已送出 message_id={message_id}")
+PY
+}
+
 run_doctor() {
   local since="6 hours ago"
   while [[ $# -gt 0 ]]; do
@@ -336,9 +527,7 @@ run_doctor() {
         exit 0
         ;;
       *)
-        echo "[FAIL] unknown argument: $1" >&2
-        usage
-        exit 1
+        fail "未知參數: $1"
         ;;
     esac
   done
@@ -349,13 +538,10 @@ run_doctor() {
 
   local active_status
   active_status="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
-  if [[ -z "${active_status}" ]]; then
-    active_status="unknown"
-  fi
+  [[ -n "${active_status}" ]] || active_status="unknown"
 
   local logs
   logs="$(journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager 2>/dev/null || true)"
-
   local schema_line
   schema_line="$(printf '%s\n' "${logs}" | grep -E "telegram_notifier_started.*notify_schema=" | tail -n 1 || true)"
   local health_enqueue
@@ -363,54 +549,29 @@ run_doctor() {
   local warn_or_alert_enqueue
   warn_or_alert_enqueue="$(printf '%s\n' "${logs}" | grep -E "telegram_enqueue kind=.* severity=(WARN|ALERT)" | tail -n 1 || true)"
 
-  local sid_ok="0"
-  if [[ -n "${health_enqueue}" ]] && printf '%s' "${health_enqueue}" | grep -q "sid="; then
-    sid_ok="1"
-  fi
-  local eid_ok="0"
-  if [[ -n "${warn_or_alert_enqueue}" ]] && printf '%s' "${warn_or_alert_enqueue}" | grep -q "eid="; then
-    eid_ok="1"
-  fi
-
-  echo "hk-tickctl doctor"
+  echo "=== HK Tick 版本診斷 ==="
   echo "service=${SERVICE_NAME} status=${active_status} since=${since}"
+
   if [[ -n "${schema_line}" ]]; then
-    echo "[OK] found notify schema line"
+    echo "[完成] 找到 notify schema 訊息"
     echo "${schema_line}"
   else
-    echo "[WARN] notify schema line missing (may be old code or TG not enabled)"
+    echo "[資訊] 沒找到 notify schema（可能未啟用 TG 或版本較舊）"
   fi
 
   if [[ -n "${health_enqueue}" ]]; then
-    echo "[INFO] latest HEALTH enqueue:"
+    echo "[資訊] 最近 HEALTH enqueue"
     echo "${health_enqueue}"
-  else
-    echo "[WARN] no HEALTH enqueue found in selected window"
   fi
 
   if [[ -n "${warn_or_alert_enqueue}" ]]; then
-    echo "[INFO] latest WARN/ALERT enqueue:"
+    echo "[資訊] 最近 WARN/ALERT enqueue"
     echo "${warn_or_alert_enqueue}"
-  else
-    echo "[INFO] no WARN/ALERT enqueue in selected window"
-  fi
-
-  if [[ -n "${schema_line}" && "${sid_ok}" == "1" ]]; then
-    echo "[PASS] deployment likely on notify_schema=v2.2+ (sid present)"
-  else
-    echo "[CHECK] deployment may be old or not fully enabled; verify branch/commit and restart service"
-  fi
-
-  if [[ -n "${warn_or_alert_enqueue}" && "${eid_ok}" != "1" ]]; then
-    echo "[CHECK] WARN/ALERT enqueue without eid detected; inspect notifier version"
   fi
 }
 
 main() {
-  if [[ $# -lt 1 ]]; then
-    usage
-    exit 1
-  fi
+  [[ $# -ge 1 ]] || { usage; exit 1; }
 
   case "$1" in
     status)
@@ -427,10 +588,7 @@ main() {
       ;;
     db)
       shift
-      if [[ $# -lt 1 ]]; then
-        usage
-        exit 1
-      fi
+      [[ $# -ge 1 ]] || fail "缺少 db 子命令"
       case "$1" in
         stats)
           shift
@@ -445,9 +603,24 @@ main() {
           run_db_symbol "$@"
           ;;
         *)
-          echo "[FAIL] unknown db subcommand: $1" >&2
-          usage
-          exit 1
+          fail "未知 db 子命令: $1"
+          ;;
+      esac
+      ;;
+    export)
+      shift
+      run_export "$@"
+      ;;
+    tg)
+      shift
+      [[ $# -ge 1 ]] || fail "缺少 tg 子命令"
+      case "$1" in
+        test)
+          shift
+          run_tg_test "$@"
+          ;;
+        *)
+          fail "未知 tg 子命令: $1"
           ;;
       esac
       ;;
@@ -455,9 +628,7 @@ main() {
       usage
       ;;
     *)
-      echo "[FAIL] unknown subcommand: $1" >&2
-      usage
-      exit 1
+      fail "未知子命令: $1"
       ;;
   esac
 }

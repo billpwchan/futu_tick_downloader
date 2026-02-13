@@ -1,0 +1,38 @@
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hk-tick-collector
+    env_file:
+      - .env
+    command: ["python", "-m", "hk_tick_collector.main"]
+    volumes:
+      - ./data/sqlite:/data/sqlite/HK
+    restart: unless-stopped
+    profiles: ["opend"]
+
+  mock-replay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hk-tick-mock-replay
+    env_file:
+      - .env
+    command:
+      [
+        "python",
+        "scripts/mock_tick_replay.py",
+        "--data-root",
+        "/data/sqlite/HK",
+        "--symbols",
+        "HK.00700,HK.00981,HK.09988",
+        "--interval-ms",
+        "1000",
+        "--batch-size",
+        "30"
+      ]
+    volumes:
+      - ./data/sqlite:/data/sqlite/HK
+    restart: unless-stopped
+    profiles: ["mock"]

@@ -835,6 +835,7 @@ def test_notifier_start_logs_notify_schema(caplog):
     asyncio.run(runner())
     joined = "\n".join(record.getMessage() for record in caplog.records)
     assert f"notify_schema={NOTIFY_SCHEMA_VERSION}" in joined
+    assert "1234567890:ABCDEF" not in joined
 
 
 def test_notifier_market_mode_change_to_holiday_closed_emits_immediately():

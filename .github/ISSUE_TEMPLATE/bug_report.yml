@@ -6,13 +6,21 @@ body:
   - type: markdown
     attributes:
       value: |
-        感謝你回報問題。請先移除日誌與環境設定中的敏感資訊。
+        感謝回報。請先去敏（token / chat id / 私有位址）後再提交。
+
+  - type: input
+    id: version
+    attributes:
+      label: 專案版本 / Commit SHA
+      placeholder: v0.1.0 或 a1b2c3d
+    validations:
+      required: true
 
   - type: textarea
     id: summary
     attributes:
       label: 問題摘要
-      description: 發生了什麼？你原本預期是什麼？
+      description: 一句話描述問題與影響。
     validations:
       required: true
 
@@ -20,11 +28,25 @@ body:
     id: repro
     attributes:
       label: 重現步驟
-      description: 請提供可逐步執行的命令與設定。
+      description: 逐步可執行命令。
       placeholder: |
-        1. Configure ...
-        2. Run ...
-        3. Observe ...
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 預期結果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 實際結果
     validations:
       required: true
 
@@ -32,7 +54,7 @@ body:
     id: os
     attributes:
       label: 作業系統
-      placeholder: Ubuntu 22.04
+      placeholder: Ubuntu 22.04 / macOS 15
     validations:
       required: true
 
@@ -47,8 +69,7 @@ body:
   - type: textarea
     id: env
     attributes:
-      label: 去敏後的 env 設定
-      description: 請只提供與問題相關的 `.env` key（請移除 secrets）。
+      label: 去敏後的關鍵 env
       placeholder: |
         FUTU_HOST=127.0.0.1
         FUTU_PORT=11111
@@ -60,19 +81,8 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: 近期日誌（journalctl 節錄）
-      description: 請附最近 10-30 分鐘輸出。
-      placeholder: sudo journalctl -u hk-tick-collector --since "30 minutes ago" --no-pager
-    validations:
-      required: true
-
-  - type: textarea
-    id: db
-    attributes:
-      label: DB 診斷資訊
-      description: 請附 DB 大小與 PRAGMA 輸出。
+      label: 日誌片段（最近 10~30 分鐘）
       placeholder: |
-        sqlite3 "file:/data/sqlite/HK/20260211.db?mode=ro" "PRAGMA journal_mode; PRAGMA synchronous; PRAGMA wal_autocheckpoint;"
-        ls -lh /data/sqlite/HK/20260211.db*
+        scripts/hk-tickctl logs --ops --since "20 minutes ago"
     validations:
       required: true
