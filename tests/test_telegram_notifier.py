@@ -7,6 +7,7 @@ from pathlib import Path
 from hk_tick_collector.notifiers.telegram import (
     ALERT_CADENCE_SEC,
     AFTER_HOURS_CADENCE_SEC,
+    NOTIFY_SCHEMA_VERSION,
     OPEN_CADENCE_SEC,
     PREOPEN_CADENCE_SEC,
     WARN_CADENCE_SEC,
@@ -31,7 +32,24 @@ def _make_snapshot(
     drift_sec: float | None = 1.0,
     queue_size: int = 5,
     symbol_lag: int = 0,
+    push_rows_per_min: int = 1000,
+    poll_accepted: int = 180,
+    symbols: list[SymbolSnapshot] | None = None,
 ) -> HealthSnapshot:
+    default_symbols = [
+        SymbolSnapshot(
+            symbol="HK.00700",
+            last_tick_age_sec=5.0,
+            last_persisted_seq=120,
+            max_seq_lag=symbol_lag,
+        ),
+        SymbolSnapshot(
+            symbol="HK.00981",
+            last_tick_age_sec=8.5,
+            last_persisted_seq=88,
+            max_seq_lag=0,
+        ),
+    ]
     return HealthSnapshot(
         created_at=created_at or datetime.now(tz=timezone.utc),
         pid=1234,
@@ -43,25 +61,12 @@ def _make_snapshot(
         drift_sec=drift_sec,
         queue_size=queue_size,
         queue_maxsize=1000,
-        push_rows_per_min=1000,
+        push_rows_per_min=push_rows_per_min,
         poll_fetched=200,
-        poll_accepted=180,
+        poll_accepted=poll_accepted,
         persisted_rows_per_min=persisted_per_min,
         dropped_duplicate=20,
-        symbols=[
-            SymbolSnapshot(
-                symbol="HK.00700",
-                last_tick_age_sec=5.0,
-                last_persisted_seq=120,
-                max_seq_lag=symbol_lag,
-            ),
-            SymbolSnapshot(
-                symbol="HK.00981",
-                last_tick_age_sec=8.5,
-                last_persisted_seq=88,
-                max_seq_lag=0,
-            ),
-        ],
+        symbols=symbols or default_symbols,
         system_load1=0.12,
         system_rss_mb=88.6,
         system_disk_free_gb=123.4,
@@ -99,8 +104,11 @@ def test_renderer_health_ok_template_contains_sid_and_required_order():
     assert lines[0].startswith("<b>🟢 HK Tick Collector 正常</b>")
     assert lines[1].startswith("結論：")
     assert lines[2].startswith("指標：")
+    assert lines[3].startswith("進度：")
     assert "persisted=" in lines[2]
     assert "symbols=" in lines[2]
+    assert "write_eff=" in lines[3]
+    assert "top5_stale=" in lines[3]
     assert "主機：" in rendered.text
     assert f"sid={snapshot.sid}" in rendered.text
 
@@ -135,6 +143,36 @@ def test_renderer_after_hours_uses_since_close_not_large_drift_seconds():
     assert "距收盤=" in rendered.text
     assert "db_growth_today=" in rendered.text
     assert "延遲=24000.0s" not in rendered.text
+
+
+def test_renderer_open_progress_rollup_for_1000_symbols_uses_top5_only():
+    state_machine = AlertStateMachine(drift_warn_sec=120)
+    created_at = datetime(2026, 2, 12, 2, 5, tzinfo=timezone.utc)
+    symbols = [
+        SymbolSnapshot(
+            symbol=f"HK.{idx:05d}",
+            last_tick_age_sec=float(idx + 1),
+            last_persisted_seq=idx,
+            max_seq_lag=idx % 3,
+        )
+        for idx in range(1000)
+    ]
+    snapshot = _make_snapshot(created_at=created_at, symbols=symbols)
+    assessment = state_machine.assess_health(snapshot)
+    renderer = MessageRenderer(parse_mode="HTML")
+    rendered = renderer.render_health(
+        snapshot=snapshot,
+        assessment=assessment,
+        hostname="collector-a",
+        instance_id="node-1",
+        include_system_metrics=True,
+    )
+
+    assert "symbols=1000" in rendered.text
+    assert "stale_bucket(&gt;=10s/&gt;=30s/&gt;=60s)=" in rendered.text
+    assert "top5_stale=HK.00999(1000.0s)" in rendered.text
+    assert "HK.00995(996.0s)" in rendered.text
+    assert rendered.text.count("HK.0099") <= 5
 
 
 def test_renderer_warn_and_alert_template_suggestion_limit_and_ids():
@@ -538,10 +576,194 @@ def test_state_machine_pre_open_and_after_hours_not_warn_for_large_drift():
     assert after_hours_assessment.severity == NotifySeverity.OK
 
 
+def test_state_machine_switches_to_holiday_closed_and_back_to_open():
+    sm = AlertStateMachine(drift_warn_sec=120)
+    open_time = datetime(2026, 2, 12, 2, 30, tzinfo=timezone.utc)
+    stale_symbols = [
+        SymbolSnapshot(
+            symbol=f"HK.{idx:05d}",
+            last_tick_age_sec=1200.0 + float(idx),
+            last_persisted_seq=idx,
+            max_seq_lag=0,
+        )
+        for idx in range(50)
+    ]
+    for _ in range(2):
+        assessment = sm.assess_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=0,
+                push_rows_per_min=0,
+                poll_accepted=0,
+                queue_size=0,
+                drift_sec=10.0,
+                symbols=stale_symbols,
+            )
+        )
+        assert assessment.market_mode == "open"
+
+    holiday_assessment = sm.assess_health(
+        _make_snapshot(
+            created_at=open_time,
+            persisted_per_min=0,
+            push_rows_per_min=0,
+            poll_accepted=0,
+            queue_size=0,
+            drift_sec=10.0,
+            symbols=stale_symbols,
+        )
+    )
+    assert holiday_assessment.market_mode == "holiday-closed"
+    assert holiday_assessment.severity == NotifySeverity.OK
+
+    recovered_assessment = sm.assess_health(
+        _make_snapshot(
+            created_at=open_time,
+            persisted_per_min=500,
+            push_rows_per_min=700,
+            poll_accepted=100,
+            queue_size=1,
+            drift_sec=1.0,
+            symbols=stale_symbols,
+        )
+    )
+    assert recovered_assessment.market_mode == "open"
+
+
 def test_preopen_open_afterhours_constants():
     assert PREOPEN_CADENCE_SEC == 1800
     assert OPEN_CADENCE_SEC == 600
     assert AFTER_HOURS_CADENCE_SEC == 3600
+
+
+def test_notifier_start_logs_notify_schema(caplog):
+    async def runner() -> None:
+        caplog.set_level("INFO")
+
+        def fake_sender(_):
+            return TelegramSendResult(ok=True, status_code=200)
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            parse_mode="HTML",
+            sender=fake_sender,
+        )
+        await notifier.start()
+        await notifier.stop()
+
+    asyncio.run(runner())
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"notify_schema={NOTIFY_SCHEMA_VERSION}" in joined
+
+
+def test_notifier_market_mode_change_to_holiday_closed_emits_immediately():
+    async def runner() -> None:
+        calls = []
+
+        def fake_sender(payload):
+            calls.append(dict(payload))
+            return TelegramSendResult(ok=True, status_code=200)
+
+        monotonic_now = {"value": 0.0}
+
+        def fake_now() -> float:
+            return monotonic_now["value"]
+
+        async def fake_sleep(_: float) -> None:
+            return
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            parse_mode="HTML",
+            sender=fake_sender,
+            now_monotonic=fake_now,
+            sleep=fake_sleep,
+        )
+        await notifier.start()
+        open_time = datetime(2026, 2, 12, 2, 30, tzinfo=timezone.utc)
+        stale_symbols = [
+            SymbolSnapshot(
+                symbol=f"HK.{idx:05d}",
+                last_tick_age_sec=1200.0 + float(idx),
+                last_persisted_seq=idx,
+                max_seq_lag=0,
+            )
+            for idx in range(30)
+        ]
+
+        # bootstrap
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=0,
+                push_rows_per_min=0,
+                poll_accepted=0,
+                queue_size=0,
+                drift_sec=10.0,
+                symbols=stale_symbols,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 1
+        assert "狀態=盤中" in calls[-1]["text"]
+
+        # still open mode candidate; suppressed by cadence
+        monotonic_now["value"] += 60
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=0,
+                push_rows_per_min=0,
+                poll_accepted=0,
+                queue_size=0,
+                drift_sec=10.0,
+                symbols=stale_symbols,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 1
+
+        # mode changes to holiday-closed: should emit immediately
+        monotonic_now["value"] += 60
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=0,
+                push_rows_per_min=0,
+                poll_accepted=0,
+                queue_size=0,
+                drift_sec=10.0,
+                symbols=stale_symbols,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 2
+        assert "狀態=休市日" in calls[-1]["text"]
+
+        # traffic returns, mode switches back to open and emits immediately
+        monotonic_now["value"] += 30
+        notifier.submit_health(
+            _make_snapshot(
+                created_at=open_time,
+                persisted_per_min=500,
+                push_rows_per_min=700,
+                poll_accepted=100,
+                queue_size=1,
+                drift_sec=1.0,
+                symbols=stale_symbols,
+            )
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        assert len(calls) == 3
+        assert "狀態=盤中" in calls[-1]["text"]
+
+        await notifier.stop()
+
+    asyncio.run(runner())
 
 
 def test_retry_after_respected_and_eventually_succeeds():

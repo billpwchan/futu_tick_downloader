@@ -14,13 +14,17 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, time as dt_time
 from enum import Enum
 from html import escape
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from hk_tick_collector import __version__ as PACKAGE_VERSION
+
 logger = logging.getLogger(__name__)
 
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
+NOTIFY_SCHEMA_VERSION = "v2.1"
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 WARN_CADENCE_SEC = 600
 ALERT_CADENCE_SEC = 180
@@ -28,8 +32,13 @@ PREOPEN_CADENCE_SEC = 1800
 OPEN_CADENCE_SEC = 600
 LUNCH_CADENCE_SEC = 1800
 AFTER_HOURS_CADENCE_SEC = 3600
+HOLIDAY_CLOSED_CYCLES = 3
+HOLIDAY_CLOSED_P50_AGE_SEC = 600.0
+HOLIDAY_CLOSED_P95_AGE_SEC = 900.0
 OPEN_STALE_SYMBOL_AGE_SEC = 10.0
 OFFHOURS_STALE_SYMBOL_AGE_SEC = 120.0
+OPEN_STALE_BUCKETS = (10.0, 30.0, 60.0)
+OFFHOURS_STALE_BUCKETS = (120.0, 300.0, 900.0)
 
 
 def _make_short_id(prefix: str) -> str:
@@ -219,6 +228,18 @@ def _format_int(value: int | None) -> str:
     return str(int(value))
 
 
+def _resolve_collector_version() -> str:
+    try:
+        version = metadata.version("hk-tick-collector")
+        if version:
+            return version
+    except metadata.PackageNotFoundError:
+        pass
+    except Exception:
+        logger.debug("collector_version_resolve_failed", exc_info=True)
+    return PACKAGE_VERSION or "unknown"
+
+
 def _max_symbol_age_sec(snapshot: HealthSnapshot) -> float | None:
     ages = [s.last_tick_age_sec for s in snapshot.symbols if s.last_tick_age_sec is not None]
     if not ages:
@@ -265,6 +286,7 @@ def _market_mode_label(mode: str) -> str:
         "open": "盤中",
         "lunch-break": "午休",
         "after-hours": "收盤後",
+        "holiday-closed": "休市日",
     }
     return mapping.get(mode, mode)
 
@@ -302,8 +324,51 @@ def _symbol_ages(snapshot: HealthSnapshot) -> list[float]:
     return [age for age in (item.last_tick_age_sec for item in snapshot.symbols) if age is not None]
 
 
+def _symbol_age_pairs(snapshot: HealthSnapshot) -> list[tuple[str, float]]:
+    pairs: list[tuple[str, float]] = []
+    for item in snapshot.symbols:
+        if item.last_tick_age_sec is None:
+            continue
+        pairs.append((item.symbol, max(0.0, float(item.last_tick_age_sec))))
+    return pairs
+
+
 def _count_stale_symbols(snapshot: HealthSnapshot, *, threshold_sec: float) -> int:
     return sum(1 for age in _symbol_ages(snapshot) if age >= threshold_sec)
+
+
+def _stale_bucket_counts(snapshot: HealthSnapshot, *, thresholds: Sequence[float]) -> list[int]:
+    ages = _symbol_ages(snapshot)
+    return [sum(1 for age in ages if age >= threshold) for threshold in thresholds]
+
+
+def _stale_bucket_label(thresholds: Sequence[float]) -> str:
+    parts = [f">={int(value)}s" for value in thresholds]
+    return "/".join(parts)
+
+
+def _top_stale_symbols(snapshot: HealthSnapshot, *, limit: int = 5) -> list[tuple[str, float]]:
+    pairs = sorted(_symbol_age_pairs(snapshot), key=lambda item: item[1], reverse=True)
+    return pairs[: max(1, int(limit))]
+
+
+def _format_top_stale(pairs: Sequence[tuple[str, float]]) -> str:
+    if not pairs:
+        return "n/a"
+    return ",".join(f"{symbol}({age:.1f}s)" for symbol, age in pairs)
+
+
+def _ingest_rows_per_min(snapshot: HealthSnapshot) -> int:
+    push_rows = max(0, int(snapshot.push_rows_per_min))
+    poll_rows = max(0, int(snapshot.poll_accepted))
+    return push_rows + poll_rows
+
+
+def _write_efficiency_pct(snapshot: HealthSnapshot) -> float:
+    ingest_rows = _ingest_rows_per_min(snapshot)
+    persisted_rows = max(0, int(snapshot.persisted_rows_per_min))
+    baseline = max(1, ingest_rows)
+    return min(999.0, (persisted_rows / baseline) * 100.0)
 
 
 def _percentile_float(values: Sequence[float], percentile: float) -> float | None:
@@ -439,9 +504,16 @@ class AlertStateMachine:
         self._last_health_severity: NotifySeverity | None = None
         self._last_health_sent_at: float | None = None
         self._last_persisted_rows_per_min: int | None = None
+        self._holiday_closed_cycles = 0
 
     def assess_health(self, snapshot: HealthSnapshot) -> HealthAssessment:
         mode = _infer_market_mode(snapshot.created_at)
+        if mode == "open":
+            if self._is_holiday_closed_candidate(snapshot):
+                mode = "holiday-closed"
+        else:
+            self._holiday_closed_cycles = 0
+
         freshness_sec = abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None
         queue_pct = _queue_utilization_pct(snapshot)
         persisted = max(0, int(snapshot.persisted_rows_per_min))
@@ -471,6 +543,17 @@ class AlertStateMachine:
                 severity = NotifySeverity.OK
                 conclusion = "正常：盤中採集與寫入穩定"
                 impact = "目前沒有明顯風險，暫時不需要人工介入"
+                needs_action = False
+        elif mode == "holiday-closed":
+            if queue > 0 and persisted <= 0:
+                severity = NotifySeverity.WARN
+                conclusion = "注意：休市期間仍有佇列積壓"
+                impact = "可能影響資料完整性，建議確認寫入是否已排空"
+                needs_action = True
+            else:
+                severity = NotifySeverity.OK
+                conclusion = "正常：休市日服務平穩"
+                impact = "無交易流量屬預期狀態，暫不需人工介入"
                 needs_action = False
         elif mode == "pre-open":
             if queue_pct >= 80.0:
@@ -514,6 +597,32 @@ class AlertStateMachine:
             needs_action=needs_action,
             market_mode=mode,
         )
+
+    def _is_holiday_closed_candidate(self, snapshot: HealthSnapshot) -> bool:
+        if (
+            max(0, int(snapshot.persisted_rows_per_min)) > 0
+            or max(0, int(snapshot.push_rows_per_min)) > 0
+            or max(0, int(snapshot.poll_accepted)) > 0
+            or max(0, int(snapshot.queue_size)) > 0
+        ):
+            self._holiday_closed_cycles = 0
+            return False
+
+        ages = _symbol_ages(snapshot)
+        if not ages:
+            self._holiday_closed_cycles = 0
+            return False
+        p50_age = _percentile_float(ages, 0.50)
+        p95_age = _percentile_float(ages, 0.95)
+        if p50_age is None or p95_age is None:
+            self._holiday_closed_cycles = 0
+            return False
+        if p50_age < HOLIDAY_CLOSED_P50_AGE_SEC or p95_age < HOLIDAY_CLOSED_P95_AGE_SEC:
+            self._holiday_closed_cycles = 0
+            return False
+
+        self._holiday_closed_cycles += 1
+        return self._holiday_closed_cycles >= HOLIDAY_CLOSED_CYCLES
 
     def should_emit_health(
         self,
@@ -572,19 +681,36 @@ class MessageRenderer:
         lag_sec = abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None
         market_label = _market_mode_label(assessment.market_mode)
         symbol_count = len(snapshot.symbols)
+        symbol_ages = _symbol_ages(snapshot)
+        p50_age = _percentile_float(symbol_ages, 0.50)
+        p95_age = _percentile_float(symbol_ages, 0.95)
+        p99_age = _percentile_float(symbol_ages, 0.99)
         stale_threshold_sec = (
             OPEN_STALE_SYMBOL_AGE_SEC
             if assessment.market_mode == "open"
             else OFFHOURS_STALE_SYMBOL_AGE_SEC
         )
+        stale_bucket_thresholds = (
+            OPEN_STALE_BUCKETS if assessment.market_mode == "open" else OFFHOURS_STALE_BUCKETS
+        )
         stale_symbols = _count_stale_symbols(snapshot, threshold_sec=stale_threshold_sec)
-        symbol_ages = _symbol_ages(snapshot)
-        p95_age = _percentile_float(symbol_ages, 0.95)
+        stale_bucket_counts = _stale_bucket_counts(snapshot, thresholds=stale_bucket_thresholds)
+        stale_bucket_text = "/".join(str(value) for value in stale_bucket_counts)
+        top_stale_text = _format_top_stale(_top_stale_symbols(snapshot, limit=5))
+        ingest_rows_per_min = _ingest_rows_per_min(snapshot)
+        persisted_rows_per_min = max(0, int(snapshot.persisted_rows_per_min))
+        write_efficiency = _write_efficiency_pct(snapshot)
         icon = "🟢" if assessment.severity == NotifySeverity.OK else "🟡"
         system_line = (
             f"資源：load1={_format_float(snapshot.system_load1, 2)} "
             f"rss={_format_float(snapshot.system_rss_mb, 1)}MB "
             f"disk_free={_format_float(snapshot.system_disk_free_gb, 2)}GB"
+        )
+        progress_line = (
+            f"進度：ingest/min={ingest_rows_per_min} | persist/min={persisted_rows_per_min} | "
+            f"write_eff={write_efficiency:.1f}% | stale_symbols={stale_symbols} | "
+            f"stale_bucket({_stale_bucket_label(stale_bucket_thresholds)})={stale_bucket_text} | "
+            f"top5_stale={top_stale_text}"
         )
 
         if assessment.market_mode == "pre-open":
@@ -600,13 +726,23 @@ class MessageRenderer:
                 f"persisted={snapshot.persisted_rows_per_min}/min | "
                 f"queue={snapshot.queue_size}/{snapshot.queue_maxsize} | "
                 f"symbols={symbol_count} | stale_symbols={stale_symbols} | "
-                f"p95_age={_format_float(p95_age)}s"
+                f"p95_age={_format_float(p95_age)}s | p99_age={_format_float(p99_age)}s"
             )
         elif assessment.market_mode == "lunch-break":
             metrics_line = (
                 f"指標：狀態={market_label} | symbols={symbol_count} | stale_symbols={stale_symbols} | "
                 f"queue={snapshot.queue_size}/{snapshot.queue_maxsize} | "
                 f"last_update_at={snapshot.db_max_ts_utc}"
+            )
+        elif assessment.market_mode == "holiday-closed":
+            db_growth = "n/a"
+            if digest is not None and digest.start_db_rows is not None:
+                db_growth = f"{digest.db_rows - digest.start_db_rows:+,} rows"
+            metrics_line = (
+                f"指標：狀態={market_label} | market=holiday-closed | symbols={symbol_count} | "
+                f"close_snapshot_ok={'true' if snapshot.queue_size == 0 else 'false'} | "
+                f"db_growth_today={db_growth} | last_update_at={snapshot.db_max_ts_utc} | "
+                f"p50_age={_format_float(p50_age)}s"
             )
         else:
             db_growth = "n/a"
@@ -622,9 +758,10 @@ class MessageRenderer:
             f"<b>{icon} HK Tick Collector {'正常' if assessment.severity == NotifySeverity.OK else '注意'}</b>",
             f"結論：{escape(assessment.conclusion)}",
             escape(metrics_line),
+            escape(progress_line),
         ]
         if assessment.severity == NotifySeverity.WARN:
-            lines.append("建議：journalctl -u hk-tick-collector -n 120 --no-pager")
+            lines.append('建議：scripts/hk-tickctl logs --ops --since "20 minutes ago"')
         lines.append(f"主機：{escape(host_text)}")
         if include_system_metrics:
             lines.append(escape(system_line))
@@ -740,6 +877,8 @@ class MessageRenderer:
         instance_id: str | None,
     ) -> RenderedMessage:
         host_text = hostname if not instance_id else f"{hostname} ({instance_id})"
+        ingest_rows_per_min = _ingest_rows_per_min(snapshot)
+        write_efficiency = _write_efficiency_pct(snapshot)
         lines = [
             f"HK Tick Collector HEALTH {assessment.severity.value}",
             f"結論: {assessment.conclusion}",
@@ -747,6 +886,10 @@ class MessageRenderer:
                 f"指標: mode={_market_mode_label(assessment.market_mode)} "
                 f"drift={_format_float(snapshot.drift_sec)}s "
                 f"persisted/min={snapshot.persisted_rows_per_min} total={snapshot.db_rows}"
+            ),
+            (
+                f"進度: ingest/min={ingest_rows_per_min} persist/min={snapshot.persisted_rows_per_min} "
+                f"write_eff={write_efficiency:.1f}%"
             ),
             f"host={host_text} sid={snapshot.sid}",
         ]
@@ -972,6 +1115,7 @@ class TelegramNotifier:
         self._state_machine = AlertStateMachine(drift_warn_sec=drift_warn_sec)
         self._dedupe = DedupeStore()
         self._hostname = socket.gethostname()
+        self._collector_version = _resolve_collector_version()
 
         self._queue: asyncio.Queue[_OutboundMessage | None] = asyncio.Queue(
             maxsize=max(1, int(queue_maxsize))
@@ -1014,12 +1158,23 @@ class TelegramNotifier:
         if self._worker_task is not None and not self._worker_task.done():
             return
         logger.info(
-            "telegram_notifier_started chat_id=%s thread_id=%s parse_mode=%s token=%s rate_limit_per_min=%s",
+            "telegram_notifier_started notify_schema=%s version=%s chat_id=%s thread_id=%s "
+            "parse_mode=%s token=%s rate_limit_per_min=%s cadence_ok_preopen=%s "
+            "cadence_ok_open=%s cadence_ok_lunch=%s cadence_ok_after_hours=%s "
+            "cadence_warn=%s cadence_alert=%s",
+            NOTIFY_SCHEMA_VERSION,
+            self._collector_version,
             self._chat_id,
             self._thread_id if self._thread_id is not None else "none",
             self._renderer.parse_mode or "none",
             self._client.masked_token,
             self._rate_limiter.limit_per_window,
+            PREOPEN_CADENCE_SEC,
+            OPEN_CADENCE_SEC,
+            LUNCH_CADENCE_SEC,
+            AFTER_HOURS_CADENCE_SEC,
+            WARN_CADENCE_SEC,
+            ALERT_CADENCE_SEC,
         )
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="telegram-notifier-worker"
@@ -1290,6 +1445,7 @@ class TelegramNotifier:
             "open": OPEN_CADENCE_SEC,
             "lunch-break": LUNCH_CADENCE_SEC,
             "after-hours": AFTER_HOURS_CADENCE_SEC,
+            "holiday-closed": AFTER_HOURS_CADENCE_SEC,
         }
         return mode_to_cadence.get(market_mode, OPEN_CADENCE_SEC)
 
