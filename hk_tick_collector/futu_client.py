@@ -381,7 +381,9 @@ class FutuQuoteClient:
                         self._last_accepted_seq.get(symbol),
                         self._last_persisted_seq.get(symbol),
                     )
-                elif (now := self._loop.time()) - self._last_poll_stats_log_at >= POLL_STATS_SAMPLE_SEC:
+                elif (
+                    now := self._loop.time()
+                ) - self._last_poll_stats_log_at >= POLL_STATS_SAMPLE_SEC:
                     self._last_poll_stats_log_at = now
                     logger.info(
                         "poll_stats_sample symbol=%s queue=%s/%s persisted_per_min=%s lag_sec=%s phase=%s",

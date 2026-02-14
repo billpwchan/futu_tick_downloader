@@ -1131,7 +1131,9 @@ class MessageComposer:
         instance_id: str | None,
     ) -> RenderedMessage:
         host_text = hostname if not instance_id else f"{hostname} / {instance_id}"
-        lag_text = f"{_format_float(abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None)}s"
+        lag_text = (
+            f"{_format_float(abs(snapshot.drift_sec) if snapshot.drift_sec is not None else None)}s"
+        )
         throughput_text = f"{max(0, int(snapshot.persisted_rows_per_min))}/min"
         queue_text = f"{snapshot.queue_size}/{snapshot.queue_maxsize}"
         icon = "🟢" if assessment.severity == NotifySeverity.OK else "🟡"
@@ -1165,7 +1167,9 @@ class MessageComposer:
         severity = _severity_from(event.severity)
         icon = "🔴" if severity == NotifySeverity.ALERT else "🟡"
         title = "警報" if severity == NotifySeverity.ALERT else "注意"
-        headline = event.headline or self._ops_renderer._default_alert_headline(event.code, severity)
+        headline = event.headline or self._ops_renderer._default_alert_headline(
+            event.code, severity
+        )
         kpis = self._extract_event_kpis(event.summary_lines)
         lines = [
             f"<b>{icon} HK Tick {title}</b>",
@@ -1499,9 +1503,7 @@ class TelegramNotifier:
         self._health_lunch_once = bool(health_lunch_once)
         self._health_after_close_once = bool(health_after_close_once)
         holiday_mode_text = health_holiday_mode.strip().lower()
-        self._health_holiday_mode = (
-            "disabled" if holiday_mode_text == "disabled" else "daily"
-        )
+        self._health_holiday_mode = "disabled" if holiday_mode_text == "disabled" else "daily"
 
         base_interval = health_interval_sec
         if base_interval is None:
@@ -1894,7 +1896,10 @@ class TelegramNotifier:
     ) -> tuple[bool, str]:
         phase_key = f"{snapshot.trading_day}:{assessment.market_mode}"
         if assessment.severity == NotifySeverity.OK:
-            if assessment.market_mode == "holiday-closed" and self._health_holiday_mode == "disabled":
+            if (
+                assessment.market_mode == "holiday-closed"
+                and self._health_holiday_mode == "disabled"
+            ):
                 return False, "holiday_disabled"
             if assessment.market_mode == "pre-open" and phase_key in self._phase_once_sent:
                 return False, "preopen_once"

@@ -57,7 +57,9 @@ def list_symbols(conn: sqlite3.Connection) -> list[str]:
 
 def iter_symbol_rows(
     conn: sqlite3.Connection, symbol: str
-) -> Iterable[tuple[str, int, float | None, int | None, float | None, str | None, int | None, str | None]]:
+) -> Iterable[
+    tuple[str, int, float | None, int | None, float | None, str | None, int | None, str | None]
+]:
     sql = (
         "SELECT symbol, ts_ms, price, volume, turnover, direction, seq, tick_type "
         "FROM ticks "
@@ -145,7 +147,9 @@ def main() -> int:
 
         used_names: set[str] = set()
         total_rows = 0
-        with ZipFile(out_path, mode="w", compression=ZIP_DEFLATED, compresslevel=compress_level) as zf:
+        with ZipFile(
+            out_path, mode="w", compression=ZIP_DEFLATED, compresslevel=compress_level
+        ) as zf:
             for idx, symbol in enumerate(symbols, start=1):
                 arcname = filename_from_symbol(symbol)
                 if arcname in used_names:
