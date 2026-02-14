@@ -75,6 +75,14 @@ def _get_env_int_list(name: str, default: list[int]) -> list[int]:
     return [int(item) for item in items] if items else list(default)
 
 
+def _get_env_day_list(name: str) -> List[str]:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return []
+    items = [part.strip().replace("-", "").replace("/", "") for part in value.split(",")]
+    return [item for item in items if len(item) == 8 and item.isdigit()]
+
+
 @dataclass(frozen=True)
 class Config:
     futu_host: str
@@ -92,6 +100,12 @@ class Config:
     poll_interval_sec: int
     poll_num: int
     poll_stale_sec: int
+    poll_trading_only: bool
+    poll_preopen_enabled: bool
+    poll_offhours_probe_interval_sec: int
+    poll_offhours_probe_num: int
+    futu_holidays: List[str]
+    futu_holiday_file: str
     watchdog_stall_sec: int
     watchdog_upstream_window_sec: int
     drift_warn_sec: int
@@ -137,6 +151,7 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         _load_dotenv()
+        poll_offhours_probe_num = _get_env_int("FUTU_POLL_OFFHOURS_PROBE_NUM", 1)
         return cls(
             futu_host=os.getenv("FUTU_HOST", "127.0.0.1"),
             futu_port=_get_env_int("FUTU_PORT", 11111),
@@ -153,6 +168,14 @@ class Config:
             poll_interval_sec=_get_env_int("FUTU_POLL_INTERVAL_SEC", 3),
             poll_num=_get_env_int("FUTU_POLL_NUM", 100),
             poll_stale_sec=_get_env_int("FUTU_POLL_STALE_SEC", 10),
+            poll_trading_only=_get_env_bool("FUTU_POLL_TRADING_ONLY", True),
+            poll_preopen_enabled=_get_env_bool("FUTU_POLL_PREOPEN_ENABLED", False),
+            poll_offhours_probe_interval_sec=max(
+                0, _get_env_int("FUTU_POLL_OFFHOURS_PROBE_INTERVAL_SEC", 0)
+            ),
+            poll_offhours_probe_num=max(1, poll_offhours_probe_num),
+            futu_holidays=_get_env_day_list("FUTU_HOLIDAYS"),
+            futu_holiday_file=_get_env_text("FUTU_HOLIDAY_FILE", ""),
             watchdog_stall_sec=_get_env_int("WATCHDOG_STALL_SEC", 180),
             watchdog_upstream_window_sec=_get_env_int("WATCHDOG_UPSTREAM_WINDOW_SEC", 60),
             drift_warn_sec=_get_env_int("DRIFT_WARN_SEC", 120),

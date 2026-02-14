@@ -47,6 +47,12 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.batch_size == 500
     assert cfg.max_wait_ms == 1000
     assert cfg.poll_enabled is True
+    assert cfg.poll_trading_only is True
+    assert cfg.poll_preopen_enabled is False
+    assert cfg.poll_offhours_probe_interval_sec == 0
+    assert cfg.poll_offhours_probe_num == 1
+    assert cfg.futu_holidays == []
+    assert cfg.futu_holiday_file == ""
     assert cfg.watchdog_stall_sec == 180
     assert cfg.sqlite_journal_mode == "WAL"
     assert cfg.sqlite_synchronous == "NORMAL"
@@ -68,11 +74,23 @@ def test_config_bool_and_list_parsing(monkeypatch):
     monkeypatch.setattr(config_module, "_load_dotenv", lambda: None)
     _clear_env(monkeypatch)
     monkeypatch.setenv("FUTU_POLL_ENABLED", "off")
+    monkeypatch.setenv("FUTU_POLL_TRADING_ONLY", "0")
+    monkeypatch.setenv("FUTU_POLL_PREOPEN_ENABLED", "1")
+    monkeypatch.setenv("FUTU_POLL_OFFHOURS_PROBE_INTERVAL_SEC", "600")
+    monkeypatch.setenv("FUTU_POLL_OFFHOURS_PROBE_NUM", "3")
+    monkeypatch.setenv("FUTU_HOLIDAYS", "20260101, 20260217")
+    monkeypatch.setenv("FUTU_HOLIDAY_FILE", "/tmp/hk_holidays.txt")
     monkeypatch.setenv("FUTU_SYMBOLS", " HK.00700 , HK.00981 ,,")
     monkeypatch.setenv("WATCHDOG_STALL_SEC", "240")
 
     cfg = Config.from_env()
     assert cfg.poll_enabled is False
+    assert cfg.poll_trading_only is False
+    assert cfg.poll_preopen_enabled is True
+    assert cfg.poll_offhours_probe_interval_sec == 600
+    assert cfg.poll_offhours_probe_num == 3
+    assert cfg.futu_holidays == ["20260101", "20260217"]
+    assert cfg.futu_holiday_file == "/tmp/hk_holidays.txt"
     assert cfg.symbols == ["HK.00700", "HK.00981"]
     assert cfg.watchdog_stall_sec == 240
 

@@ -11,13 +11,13 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Deque, Dict, List, Optional, Sequence
-from zoneinfo import ZoneInfo
 
 from futu import OpenQuoteContext, RET_OK, Session, SubType, TickerHandlerBase
 
 from .collector import AsyncTickCollector
 from .config import Config
 from .db import PersistResult, SQLiteTickStore, db_path_for_trading_day
+from .market_state import MarketCalendar, MarketState, resolve_market_state
 from .mapping import ticker_df_to_rows
 from .models import TickRow
 from .notifiers.telegram import (
@@ -35,7 +35,6 @@ POLL_SKIP_PUSH_SEC = 2
 POLL_RECENT_KEY_LIMIT = 500
 HEALTH_LOG_INTERVAL_SEC = 60
 WATCHDOG_EXIT_CODE = 1
-HK_TZ = ZoneInfo("Asia/Hong_Kong")
 POLL_STATS_SAMPLE_SEC = 60.0
 
 
@@ -123,6 +122,11 @@ class FutuQuoteClient:
         self._disconnect_active = False
         self._disconnect_eid: str | None = None
         self._last_poll_stats_log_at: float = 0.0
+        self._last_offhours_probe_at: float = 0.0
+        self._market_calendar = MarketCalendar(
+            holidays=self._config.futu_holidays,
+            holiday_file=self._config.futu_holiday_file,
+        )
 
     async def run_forever(self) -> None:
         backoff = ExponentialBackoff(
@@ -293,6 +297,18 @@ class FutuQuoteClient:
             return
 
         while not self._stop_event.is_set():
+            now = self._loop.time()
+            market_state = self._resolve_market_state()
+            should_poll, probe_mode = self._should_run_poll_cycle(market_state, now)
+            if not should_poll:
+                await self._sleep_with_stop(self._next_offhours_sleep_sec(now))
+                continue
+
+            poll_num = (
+                min(self._config.poll_num, self._config.poll_offhours_probe_num)
+                if probe_mode
+                else self._config.poll_num
+            )
             cycle_start = self._loop.time()
             if self._ctx is None:
                 await self._sleep_with_stop(self._config.poll_interval_sec)
@@ -307,7 +323,7 @@ class FutuQuoteClient:
                     continue
 
                 try:
-                    ret, data = self._ctx.get_rt_ticker(symbol, num=self._config.poll_num)
+                    ret, data = self._ctx.get_rt_ticker(symbol, num=poll_num)
                 except Exception as exc:
                     logger.warning("poll_error symbol=%s err=%s", symbol, exc)
                     continue
@@ -398,7 +414,12 @@ class FutuQuoteClient:
                 await self._sleep_with_stop(0.05)
 
             elapsed = self._loop.time() - cycle_start
-            await self._sleep_with_stop(max(0.0, self._config.poll_interval_sec - elapsed))
+            interval_sec = (
+                self._config.poll_offhours_probe_interval_sec
+                if probe_mode and self._config.poll_offhours_probe_interval_sec > 0
+                else self._config.poll_interval_sec
+            )
+            await self._sleep_with_stop(max(0.0, interval_sec - elapsed))
 
     async def _health_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -1057,22 +1078,39 @@ class FutuQuoteClient:
         return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat()
 
     def _market_phase(self, _now_monotonic: float | None = None) -> str:
-        local = datetime.now(tz=timezone.utc).astimezone(HK_TZ)
-        if local.weekday() >= 5:
-            return "after-hours"
-        hour, minute = local.hour, local.minute
-        if (hour, minute) < (9, 30):
-            return "pre-open"
-        if (9, 30) <= (hour, minute) < (12, 0):
-            return "open"
-        if (12, 0) <= (hour, minute) < (13, 0):
-            return "lunch-break"
-        if (13, 0) <= (hour, minute) < (16, 0):
-            return "open"
-        return "after-hours"
+        return self._resolve_market_state().mode
 
     def _current_trading_day(self) -> str:
-        return datetime.now(tz=HK_TZ).strftime("%Y%m%d")
+        return self._resolve_market_state().trading_day
+
+    def _resolve_market_state(self) -> MarketState:
+        return resolve_market_state(calendar=self._market_calendar)
+
+    def _should_run_poll_cycle(self, state: MarketState, now: float) -> tuple[bool, bool]:
+        if not self._config.poll_trading_only:
+            return True, False
+
+        if state.mode == "open":
+            return True, False
+        if state.mode == "pre-open" and self._config.poll_preopen_enabled:
+            return True, False
+
+        interval = int(self._config.poll_offhours_probe_interval_sec)
+        if interval <= 0:
+            return False, False
+        if self._last_offhours_probe_at <= 0.0 or (now - self._last_offhours_probe_at) >= interval:
+            self._last_offhours_probe_at = now
+            return True, True
+        return False, False
+
+    def _next_offhours_sleep_sec(self, now: float) -> float:
+        interval = int(self._config.poll_offhours_probe_interval_sec)
+        if interval <= 0:
+            return max(5.0, float(self._config.poll_interval_sec))
+        if self._last_offhours_probe_at <= 0.0:
+            return 1.0
+        remaining = interval - (now - self._last_offhours_probe_at)
+        return max(1.0, remaining)
 
     def _fetch_db_snapshot(self, trading_day: str) -> tuple[int, int | None]:
         if self._store is None:

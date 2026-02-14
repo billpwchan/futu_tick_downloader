@@ -83,7 +83,6 @@ async def run() -> None:
             wal_autocheckpoint=config.sqlite_wal_autocheckpoint,
         )
         trading_day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
-        await asyncio.to_thread(store.ensure_db, trading_day)
         seed_days = [trading_day]
         recent_days = await asyncio.to_thread(
             store.list_recent_trading_days, config.seed_recent_db_days

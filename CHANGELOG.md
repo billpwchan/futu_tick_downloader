@@ -21,12 +21,17 @@
 - 新增 `deploy/env/.env.example` 與 `deploy/scripts/{install,upgrade,status}.sh` 伺服器部署工具鏈。
 - 新增 `scripts/hk-tickctl` 子命令：`export`、`tg test`。
 - 新增 `CITATION.cff` 與 `.github/FUNDING.yml`。
+- 新增市場狀態判定模組（`hk_tick_collector/market_state.py`），支援交易時段與可配置休市日（`FUTU_HOLIDAYS` / `FUTU_HOLIDAY_FILE`）。
+- 新增 poll 控制參數：`FUTU_POLL_TRADING_ONLY`、`FUTU_POLL_PREOPEN_ENABLED`、`FUTU_POLL_OFFHOURS_PROBE_INTERVAL_SEC`、`FUTU_POLL_OFFHOURS_PROBE_NUM`。
 
 ### Changed
 
 - `README.md` 改寫為生產導向的開源上手與維運說明。
 - 社群健康文件與 Issue/PR 模板改為繁中產品化格式。
 - SQLite schema 初始化流程改為精簡路徑（僅建立必要表與索引，不再包含舊版自動 migration）。
+- 服務啟動流程不再預先建立當日 SQLite DB，改為首筆資料落盤時建立（避免非交易日空 DB）。
+- poll 迴圈改為「交易時段常規輪詢、非交易時段可選低頻 probe」。
+- DB 讀取統計路徑改為唯讀查詢，不再在 health/stat 查詢時觸發 schema 確保流程。
 
 ### Removed
 

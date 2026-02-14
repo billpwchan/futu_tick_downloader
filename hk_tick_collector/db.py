@@ -290,6 +290,11 @@ class SQLiteTickStore:
             wal_autocheckpoint=self._wal_autocheckpoint,
         )
 
+    def _connect_readonly(self, db_path: Path) -> sqlite3.Connection:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms};")
+        return conn
+
     def open_writer(self) -> SQLiteTickWriter:
         return SQLiteTickWriter(self)
 
@@ -316,9 +321,13 @@ class SQLiteTickStore:
         db_path = db_path_for_trading_day(self._data_root, trading_day)
         if not db_path.exists():
             return {}
-        conn = self._connect(db_path)
+        conn = self._connect_readonly(db_path)
         try:
-            ensure_schema(conn)
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ticks';"
+            ).fetchone()
+            if table is None:
+                return {}
             placeholders = ",".join("?" for _ in symbols)
             rows = conn.execute(
                 (
@@ -382,9 +391,13 @@ class SQLiteTickStore:
         if not db_path.exists():
             return 0, None
 
-        conn = self._connect(db_path)
+        conn = self._connect_readonly(db_path)
         try:
-            ensure_schema(conn)
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ticks';"
+            ).fetchone()
+            if table is None:
+                return 0, None
             row = conn.execute(
                 "SELECT COUNT(*), MAX(ts_ms) FROM ticks WHERE trading_day = ?",
                 (trading_day,),

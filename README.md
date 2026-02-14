@@ -117,6 +117,10 @@ scripts/hk-tickctl tg test
    先看 `hk-tickctl status` 與 `logs --ops`，確認 reconnect 與 watchdog 是否正常觸發。
 5. 盤前/盤後零流量算異常嗎？
    不一定。通知策略會依 market mode（開盤前/盤中/午休/收盤後）降噪。
+6. 非交易日為什麼會看到 `YYYYMMDD.db`？
+   新版行為改為「首筆 tick 才建庫」，非交易日不會因服務啟動自動建立空 DB。
+7. 收盤後有 `.db-wal` 是不是還在持續寫入？
+   不一定。WAL 檔在程序存活期間存在屬正常；請以 `db rows`、`persisted_rows_per_min`、`queue` 判斷是否仍有實際寫入。
 
 ## 文件入口
 
