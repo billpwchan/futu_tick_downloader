@@ -23,6 +23,8 @@
 - 新增 `CITATION.cff` 與 `.github/FUNDING.yml`。
 - 新增市場狀態判定模組（`hk_tick_collector/market_state.py`），支援交易時段與可配置休市日（`FUTU_HOLIDAYS` / `FUTU_HOLIDAY_FILE`）。
 - 新增 poll 控制參數：`FUTU_POLL_TRADING_ONLY`、`FUTU_POLL_PREOPEN_ENABLED`、`FUTU_POLL_OFFHOURS_PROBE_INTERVAL_SEC`、`FUTU_POLL_OFFHOURS_PROBE_NUM`。
+- 新增 Telegram 互動產品化模組：`telegram_render.py`、`telegram_actions.py`、`ActionContextStore(TTL)` 與 Inline Keyboard actions（detail/log/db/sop/mute/refresh/top）。
+- 新增 Telegram 互動文件：`docs/telegram.md`、`docs/runbook/telegram-actions.md`、`docs/engineering/telegram-interactive-flow.md`、`docs/user-guide/telegram-actions.md`。
 
 ### Changed
 
@@ -32,6 +34,8 @@
 - 服務啟動流程不再預先建立當日 SQLite DB，改為首筆資料落盤時建立（避免非交易日空 DB）。
 - poll 迴圈改為「交易時段常規輪詢、非交易時段可選低頻 probe」。
 - DB 讀取統計路徑改為唯讀查詢，不再在 health/stat 查詢時觸發 schema 確保流程。
+- Telegram 訊息 IA 改為「結論 -> 關鍵指標 -> 下一步」，並支援同訊息展開/收合詳情（`editMessageText`）。
+- 新增 Telegram 互動環境變數：`TG_INTERACTIVE_ENABLED`、`TG_ADMIN_USER_IDS`、`TG_ACTION_*`。
 
 ### Removed
 

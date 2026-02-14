@@ -45,3 +45,5 @@ df -h
 2. 看 `logs --ops` 抓 `WATCHDOG` / `sqlite_busy`
 3. 查 DB 是否仍成長
 4. 再決定重啟或升級
+
+Telegram 互動按鈕對應 SOP 請看：[`/docs/runbook/telegram-actions.md`](runbook/telegram-actions.md)

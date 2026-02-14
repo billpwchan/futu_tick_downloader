@@ -60,6 +60,41 @@ TG_TOKEN='<your-token>' TG_CHAT_ID='<your-chat-id>' scripts/hk-tickctl tg test
 
 ![Telegram 訊息示例](docs/assets/telegram-sample.svg)
 
+## Telegram 產品化通知
+
+- 訊息結構：`結論 -> 關鍵指標 -> 下一步`
+- 每則訊息提供互動按鈕：`🔎 詳情` / `🧾 日誌` / `🗃 DB` / `🧯 建議`
+- 互動模式可選啟用：`TG_INTERACTIVE_ENABLED=1`
+
+示例 1（盤中 HEALTH）：
+
+```text
+🟢 HEALTH OK
+結論：盤中採集與落庫穩定
+關鍵指標：市況=盤中 | 落庫=12600/min | 延遲=1.8s | 今日rows=2,300,000 | 佇列=8/1000
+下一步：按 🔎 看詳情；排查時先按 🧾 或 🗃
+```
+
+示例 2（PERSIST_STALL ALERT）：
+
+```text
+🔴 ALERT
+結論：持久化停滯，資料可能未落庫
+關鍵指標：事件=PERSIST_STALL | 市況=盤中 | 重點=lag_sec=88.2 | persisted_per_min=0
+影響：資料可能持續落後
+下一步：先按 🧾 看是否持續，再按 🧯 執行 SOP
+```
+
+示例 3（收盤 DAILY DIGEST）：
+
+```text
+📊 DAILY DIGEST
+結論：20260214 收盤摘要
+關鍵指標：總量=1,000,000 | 峰值=38,000/min | 最大延遲=3.2s | 告警/恢復=4/3
+資料檔：/data/sqlite/HK/20260214.db | rows=2,300,000
+下一步：按 📈 今日 Top 異常
+```
+
 ## 架構圖（資料流、模組邊界、線程/佇列）
 
 ```mermaid
@@ -128,6 +163,7 @@ scripts/hk-tickctl tg test
 - 快速開始（本機）：[`docs/01-快速開始（本機）.md`](docs/01-%E5%BF%AB%E9%80%9F%E9%96%8B%E5%A7%8B%EF%BC%88%E6%9C%AC%E6%A9%9F%EF%BC%89.md)
 - Lightsail 部署：[`docs/02-部署到 AWS Lightsail（Ubuntu）.md`](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)
 - Runbook：[`docs/04-運維 Runbook.md`](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)
+- Telegram 互動通知：[`docs/telegram.md`](docs/telegram.md)
 
 ## Roadmap
 

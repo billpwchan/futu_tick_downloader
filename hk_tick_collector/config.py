@@ -145,6 +145,12 @@ class Config:
     telegram_digest_drift_threshold_sec: int
     telegram_digest_send_alive_when_idle: bool
     telegram_sqlite_busy_alert_threshold: int
+    telegram_interactive_enabled: bool
+    telegram_admin_user_ids: List[int]
+    telegram_action_context_ttl_sec: int
+    telegram_action_log_max_lines: int
+    telegram_action_refresh_min_interval_sec: int
+    telegram_action_timeout_sec: float
     instance_id: str
     log_level: str
 
@@ -250,6 +256,14 @@ class Config:
                 "TG_SQLITE_BUSY_ALERT_THRESHOLD",
                 3,
             ),
+            telegram_interactive_enabled=_get_env_bool("TG_INTERACTIVE_ENABLED", False),
+            telegram_admin_user_ids=_get_env_int_list("TG_ADMIN_USER_IDS", []),
+            telegram_action_context_ttl_sec=_get_env_int("TG_ACTION_CONTEXT_TTL_SEC", 43200),
+            telegram_action_log_max_lines=_get_env_int("TG_ACTION_LOG_MAX_LINES", 20),
+            telegram_action_refresh_min_interval_sec=_get_env_int(
+                "TG_ACTION_REFRESH_MIN_INTERVAL_SEC", 15
+            ),
+            telegram_action_timeout_sec=_get_env_float("TG_ACTION_TIMEOUT_SEC", 3.0),
             instance_id=os.getenv("INSTANCE_ID", "").strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

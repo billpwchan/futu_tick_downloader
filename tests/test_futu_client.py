@@ -157,6 +157,12 @@ def build_config(**overrides) -> Config:
         telegram_digest_drift_threshold_sec=60,
         telegram_digest_send_alive_when_idle=False,
         telegram_sqlite_busy_alert_threshold=3,
+        telegram_interactive_enabled=False,
+        telegram_admin_user_ids=[],
+        telegram_action_context_ttl_sec=43200,
+        telegram_action_log_max_lines=20,
+        telegram_action_refresh_min_interval_sec=15,
+        telegram_action_timeout_sec=3.0,
         instance_id="",
         log_level="INFO",
     )

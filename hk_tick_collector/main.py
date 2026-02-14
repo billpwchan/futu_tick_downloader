@@ -68,6 +68,12 @@ async def run() -> None:
                 digest_queue_change_pct=config.telegram_digest_queue_change_pct,
                 digest_last_tick_age_threshold_sec=config.telegram_digest_last_tick_age_threshold_sec,
                 digest_drift_threshold_sec=config.telegram_digest_drift_threshold_sec,
+                interactive_enabled=config.telegram_interactive_enabled,
+                admin_user_ids=config.telegram_admin_user_ids,
+                action_context_ttl_sec=config.telegram_action_context_ttl_sec,
+                action_log_max_lines=config.telegram_action_log_max_lines,
+                action_refresh_min_interval_sec=config.telegram_action_refresh_min_interval_sec,
+                action_timeout_sec=config.telegram_action_timeout_sec,
             )
             await notifier.start()
         except Exception:

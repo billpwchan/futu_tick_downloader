@@ -68,6 +68,12 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.telegram_health_after_close_once is True
     assert cfg.telegram_health_holiday_mode == "daily"
     assert cfg.telegram_alert_escalation_steps == [0, 600, 1800]
+    assert cfg.telegram_interactive_enabled is False
+    assert cfg.telegram_admin_user_ids == []
+    assert cfg.telegram_action_context_ttl_sec == 43200
+    assert cfg.telegram_action_log_max_lines == 20
+    assert cfg.telegram_action_refresh_min_interval_sec == 15
+    assert cfg.telegram_action_timeout_sec == 3.0
 
 
 def test_config_bool_and_list_parsing(monkeypatch):
@@ -114,6 +120,12 @@ def test_config_parses_telegram_env(monkeypatch):
     monkeypatch.setenv("TG_HEALTH_HOLIDAY_MODE", "disabled")
     monkeypatch.setenv("ALERT_COOLDOWN_SEC", "900")
     monkeypatch.setenv("ALERT_ESCALATION_STEPS", "0,300,900")
+    monkeypatch.setenv("TG_INTERACTIVE_ENABLED", "1")
+    monkeypatch.setenv("TG_ADMIN_USER_IDS", "1001,1002")
+    monkeypatch.setenv("TG_ACTION_CONTEXT_TTL_SEC", "21600")
+    monkeypatch.setenv("TG_ACTION_LOG_MAX_LINES", "30")
+    monkeypatch.setenv("TG_ACTION_REFRESH_MIN_INTERVAL_SEC", "22")
+    monkeypatch.setenv("TG_ACTION_TIMEOUT_SEC", "4.5")
 
     cfg = Config.from_env()
     assert cfg.telegram_enabled is True
@@ -132,6 +144,12 @@ def test_config_parses_telegram_env(monkeypatch):
     assert cfg.telegram_health_holiday_mode == "disabled"
     assert cfg.telegram_alert_cooldown_sec == 900
     assert cfg.telegram_alert_escalation_steps == [0, 300, 900]
+    assert cfg.telegram_interactive_enabled is True
+    assert cfg.telegram_admin_user_ids == [1001, 1002]
+    assert cfg.telegram_action_context_ttl_sec == 21600
+    assert cfg.telegram_action_log_max_lines == 30
+    assert cfg.telegram_action_refresh_min_interval_sec == 22
+    assert cfg.telegram_action_timeout_sec == 4.5
 
 
 def test_config_ignores_legacy_telegram_aliases(monkeypatch):

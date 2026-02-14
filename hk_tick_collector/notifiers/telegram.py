@@ -21,6 +21,22 @@ from typing import Any, Awaitable, Callable, Deque, Dict, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from hk_tick_collector import __version__ as PACKAGE_VERSION
+from hk_tick_collector.notifiers.telegram_actions import (
+    ActionContext,
+    ActionContextStore,
+    SafeOpsCommandRunner,
+    TelegramActionRouter,
+    summarize_alert_counts,
+)
+from hk_tick_collector.notifiers.telegram_render import (
+    RenderOutput,
+    callback_data_len_ok,
+    render_alert_compact,
+    render_alert_detail,
+    render_daily_digest,
+    render_health_compact,
+    render_health_detail,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +139,7 @@ class TelegramSendResult:
     status_code: int
     retry_after: int | None = None
     error: str | None = None
+    message_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +168,9 @@ class _OutboundMessage:
     eid: str | None
     thread_id: int | None = None
     chat_id: str | None = None
+    mode: str = "send"
+    message_id: int | None = None
+    action_context_id: str | None = None
 
 
 @dataclass
@@ -1330,6 +1350,30 @@ class TelegramClient:
             payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=True)
         return self._sender(payload)
 
+    def edit_message_text(
+        self,
+        *,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        parse_mode: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> TelegramSendResult:
+        payload: Dict[str, str | int] = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": text,
+            "disable_web_page_preview": "true",
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=True)
+        body = self._post_json(endpoint="editMessageText", payload=payload)
+        if not body:
+            return TelegramSendResult(ok=False, status_code=0, error="empty_response")
+        return self._parse_send_response(200 if body.get("ok") else 400, json.dumps(body))
+
     def answer_callback_query(
         self,
         *,
@@ -1364,6 +1408,9 @@ class TelegramClient:
             if isinstance(item, dict):
                 updates.append(item)
         return updates
+
+    def get_webhook_info(self) -> dict[str, Any]:
+        return self._post_json(endpoint="getWebhookInfo", payload={})
 
     def _send_via_http(self, payload: Dict[str, str | int]) -> TelegramSendResult:
         url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
@@ -1421,6 +1468,13 @@ class TelegramClient:
             if isinstance(raw, int):
                 retry_after = raw
 
+        message_id: int | None = None
+        result_payload = payload.get("result")
+        if isinstance(result_payload, dict):
+            raw_message_id = result_payload.get("message_id")
+            if isinstance(raw_message_id, int):
+                message_id = raw_message_id
+
         ok_flag = bool(payload.get("ok")) if payload else (200 <= status_code < 300)
         success = ok_flag and (200 <= status_code < 300)
         error = payload.get("description") if isinstance(payload.get("description"), str) else None
@@ -1431,6 +1485,7 @@ class TelegramClient:
             status_code=status_code,
             retry_after=retry_after,
             error=self._sanitize_text(error) if error else None,
+            message_id=message_id,
         )
 
     def _sanitize_text(self, text: str | None) -> str:
@@ -1485,6 +1540,13 @@ class TelegramNotifier:
         now_monotonic: Callable[[], float] = time.monotonic,
         sleep: Optional[Callable[[float], Awaitable[None]]] = None,
         enable_callbacks: bool = True,
+        interactive_enabled: bool | None = None,
+        admin_user_ids: Sequence[int] | None = None,
+        action_context_ttl_sec: int = 43200,
+        action_log_max_lines: int = 20,
+        action_refresh_min_interval_sec: int = 15,
+        action_timeout_sec: float = 3.0,
+        service_name: str = "hk-tick-collector",
     ) -> None:
         self._enabled = bool(enabled)
         self._chat_id = chat_id.strip()
@@ -1499,7 +1561,9 @@ class TelegramNotifier:
         self._max_retries = max(1, int(max_retries))
         self._now_monotonic = now_monotonic
         self._sleep = sleep or asyncio.sleep
-        self._enable_callbacks = bool(enable_callbacks and sender is None)
+        callback_switch = enable_callbacks if interactive_enabled is None else interactive_enabled
+        self._enable_callbacks = bool(callback_switch and sender is None)
+        self._admin_user_ids: set[int] = {int(item) for item in (admin_user_ids or [])}
         self._health_lunch_once = bool(health_lunch_once)
         self._health_after_close_once = bool(health_after_close_once)
         holiday_mode_text = health_holiday_mode.strip().lower()
@@ -1537,6 +1601,8 @@ class TelegramNotifier:
         self._dedupe = DedupeStore()
         self._hostname = socket.gethostname()
         self._collector_version = _resolve_collector_version()
+        self._muted_chats_until: Dict[str, float] = {}
+        self._latest_health_context_id: str | None = None
 
         self._queue: asyncio.Queue[_OutboundMessage | None] = asyncio.Queue(
             maxsize=max(1, int(queue_maxsize))
@@ -1567,6 +1633,29 @@ class TelegramNotifier:
         self._cached_snapshot_order: Deque[str] = deque()
         self._cached_events: Dict[str, AlertEvent] = {}
         self._cached_event_order: Deque[str] = deque()
+        self._action_store = ActionContextStore(ttl_sec=action_context_ttl_sec)
+        self._ops_runner = SafeOpsCommandRunner(
+            service_name=service_name,
+            log_window_minutes=20,
+            timeout_sec=action_timeout_sec,
+        )
+        self._action_router = TelegramActionRouter(
+            context_store=self._action_store,
+            ops_runner=self._ops_runner,
+            allowed_chat_id=self._chat_id,
+            admin_user_ids=self._admin_user_ids,
+            log_max_lines=action_log_max_lines,
+            refresh_min_interval_sec=action_refresh_min_interval_sec,
+            mute_chat_fn=self._mute_chat_for,
+            is_muted_fn=self._is_chat_muted,
+            get_latest_health_ctx_fn=self._get_latest_health_context,
+            render_health_compact_fn=self._router_render_health_compact,
+            render_health_detail_fn=self._router_render_health_detail,
+            render_alert_compact_fn=self._router_render_alert_compact,
+            render_alert_detail_fn=self._router_render_alert_detail,
+            market_mode_of_event_fn=self._market_mode_of_event,
+            get_daily_top_anomalies_fn=self._daily_top_anomalies,
+        )
 
         self._active = self._enabled and bool(self._chat_id) and bool(bot_token.strip())
         if self._enabled and not self._active:
@@ -1588,7 +1677,7 @@ class TelegramNotifier:
         logger.info(
             "telegram_notifier_started notify_schema=%s version=%s chat_id=%s thread_id=%s "
             "thread_health_id=%s thread_ops_id=%s parse_mode=%s render_mode_default=%s "
-            "token=%s rate_limit_per_min=%s cadence_ok_preopen=%s cadence_ok_open=%s "
+            "token=%s rate_limit_per_min=%s interactive_enabled=%s cadence_ok_preopen=%s cadence_ok_open=%s "
             "cadence_ok_lunch=%s cadence_ok_after_hours=%s cadence_warn=%s cadence_alert=%s",
             NOTIFY_SCHEMA_VERSION,
             self._collector_version,
@@ -1600,6 +1689,7 @@ class TelegramNotifier:
             self._default_render_mode.value,
             self._client.masked_token,
             self._rate_limiter.limit_per_window,
+            self._enable_callbacks,
             PREOPEN_CADENCE_SEC,
             self._health_trading_interval_sec,
             LUNCH_CADENCE_SEC,
@@ -1611,6 +1701,7 @@ class TelegramNotifier:
             self._worker_loop(), name="telegram-notifier-worker"
         )
         if self._enable_callbacks:
+            await self._log_webhook_if_present()
             self._callback_task = asyncio.create_task(
                 self._callback_loop(), name="telegram-notifier-callbacks"
             )
@@ -1650,6 +1741,16 @@ class TelegramNotifier:
         self._last_health_snapshot = snapshot
         self._last_health_severity = assessment.severity
         self._last_health_market_mode = assessment.market_mode
+        if assessment.severity in {NotifySeverity.OK, NotifySeverity.WARN} and self._is_chat_muted(
+            self._chat_id
+        ):
+            logger.info(
+                "telegram_health_suppressed reason=chat_muted severity=%s mode=%s sid=%s",
+                assessment.severity.value,
+                assessment.market_mode,
+                snapshot.sid,
+            )
+            return
         if not should_send:
             logger.info(
                 "telegram_health_suppressed reason=%s severity=%s mode=%s sid=%s",
@@ -1660,21 +1761,34 @@ class TelegramNotifier:
             )
             return
 
-        rendered = self._composer.render_health(
+        compact = render_health_compact(
             snapshot=snapshot,
             assessment=assessment,
-            hostname=self._hostname,
-            instance_id=self._instance_id,
             include_system_metrics=self._include_system_metrics,
+            include_mute=True,
+            include_refresh=True,
+        )
+        detail = render_health_detail(
+            snapshot=snapshot,
+            assessment=assessment,
+            expanded=True,
+            include_system_metrics=self._include_system_metrics,
+        )
+        if not callback_data_len_ok(compact.reply_markup):
+            logger.warning("telegram_callback_data_exceeds_limit sid=%s", snapshot.sid)
+        self._store_action_context(
+            context_id=snapshot.sid,
+            kind="HEALTH",
+            compact=compact,
+            detail=detail,
+            sid=snapshot.sid,
+            trading_day=snapshot.trading_day,
+            snapshot=snapshot,
+            assessment=assessment,
             digest=self._digest_state,
-            render_mode=self._default_render_mode,
         )
-        rendered = self._attach_buttons(
-            message=rendered,
-            details_callback=self._make_callback_data("d:s", snapshot.sid),
-            runbook_callback=self._make_callback_data("r", "HEALTH"),
-            db_callback=self._make_callback_data("b", snapshot.sid),
-        )
+        self._latest_health_context_id = snapshot.sid
+        rendered = self._as_rendered_message(compact)
         self._enqueue_message(
             kind="HEALTH",
             message=rendered,
@@ -1683,6 +1797,7 @@ class TelegramNotifier:
             reason=reason,
             sid=snapshot.sid,
             eid=None,
+            action_context_id=snapshot.sid,
         )
         self._last_health_sent_at = now
         if assessment.severity == NotifySeverity.OK:
@@ -1692,19 +1807,30 @@ class TelegramNotifier:
                 and self._digest_state is not None
                 and _is_after_close_window(snapshot.created_at)
             ):
-                digest_message = self._composer.render_daily_digest(
+                digest_context_id = f"dg-{snapshot.sid}"
+                digest_out = render_daily_digest(
                     snapshot=snapshot,
                     digest=self._digest_state,
-                    hostname=self._hostname,
-                    instance_id=self._instance_id,
-                    render_mode=self._default_render_mode,
+                    context_id=digest_context_id,
                 )
-                digest_message = self._attach_buttons(
-                    message=digest_message,
-                    details_callback=self._make_callback_data("d:s", snapshot.sid),
-                    runbook_callback=self._make_callback_data("r", "HEALTH"),
-                    db_callback=self._make_callback_data("b", snapshot.sid),
+                digest_detail = render_health_detail(
+                    snapshot=snapshot,
+                    assessment=assessment,
+                    expanded=True,
+                    include_system_metrics=self._include_system_metrics,
                 )
+                self._store_action_context(
+                    context_id=digest_context_id,
+                    kind="DAILY_DIGEST",
+                    compact=digest_out,
+                    detail=digest_detail,
+                    sid=snapshot.sid,
+                    trading_day=snapshot.trading_day,
+                    snapshot=snapshot,
+                    assessment=assessment,
+                    digest=self._digest_state,
+                )
+                digest_message = self._as_rendered_message(digest_out)
                 self._enqueue_message(
                     kind="DAILY_DIGEST",
                     message=digest_message,
@@ -1713,6 +1839,7 @@ class TelegramNotifier:
                     reason="after_close_digest",
                     sid=snapshot.sid,
                     eid=None,
+                    action_context_id=digest_context_id,
                 )
                 self._daily_digest_sent.add(snapshot.trading_day)
 
@@ -1748,20 +1875,22 @@ class TelegramNotifier:
             return
 
         mode = _infer_market_mode(normalized.created_at)
-        rendered = self._composer.render_alert(
-            event=normalized,
-            hostname=self._hostname,
-            instance_id=self._instance_id,
-            market_mode=mode,
-            render_mode=self._default_render_mode,
-        )
         self._cache_event(normalized)
-        rendered = self._attach_buttons(
-            message=rendered,
-            details_callback=self._make_callback_data("d:e", normalized.eid),
-            runbook_callback=self._make_callback_data("r", normalized.code.upper()),
-            db_callback=self._make_callback_data("b", normalized.sid or "none"),
+        compact = render_alert_compact(event=normalized, market_mode=mode)
+        detail = render_alert_detail(event=normalized, market_mode=mode, expanded=True)
+        if not callback_data_len_ok(compact.reply_markup):
+            logger.warning("telegram_callback_data_exceeds_limit eid=%s", normalized.eid)
+        self._store_action_context(
+            context_id=normalized.eid,
+            kind=normalized.code,
+            compact=compact,
+            detail=detail,
+            sid=normalized.sid,
+            eid=normalized.eid,
+            trading_day=normalized.trading_day,
+            event=normalized,
         )
+        rendered = self._as_rendered_message(compact)
         if self._digest_state is not None and severity in {
             NotifySeverity.WARN,
             NotifySeverity.ALERT,
@@ -1775,6 +1904,7 @@ class TelegramNotifier:
             reason=reason,
             sid=normalized.sid,
             eid=normalized.eid,
+            action_context_id=normalized.eid,
         )
 
     def resolve_alert(
@@ -1808,19 +1938,19 @@ class TelegramNotifier:
         )
         mode = _infer_market_mode(recovered.created_at)
         self._cache_event(recovered)
-        rendered = self._composer.render_recovered(
+        compact = render_alert_compact(event=recovered, market_mode=mode)
+        detail = render_alert_detail(event=recovered, market_mode=mode, expanded=True)
+        self._store_action_context(
+            context_id=recovered.eid,
+            kind=f"{code}_RECOVERED",
+            compact=compact,
+            detail=detail,
+            sid=recovered.sid,
+            eid=recovered.eid,
+            trading_day=recovered.trading_day,
             event=recovered,
-            hostname=self._hostname,
-            instance_id=self._instance_id,
-            market_mode=mode,
-            render_mode=self._default_render_mode,
         )
-        rendered = self._attach_buttons(
-            message=rendered,
-            details_callback=self._make_callback_data("d:e", recovered.eid),
-            runbook_callback=self._make_callback_data("r", recovered.code.upper()),
-            db_callback=self._make_callback_data("b", recovered.sid or "none"),
-        )
+        rendered = self._as_rendered_message(compact)
         self._enqueue_message(
             kind=f"{code}_RECOVERED",
             message=rendered,
@@ -1829,6 +1959,7 @@ class TelegramNotifier:
             reason="state_recovered",
             sid=resolved_sid,
             eid=resolved_eid,
+            action_context_id=recovered.eid,
         )
         if self._digest_state is not None:
             self._digest_state.recovered_count += 1
@@ -1845,6 +1976,9 @@ class TelegramNotifier:
         eid: str | None,
         thread_id: int | None = None,
         chat_id: str | None = None,
+        mode: str = "send",
+        message_id: int | None = None,
+        action_context_id: str | None = None,
     ) -> bool:
         clipped = truncate_rendered_message(message)
         resolved_thread_id = (
@@ -1861,12 +1995,16 @@ class TelegramNotifier:
             eid=eid,
             thread_id=resolved_thread_id,
             chat_id=chat_id.strip() if chat_id else self._chat_id,
+            mode=mode,
+            message_id=message_id,
+            action_context_id=action_context_id,
         )
         try:
             self._queue.put_nowait(payload)
             logger.info(
-                "telegram_enqueue kind=%s severity=%s fingerprint=%s reason=%s thread_id=%s eid=%s sid=%s",
+                "telegram_enqueue kind=%s mode=%s severity=%s fingerprint=%s reason=%s thread_id=%s eid=%s sid=%s",
                 kind,
+                mode,
                 severity.value,
                 fingerprint,
                 reason,
@@ -1877,8 +2015,9 @@ class TelegramNotifier:
             return True
         except asyncio.QueueFull:
             logger.error(
-                "telegram_queue_full kind=%s severity=%s fingerprint=%s dropped=1 thread_id=%s eid=%s sid=%s",
+                "telegram_queue_full kind=%s mode=%s severity=%s fingerprint=%s dropped=1 thread_id=%s eid=%s sid=%s",
                 kind,
+                mode,
                 severity.value,
                 fingerprint,
                 resolved_thread_id if resolved_thread_id is not None else "none",
@@ -2106,36 +2245,6 @@ class TelegramNotifier:
             oldest = self._cached_event_order.popleft()
             self._cached_events.pop(oldest, None)
 
-    def _make_callback_data(self, prefix: str, value: str) -> str:
-        normalized = f"{prefix}:{value}".strip()
-        if len(normalized.encode("utf-8")) <= _CALLBACK_MAX_BYTES:
-            return normalized
-        clipped = normalized.encode("utf-8")[:_CALLBACK_MAX_BYTES]
-        return clipped.decode("utf-8", errors="ignore")
-
-    def _attach_buttons(
-        self,
-        *,
-        message: RenderedMessage,
-        details_callback: str,
-        runbook_callback: str,
-        db_callback: str,
-    ) -> RenderedMessage:
-        keyboard = {
-            "inline_keyboard": [
-                [
-                    {"text": "Details", "callback_data": details_callback},
-                    {"text": "Runbook", "callback_data": runbook_callback},
-                    {"text": "DB", "callback_data": db_callback},
-                ]
-            ]
-        }
-        return RenderedMessage(
-            text=message.text,
-            parse_mode=message.parse_mode,
-            reply_markup=keyboard,
-        )
-
     async def _callback_loop(self) -> None:
         while True:
             try:
@@ -2163,6 +2272,8 @@ class TelegramNotifier:
         message = callback.get("message")
         chat_id = self._chat_id
         thread_id: int | None = None
+        message_id: int | None = None
+        user_id: int | None = None
         if isinstance(message, dict):
             chat = message.get("chat")
             if isinstance(chat, dict) and chat.get("id") is not None:
@@ -2170,144 +2281,168 @@ class TelegramNotifier:
             raw_thread = message.get("message_thread_id")
             if isinstance(raw_thread, int):
                 thread_id = raw_thread
+            raw_message_id = message.get("message_id")
+            if isinstance(raw_message_id, int):
+                message_id = raw_message_id
+        sender = callback.get("from")
+        if isinstance(sender, dict):
+            raw_user_id = sender.get("id")
+            if isinstance(raw_user_id, int):
+                user_id = raw_user_id
+
+        if not data:
+            if callback_id:
+                await asyncio.to_thread(
+                    self._client.answer_callback_query,
+                    callback_query_id=callback_id,
+                    text="無資料",
+                )
+            return
 
         if callback_id:
             await asyncio.to_thread(
                 self._client.answer_callback_query,
                 callback_query_id=callback_id,
             )
-        if not data:
-            return
 
-        outbound = self._build_callback_outbound(
+        dispatch = await self._action_router.handle_callback_query(
             data=data,
             chat_id=chat_id,
-            thread_id=thread_id,
+            message_id=message_id,
+            user_id=user_id,
         )
-        if outbound is None:
-            return
-        self._enqueue_message(
-            kind=outbound.kind,
-            message=outbound.message,
-            severity=outbound.severity,
-            fingerprint=outbound.fingerprint,
-            reason="button_callback",
-            sid=outbound.sid,
-            eid=outbound.eid,
-            thread_id=outbound.thread_id,
-            chat_id=outbound.chat_id,
+        if dispatch.ack_text:
+            logger.info("telegram_callback_ack data=%s ack=%s", data, dispatch.ack_text)
+        for item in dispatch.messages:
+            severity = _severity_from(item.severity)
+            outbound = RenderedMessage(
+                text=item.text,
+                parse_mode=item.parse_mode,
+                reply_markup=item.reply_markup,
+            )
+            self._enqueue_message(
+                kind=item.kind,
+                message=outbound,
+                severity=severity,
+                fingerprint=f"CALLBACK:{item.kind}:{item.sid or item.eid or 'none'}",
+                reason="button_callback",
+                sid=item.sid,
+                eid=item.eid,
+                thread_id=thread_id,
+                chat_id=chat_id,
+                mode=item.mode,
+                message_id=item.message_id,
+            )
+
+    def _as_rendered_message(self, output: RenderOutput) -> RenderedMessage:
+        return RenderedMessage(
+            text=output.text,
+            parse_mode=output.parse_mode,
+            reply_markup=output.reply_markup,
         )
 
-    def _build_callback_outbound(
+    def _store_action_context(
         self,
         *,
-        data: str,
-        chat_id: str,
-        thread_id: int | None,
-    ) -> _OutboundMessage | None:
-        if data.startswith("d:s:"):
-            sid = data.split(":", 2)[-1]
-            cached = self._cached_snapshots.get(sid)
-            if cached is None:
-                return None
-            snapshot, assessment = cached
-            message = self._composer.render_health(
-                snapshot=snapshot,
-                assessment=assessment,
-                hostname=self._hostname,
-                instance_id=self._instance_id,
-                include_system_metrics=self._include_system_metrics,
-                digest=self._digest_state,
-                render_mode=RenderMode.OPS,
+        context_id: str,
+        kind: str,
+        compact: RenderOutput,
+        detail: RenderOutput,
+        sid: str | None = None,
+        eid: str | None = None,
+        trading_day: str | None = None,
+        snapshot: HealthSnapshot | None = None,
+        assessment: HealthAssessment | None = None,
+        event: AlertEvent | None = None,
+        digest: _DailyDigestState | None = None,
+    ) -> None:
+        self._action_store.put(
+            context_id=context_id,
+            kind=kind,
+            compact_text=compact.text,
+            detail_text=detail.text,
+            parse_mode=compact.parse_mode,
+            reply_markup=compact.reply_markup,
+            sid=sid,
+            eid=eid,
+            trading_day=trading_day,
+            snapshot=snapshot,
+            assessment=assessment,
+            event=event,
+            digest=digest,
+        )
+
+    def _get_latest_health_context(self) -> ActionContext | None:
+        if self._latest_health_context_id is None:
+            return None
+        return self._action_store.get(self._latest_health_context_id)
+
+    def _router_render_health_compact(
+        self,
+        snapshot: HealthSnapshot,
+        assessment: HealthAssessment,
+    ) -> RenderOutput:
+        return render_health_compact(
+            snapshot=snapshot,
+            assessment=assessment,
+            include_system_metrics=self._include_system_metrics,
+            include_mute=True,
+            include_refresh=True,
+        )
+
+    def _router_render_health_detail(
+        self,
+        snapshot: HealthSnapshot,
+        assessment: HealthAssessment,
+        expanded: bool,
+    ) -> RenderOutput:
+        return render_health_detail(
+            snapshot=snapshot,
+            assessment=assessment,
+            expanded=expanded,
+            include_system_metrics=self._include_system_metrics,
+        )
+
+    def _router_render_alert_compact(self, event: AlertEvent, market_mode: str) -> RenderOutput:
+        return render_alert_compact(event=event, market_mode=market_mode)
+
+    def _router_render_alert_detail(
+        self,
+        event: AlertEvent,
+        market_mode: str,
+        expanded: bool,
+    ) -> RenderOutput:
+        return render_alert_detail(event=event, market_mode=market_mode, expanded=expanded)
+
+    def _market_mode_of_event(self, event: AlertEvent) -> str:
+        return _infer_market_mode(event.created_at)
+
+    def _daily_top_anomalies(self, trading_day: str) -> list[tuple[str, int]]:
+        return summarize_alert_counts(list(self._cached_events.values()), trading_day=trading_day)
+
+    def _mute_chat_for(self, chat_id: str, seconds: int) -> None:
+        self._muted_chats_until[chat_id] = time.monotonic() + max(60, int(seconds))
+
+    def _is_chat_muted(self, chat_id: str) -> bool:
+        deadline = self._muted_chats_until.get(chat_id)
+        if deadline is None:
+            return False
+        if time.monotonic() < deadline:
+            return True
+        self._muted_chats_until.pop(chat_id, None)
+        return False
+
+    async def _log_webhook_if_present(self) -> None:
+        payload = await asyncio.to_thread(self._client.get_webhook_info)
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            return
+        url = str(result.get("url") or "").strip()
+        if url:
+            logger.warning(
+                "telegram_webhook_detected interactive_getupdates_may_not_work webhook_url=%s",
+                url,
             )
-            return _OutboundMessage(
-                kind="OPS_DETAILS",
-                message=message,
-                severity=assessment.severity,
-                fingerprint=f"DETAILS:{sid}",
-                sid=sid,
-                eid=None,
-                thread_id=thread_id,
-                chat_id=chat_id,
-            )
-        if data.startswith("d:e:"):
-            eid = data.split(":", 2)[-1]
-            event = self._cached_events.get(eid)
-            if event is None:
-                return None
-            mode = _infer_market_mode(event.created_at)
-            severity = _severity_from(event.severity)
-            if severity == NotifySeverity.OK:
-                message = self._composer.render_recovered(
-                    event=event,
-                    hostname=self._hostname,
-                    instance_id=self._instance_id,
-                    market_mode=mode,
-                    render_mode=RenderMode.OPS,
-                )
-            else:
-                message = self._composer.render_alert(
-                    event=event,
-                    hostname=self._hostname,
-                    instance_id=self._instance_id,
-                    market_mode=mode,
-                    render_mode=RenderMode.OPS,
-                )
-            return _OutboundMessage(
-                kind="OPS_DETAILS",
-                message=message,
-                severity=severity,
-                fingerprint=f"DETAILS:{eid}",
-                sid=event.sid,
-                eid=eid,
-                thread_id=thread_id,
-                chat_id=chat_id,
-            )
-        if data.startswith("r:"):
-            code = data.split(":", 1)[-1] or "HEALTH"
-            market_mode = (
-                self._last_health_market_mode
-                if self._last_health_market_mode is not None
-                else "after-hours"
-            )
-            message = self._composer.render_runbook(
-                code=code,
-                market_mode=market_mode,
-                hostname=self._hostname,
-                instance_id=self._instance_id,
-            )
-            return _OutboundMessage(
-                kind="RUNBOOK",
-                message=message,
-                severity=NotifySeverity.OK,
-                fingerprint=f"RUNBOOK:{code}",
-                sid=self._last_health_snapshot.sid if self._last_health_snapshot else None,
-                eid=None,
-                thread_id=thread_id,
-                chat_id=chat_id,
-            )
-        if data.startswith("b:"):
-            sid = data.split(":", 1)[-1]
-            cached = self._cached_snapshots.get(sid)
-            snapshot = cached[0] if cached is not None else self._last_health_snapshot
-            if snapshot is None:
-                return None
-            message = self._composer.render_db_summary(
-                snapshot=snapshot,
-                hostname=self._hostname,
-                instance_id=self._instance_id,
-            )
-            return _OutboundMessage(
-                kind="DB_STATS",
-                message=message,
-                severity=NotifySeverity.OK,
-                fingerprint=f"DB:{snapshot.sid}",
-                sid=snapshot.sid,
-                eid=None,
-                thread_id=thread_id,
-                chat_id=chat_id,
-            )
-        return None
 
     async def _worker_loop(self) -> None:
         while True:
@@ -2324,18 +2459,39 @@ class TelegramNotifier:
     async def _deliver(self, payload: _OutboundMessage) -> None:
         for attempt in range(1, self._max_retries + 1):
             await self._wait_for_rate_limit_slot()
-            result = await asyncio.to_thread(
-                self._client.send_message,
-                chat_id=payload.chat_id or self._chat_id,
-                text=payload.message.text,
-                parse_mode=payload.message.parse_mode,
-                thread_id=payload.thread_id,
-                reply_markup=payload.message.reply_markup,
-            )
+            if payload.mode == "edit" and payload.message_id is not None:
+                result = await asyncio.to_thread(
+                    self._client.edit_message_text,
+                    chat_id=payload.chat_id or self._chat_id,
+                    message_id=payload.message_id,
+                    text=payload.message.text,
+                    parse_mode=payload.message.parse_mode,
+                    reply_markup=payload.message.reply_markup,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    self._client.send_message,
+                    chat_id=payload.chat_id or self._chat_id,
+                    text=payload.message.text,
+                    parse_mode=payload.message.parse_mode,
+                    thread_id=payload.thread_id,
+                    reply_markup=payload.message.reply_markup,
+                )
             if result.ok:
+                if (
+                    payload.action_context_id
+                    and result.message_id is not None
+                    and (payload.chat_id or self._chat_id)
+                ):
+                    self._action_store.bind_message(
+                        context_id=payload.action_context_id,
+                        chat_id=payload.chat_id or self._chat_id,
+                        message_id=result.message_id,
+                    )
                 logger.info(
-                    "telegram_send_ok kind=%s severity=%s fingerprint=%s attempt=%s eid=%s sid=%s",
+                    "telegram_send_ok kind=%s mode=%s severity=%s fingerprint=%s attempt=%s eid=%s sid=%s",
                     payload.kind,
+                    payload.mode,
                     payload.severity.value,
                     payload.fingerprint,
                     attempt,

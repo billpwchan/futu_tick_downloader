@@ -1,5 +1,7 @@
 # 05-Telegram 通知（產品化）
 
+> 互動按鈕與新版產品化 IA 已移至：[`/docs/telegram.md`](telegram.md)
+
 ## 配置步驟
 
 1. 建立 Bot，拿到 `TG_TOKEN`
