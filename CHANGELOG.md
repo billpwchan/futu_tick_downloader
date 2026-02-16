@@ -25,6 +25,11 @@
 - 新增 poll 控制參數：`FUTU_POLL_TRADING_ONLY`、`FUTU_POLL_PREOPEN_ENABLED`、`FUTU_POLL_OFFHOURS_PROBE_INTERVAL_SEC`、`FUTU_POLL_OFFHOURS_PROBE_NUM`。
 - 新增 Telegram 互動產品化模組：`telegram_render.py`、`telegram_actions.py`、`ActionContextStore(TTL)` 與 Inline Keyboard actions（detail/log/db/sop/mute/refresh/top）。
 - 新增 Telegram 互動文件：`docs/telegram.md`、`docs/runbook/telegram-actions.md`、`docs/engineering/telegram-interactive-flow.md`、`docs/user-guide/telegram-actions.md`。
+- 新增資料品質模組：`quality`（hard gap 偵測、quality report JSON）。
+- 新增歸檔模組：`archive`（SQLite backup、zstd、sha256、manifest、verify、retention）。
+- 新增 Python CLI：`hk-tickctl` 子命令 `status` / `validate` / `export` / `archive`。
+- 新增 systemd 範例：`examples/systemd/hk-tick-archive.{service,timer}`。
+- 新增測試：`test_gap_detector.py`、`test_quality_report.py`、`test_archiver.py`、`test_cli_validate.py`。
 
 ### Changed
 
@@ -36,6 +41,8 @@
 - DB 讀取統計路徑改為唯讀查詢，不再在 health/stat 查詢時觸發 schema 確保流程。
 - Telegram 訊息 IA 改為「結論 -> 關鍵指標 -> 下一步」，並支援同訊息展開/收合詳情（`editMessageText`）。
 - 新增 Telegram 互動環境變數：`TG_INTERACTIVE_ENABLED`、`TG_ADMIN_USER_IDS`、`TG_ACTION_*`。
+- `scripts/hk-tickctl` 改為 Python CLI wrapper（路徑相容，功能升級）。
+- SQLite schema 升級為含 `gaps` / `daily_quality`（由既有 schema ensure 路徑建立）。
 
 ### Removed
 

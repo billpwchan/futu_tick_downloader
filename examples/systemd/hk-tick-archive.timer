@@ -1,0 +1,10 @@
+[Unit]
+Description=Run HK Tick Collector Archive Daily at 18:00 HKT
+
+[Timer]
+OnCalendar=*-*-* 18:00:00 Asia/Hong_Kong
+Persistent=true
+Unit=hk-tick-archive.service
+
+[Install]
+WantedBy=timers.target

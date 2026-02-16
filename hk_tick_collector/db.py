@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Dict, Iterable, Sequence
 
 from .models import TickRow
+from .quality.gap_detector import GapDetector, GapDetectionPlan
+from .quality.schema import INSERT_GAP_SQL, ensure_quality_schema
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_WAL_AUTOCHECKPOINT = 1000
 
 CREATE_TABLE_SQL = (
@@ -143,6 +145,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if name not in existing:
             conn.execute(sql)
 
+    ensure_quality_schema(conn)
+
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
     if version < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
@@ -167,8 +171,9 @@ def _log_sqlite_pragmas(conn: sqlite3.Connection, db_path: Path) -> None:
 
 
 class SQLiteTickWriter:
-    def __init__(self, store: "SQLiteTickStore") -> None:
+    def __init__(self, store: "SQLiteTickStore", *, gap_detector: GapDetector | None) -> None:
         self._store = store
+        self._gap_detector = gap_detector
         self._connections: Dict[str, sqlite3.Connection] = {}
         self._db_paths: Dict[str, Path] = {}
         self._closed = False
@@ -216,20 +221,33 @@ class SQLiteTickWriter:
             )
 
         conn = self._ensure_connection(trading_day)
+        plan: GapDetectionPlan | None = None
+        gap_insert_rows: list[tuple[object, ...]] = []
+        if self._gap_detector is not None and self._gap_detector.enabled:
+            plan = self._gap_detector.build_plan(rows_list)
+            if plan.hard_gaps:
+                detected_at_ms = int(time.time() * 1000)
+                gap_insert_rows = [gap.as_tuple(detected_at_ms) for gap in plan.hard_gaps]
+
         try:
             before = conn.total_changes
             start = time.perf_counter()
             conn.executemany(INSERT_SQL, [row.as_tuple() for row in rows_list])
+            inserted = conn.total_changes - before
+            if gap_insert_rows:
+                conn.executemany(INSERT_GAP_SQL, gap_insert_rows)
             conn.commit()
             latency_ms = int((time.perf_counter() - start) * 1000)
-            inserted = conn.total_changes - before
             ignored = max(0, len(rows_list) - inserted)
+            if plan is not None:
+                self._gap_detector.apply_plan(plan)
             logger.debug(
-                "persist_ticks db_path=%s batch=%s inserted=%s ignored=%s commit_latency_ms=%s checkpoint=%s",
+                "persist_ticks db_path=%s batch=%s inserted=%s ignored=%s gaps=%s commit_latency_ms=%s checkpoint=%s",
                 db_path,
                 len(rows_list),
                 inserted,
                 ignored,
+                len(gap_insert_rows),
                 latency_ms,
                 "none",
             )
@@ -274,12 +292,14 @@ class SQLiteTickStore:
         journal_mode: str = "WAL",
         synchronous: str = "NORMAL",
         wal_autocheckpoint: int = DEFAULT_WAL_AUTOCHECKPOINT,
+        gap_detector: GapDetector | None = None,
     ) -> None:
         self._data_root = Path(data_root)
         self._busy_timeout_ms = max(1, int(busy_timeout_ms))
         self._journal_mode = _sanitize_journal_mode(journal_mode)
         self._synchronous = _sanitize_synchronous(synchronous)
         self._wal_autocheckpoint = max(1, int(wal_autocheckpoint))
+        self._gap_detector = gap_detector
 
     def _connect(self, db_path: Path) -> sqlite3.Connection:
         return _open_conn(
@@ -296,7 +316,7 @@ class SQLiteTickStore:
         return conn
 
     def open_writer(self) -> SQLiteTickWriter:
-        return SQLiteTickWriter(self)
+        return SQLiteTickWriter(self, gap_detector=self._gap_detector)
 
     def ensure_db(self, trading_day: str) -> Path:
         db_path = db_path_for_trading_day(self._data_root, trading_day)

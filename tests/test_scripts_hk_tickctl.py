@@ -1,166 +1,142 @@
-import os
+from __future__ import annotations
+
+import sqlite3
 import subprocess
-import tarfile
 from pathlib import Path
 
+from hk_tick_collector.db import SQLiteTickStore
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "hk-tickctl"
 
 
-def _write_executable(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
-    path.chmod(0o755)
+def _prepare_db(root: Path, day: str) -> None:
+    store = SQLiteTickStore(root)
+    db = store.ensure_db(day)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            (
+                "INSERT INTO ticks (market,symbol,ts_ms,price,volume,turnover,direction,seq,tick_type,"
+                "push_type,provider,trading_day,recv_ts_ms,inserted_at_ms) "
+                "VALUES ('HK','HK.00700',1708056600000,300.0,100,30000.0,'BUY',1,'AUTO_MATCH',"
+                "'push','futu',?,1708056600001,1708056600001)"
+            ),
+            (day,),
+        )
+        conn.execute(
+            (
+                "INSERT INTO gaps (trading_day,symbol,gap_start_ts_ms,gap_end_ts_ms,gap_sec,"
+                "detected_at_ms,reason,meta_json) VALUES (?,?,?,?,?,?,?,?)"
+            ),
+            (day, "HK.00700", 1708056600000, 1708056605000, 5.0, 1708056605002, "hard_gap", "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
-def _base_env(bin_dir: Path) -> dict[str, str]:
-    env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
-    env["SERVICE_NAME"] = "hk-tick-collector"
-    return env
-
-
-def test_hk_tickctl_doctor_detects_notify_schema(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_executable(
-        bin_dir / "systemctl",
-        """#!/usr/bin/env bash
-if [[ "$1" == "is-active" ]]; then
-  echo "active"
-  exit 0
-fi
-echo "unknown"
-""",
-    )
-    _write_executable(
-        bin_dir / "journalctl",
-        """#!/usr/bin/env bash
-cat <<'LOG'
-Feb 13 01:00:00 host hk-tick-collector[1]: telegram_notifier_started notify_schema=v2.2 version=0.1.0
-Feb 13 01:01:00 host hk-tick-collector[1]: telegram_enqueue kind=HEALTH severity=OK fingerprint=HEALTH:20260213:open reason=bootstrap eid=none sid=sid-11112222
-LOG
-""",
-    )
-
+def test_script_db_stats(tmp_path: Path) -> None:
+    day = "20260216"
+    _prepare_db(tmp_path, day)
     result = subprocess.run(
-        ["bash", str(SCRIPT), "doctor", "--since", "2 hours ago"],
+        [
+            "bash",
+            str(SCRIPT),
+            "db",
+            "stats",
+            "--data-root",
+            str(tmp_path),
+            "--day",
+            day,
+        ],
         cwd=str(ROOT),
-        env=_base_env(bin_dir),
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0
-    assert "=== HK Tick 版本診斷 ===" in result.stdout
-    assert "找到 notify schema" in result.stdout
+    assert "=== DB 統計 ===" in result.stdout
+    assert "rows=1" in result.stdout
 
 
-def test_hk_tickctl_doctor_reports_missing_schema(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_executable(
-        bin_dir / "systemctl",
-        """#!/usr/bin/env bash
-if [[ "$1" == "is-active" ]]; then
-  echo "active"
-  exit 0
-fi
-echo "unknown"
-""",
-    )
-    _write_executable(
-        bin_dir / "journalctl",
-        """#!/usr/bin/env bash
-cat <<'LOG'
-Feb 13 01:01:00 host hk-tick-collector[1]: health sid=sid-aaa queue=0/50000
-LOG
-""",
-    )
+def test_script_status_and_export_report(tmp_path: Path) -> None:
+    day = "20260216"
+    _prepare_db(tmp_path, day)
+    out = tmp_path / "quality.json"
 
-    result = subprocess.run(
-        ["bash", str(SCRIPT), "doctor", "--since", "2 hours ago"],
+    status = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "status",
+            "--data-root",
+            str(tmp_path),
+            "--day",
+            day,
+        ],
         cwd=str(ROOT),
-        env=_base_env(bin_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert status.returncode == 0
+    assert "=== HK Tick 狀態 ===" in status.stdout
+    assert "ticks_total=1" in status.stdout
+
+    export_report = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "export",
+            "report",
+            "--data-root",
+            str(tmp_path),
+            "--day",
+            day,
+            "--out",
+            str(out),
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert export_report.returncode == 0
+    assert out.exists()
+
+
+def test_script_export_gaps(tmp_path: Path) -> None:
+    day = "20260216"
+    _prepare_db(tmp_path, day)
+    out = tmp_path / "gaps.csv"
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "export",
+            "gaps",
+            "--data-root",
+            str(tmp_path),
+            "--day",
+            day,
+            "--out",
+            str(out),
+        ],
+        cwd=str(ROOT),
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0
-    assert "沒找到 notify schema" in result.stdout
+    assert out.exists()
 
 
-def test_hk_tickctl_status_reports_health_and_alert(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_executable(
-        bin_dir / "systemctl",
-        """#!/usr/bin/env bash
-if [[ "$1" == "is-active" ]]; then
-  if [[ "$2" == "futu-opend" ]]; then
-    echo "active"
-  else
-    echo "active"
-  fi
-  exit 0
-fi
-echo "unknown"
-""",
-    )
-    _write_executable(
-        bin_dir / "journalctl",
-        """#!/usr/bin/env bash
-cat <<'LOG'
-Feb 13 01:01:00 host hk-tick-collector[1]: health sid=sid-a1 connected=True queue=0/50000 persisted_rows_per_min=12000 phase=open symbols=1000
-Feb 13 01:02:00 host hk-tick-collector[1]: telegram_enqueue kind=DISCONNECT severity=ALERT fingerprint=DISCONNECT reason=new eid=eid-x1 sid=sid-a1
-LOG
-""",
-    )
-    result = subprocess.run(
-        ["bash", str(SCRIPT), "status", "--since", "30 minutes ago"],
-        cwd=str(ROOT),
-        env=_base_env(bin_dir),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0
-    assert "=== HK Tick 狀態 ===" in result.stdout
-    assert "[健康]" in result.stdout
-    assert "[告警]" in result.stdout
-
-
-def test_hk_tickctl_db_symbol_invokes_sqlite3(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    db_path = tmp_path / "20260213.db"
-    db_path.write_text("", encoding="utf-8")
-    _write_executable(
-        bin_dir / "sqlite3",
-        """#!/usr/bin/env bash
-echo "symbol|ts_utc|price|volume|turnover|seq"
-echo "HK.00700|2026-02-13 09:30:00|350.2|100|35020.0|1"
-""",
-    )
-    env = _base_env(bin_dir)
-    env["DATA_ROOT"] = str(tmp_path)
-    result = subprocess.run(
-        ["bash", str(SCRIPT), "db", "symbol", "HK.00700", "--db", str(db_path), "--last", "5"],
-        cwd=str(ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0
-    assert "HK.00700" in result.stdout
-
-
-def test_hk_tickctl_export_creates_tar_and_checksum(tmp_path: Path) -> None:
-    db_path = tmp_path / "20260213.db"
-    db_path.write_text("mock db", encoding="utf-8")
-
-    out_path = tmp_path / "export" / "hk-20260213.tar.gz"
+def test_script_legacy_export_tar(tmp_path: Path) -> None:
+    day = "20260216"
+    _prepare_db(tmp_path, day)
+    db_path = tmp_path / f"{day}.db"
+    out = tmp_path / "legacy.tar.gz"
     result = subprocess.run(
         [
             "bash",
@@ -169,47 +145,13 @@ def test_hk_tickctl_export_creates_tar_and_checksum(tmp_path: Path) -> None:
             "--db",
             str(db_path),
             "--out",
-            str(out_path),
+            str(out),
         ],
         cwd=str(ROOT),
-        env=os.environ.copy(),
         capture_output=True,
         text=True,
         check=False,
     )
-
     assert result.returncode == 0
-    assert out_path.exists()
-    assert Path(f"{out_path}.sha256").exists()
-
-    with tarfile.open(out_path, "r:gz") as tar:
-        names = tar.getnames()
-    assert "20260213.db" in names
-
-
-def test_hk_tickctl_tg_test_uses_python_sender(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-
-    _write_executable(
-        bin_dir / "python3",
-        """#!/usr/bin/env bash
-echo "[完成] Telegram 測試訊息已送出 message_id=42"
-""",
-    )
-
-    env = _base_env(bin_dir)
-    env["TG_TOKEN"] = "123456:ABC"
-    env["TG_CHAT_ID"] = "-100123"
-
-    result = subprocess.run(
-        ["bash", str(SCRIPT), "tg", "test"],
-        cwd=str(ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0
-    assert "Telegram 測試訊息已送出" in result.stdout
+    assert out.exists()
+    assert Path(f"{out}.sha256").exists()

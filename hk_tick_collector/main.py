@@ -14,6 +14,8 @@ from .db import SQLiteTickStore
 from .futu_client import FutuQuoteClient
 from .logging_config import setup_logging
 from .notifiers.telegram import AlertEvent, NotifySeverity, TelegramNotifier
+from .quality.config import QualityConfig
+from .quality.gap_detector import GapDetector
 
 logger = logging.getLogger(__name__)
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
@@ -81,12 +83,15 @@ async def run() -> None:
             logger.exception("telegram_notifier_init_failed")
 
     try:
+        quality_config = QualityConfig.from_env()
+        gap_detector = GapDetector(quality_config) if quality_config.gap_enabled else None
         store = SQLiteTickStore(
             config.data_root,
             busy_timeout_ms=config.sqlite_busy_timeout_ms,
             journal_mode=config.sqlite_journal_mode,
             synchronous=config.sqlite_synchronous,
             wal_autocheckpoint=config.sqlite_wal_autocheckpoint,
+            gap_detector=gap_detector,
         )
         trading_day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
         seed_days = [trading_day]

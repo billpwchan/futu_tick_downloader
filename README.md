@@ -38,24 +38,30 @@ sudo systemctl status hk-tick-collector --no-pager
 
 ## Demo：三件事就知道有跑起來
 
-### 1) 看 DB 是否持續成長
+### 1) 看今日資料是否活著（status）
 
 ```bash
-make db-stats
-# 或
-DATA_ROOT=./data/sqlite scripts/hk-tickctl db symbols --minutes 5
+scripts/hk-tickctl status --data-root /data/sqlite/HK --day $(TZ=Asia/Hong_Kong date +%Y%m%d)
 ```
 
-### 2) 看關鍵運維日誌
+### 2) 做可用性驗收（validate）
 
 ```bash
-scripts/hk-tickctl logs --ops --since "20 minutes ago"
+scripts/hk-tickctl validate --data-root /data/sqlite/HK \
+  --day $(TZ=Asia/Hong_Kong date +%Y%m%d) \
+  --regen-report 1 \
+  --strict 1
 ```
 
-### 3) 看 Telegram 測試通知
+### 3) 盤後歸檔（archive）
 
 ```bash
-TG_TOKEN='<your-token>' TG_CHAT_ID='<your-chat-id>' scripts/hk-tickctl tg test
+scripts/hk-tickctl archive --data-root /data/sqlite/HK \
+  --day $(TZ=Asia/Hong_Kong date +%Y%m%d) \
+  --archive-dir /data/sqlite/HK/_archive \
+  --keep-days 14 \
+  --delete-original 1 \
+  --verify 1
 ```
 
 ![Telegram 訊息示例](docs/assets/telegram-sample.svg)
@@ -134,8 +140,10 @@ make test
 make run
 make logs
 make db-stats
-scripts/hk-tickctl export --day 20260213 --out /tmp/hk-20260213.tar.gz
-scripts/hk-tickctl tg test
+scripts/hk-tickctl status --data-root /data/sqlite/HK
+scripts/hk-tickctl validate --data-root /data/sqlite/HK --day 20260213 --regen-report 1
+scripts/hk-tickctl export --data-root /data/sqlite/HK db --day 20260213 --out /tmp/20260213.backup.db
+scripts/hk-tickctl archive --data-root /data/sqlite/HK --day 20260213 --verify 1
 ```
 
 其餘操作請看：[`docs/04-運維 Runbook.md`](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)
@@ -160,6 +168,9 @@ scripts/hk-tickctl tg test
 ## 文件入口
 
 - 文件總入口：[`docs/_index.md`](docs/_index.md)
+- CLI 手冊：[`docs/hk-tickctl.md`](docs/hk-tickctl.md)
+- 品質報告：[`docs/quality.md`](docs/quality.md)
+- 歸檔策略：[`docs/archive.md`](docs/archive.md)
 - 快速開始（本機）：[`docs/01-快速開始（本機）.md`](docs/01-%E5%BF%AB%E9%80%9F%E9%96%8B%E5%A7%8B%EF%BC%88%E6%9C%AC%E6%A9%9F%EF%BC%89.md)
 - Lightsail 部署：[`docs/02-部署到 AWS Lightsail（Ubuntu）.md`](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)
 - Runbook：[`docs/04-運維 Runbook.md`](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)

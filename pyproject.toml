@@ -46,6 +46,7 @@ Issues = "https://github.com/billpwchan/futu_tick_downloader/issues"
 
 [project.scripts]
 hk-tick-collector = "hk_tick_collector.main:main"
+hk-tickctl = "hk_tick_collector.cli.main:main"
 
 [tool.setuptools]
 include-package-data = false

@@ -17,7 +17,7 @@
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3.11 python3.11-venv sqlite3 jq
+sudo apt-get install -y git python3.11 python3.11-venv sqlite3 jq zstd
 sudo timedatectl set-timezone Asia/Hong_Kong
 ```
 
@@ -27,6 +27,7 @@ sudo timedatectl set-timezone Asia/Hong_Kong
 timedatectl status | grep 'Time zone'
 python3.11 --version
 sqlite3 --version
+zstd --version
 ```
 
 ## 3. 拉專案與環境檔
@@ -73,6 +74,17 @@ scripts/hk-tickctl db stats
 ```bash
 cd /opt/futu_tick_downloader
 sudo bash deploy/scripts/upgrade.sh
+```
+
+## 7. （可選）設定每日 18:00 盤後歸檔
+
+```bash
+cd /opt/futu_tick_downloader
+sudo cp examples/systemd/hk-tick-archive.service /etc/systemd/system/
+sudo cp examples/systemd/hk-tick-archive.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hk-tick-archive.timer
+sudo systemctl status hk-tick-archive.timer --no-pager
 ```
 
 ## 安全建議

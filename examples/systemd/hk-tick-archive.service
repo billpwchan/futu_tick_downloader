@@ -1,0 +1,9 @@
+[Unit]
+Description=HK Tick Collector Daily Archive
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/hk-tick-collector.env
+WorkingDirectory=/opt/futu_tick_downloader
+ExecStart=/usr/bin/env bash -lc 'scripts/hk-tickctl --data-root ${DATA_ROOT:-/data/sqlite/HK} archive --day $(TZ=Asia/Hong_Kong date +\%Y\%m\%d) --archive-dir ${ARCHIVE_DIR:-/data/sqlite/HK/_archive} --keep-days ${ARCHIVE_KEEP_DAYS:-14} --delete-original ${ARCHIVE_DELETE_ORIGINAL:-1} --verify 1'

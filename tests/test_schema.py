@@ -7,6 +7,7 @@ from hk_tick_collector.db import (
     SQLiteTickStore,
     db_path_for_trading_day,
 )
+from hk_tick_collector.quality.schema import CREATE_DAILY_QUALITY_TABLE_SQL, CREATE_GAPS_TABLE_SQL
 
 
 def test_schema_and_indexes(tmp_path):
@@ -26,6 +27,19 @@ def test_schema_and_indexes(tmp_path):
                 (name,),
             ).fetchone()[0]
             assert _normalize_sql(idx_sql) == _normalize_sql(sql)
+
+        gaps_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='gaps'"
+        ).fetchone()[0]
+        daily_quality_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_quality'"
+        ).fetchone()[0]
+        assert _normalize_sql(gaps_sql) == _normalize_sql(
+            CREATE_GAPS_TABLE_SQL.replace(" IF NOT EXISTS", "")
+        )
+        assert _normalize_sql(daily_quality_sql) == _normalize_sql(
+            CREATE_DAILY_QUALITY_TABLE_SQL.replace(" IF NOT EXISTS", "")
+        )
 
         version = conn.execute("PRAGMA user_version;").fetchone()[0]
         assert version == SCHEMA_VERSION
