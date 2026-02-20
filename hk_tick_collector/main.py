@@ -77,6 +77,9 @@ async def run() -> None:
                 action_refresh_min_interval_sec=config.telegram_action_refresh_min_interval_sec,
                 action_command_rate_limit_per_min=config.telegram_action_command_rate_limit_per_min,
                 action_timeout_sec=config.telegram_action_timeout_sec,
+                action_command_timeout_sec=config.telegram_action_command_timeout_sec,
+                action_command_allowlist=config.telegram_action_command_allowlist,
+                action_command_max_lookback_days=config.telegram_action_command_max_lookback_days,
             )
             await notifier.start()
         except Exception:

@@ -7,6 +7,7 @@ import subprocess
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
+from datetime import datetime
 from html import escape
 from typing import Any, Callable, Sequence
 
@@ -22,6 +23,8 @@ from .telegram_render import (
 _CALLBACK_MAX_BYTES = 64
 _DAY_RE = re.compile(r"^\d{8}$")
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._-]{2,24}$")
+_DEFAULT_COMMAND_ALLOWLIST = {"help", "db_stats", "top_symbols", "symbol"}
+_TOP_METRICS = {"rows", "turnover", "volume"}
 
 
 @dataclass
@@ -161,10 +164,15 @@ class SafeOpsCommandRunner:
         service_name: str = "hk-tick-collector",
         log_window_minutes: int = 20,
         timeout_sec: float = 3.0,
+        command_timeout_sec: float | None = None,
     ) -> None:
         self._service_name = service_name
         self._log_window_minutes = max(1, int(log_window_minutes))
         self._timeout_sec = max(1.0, float(timeout_sec))
+        if command_timeout_sec is None:
+            self._command_timeout_sec = self._timeout_sec
+        else:
+            self._command_timeout_sec = max(self._timeout_sec, float(command_timeout_sec))
 
     def collect_recent_logs(self) -> list[str]:
         cmd = [
@@ -186,7 +194,7 @@ class SafeOpsCommandRunner:
             cmd = ["scripts/hk-tickctl", "db", "stats", "--day", trading_day]
         else:
             cmd = ["scripts/hk-tickctl", "db", "stats"]
-        return self._sanitize(self._run_allowed(cmd=cmd))
+        return self._sanitize(self._run_allowed(cmd=cmd, timeout_sec=self._command_timeout_sec))
 
     def collect_top_symbols(
         self,
@@ -199,7 +207,7 @@ class SafeOpsCommandRunner:
         safe_limit = max(1, min(30, int(limit)))
         safe_minutes = max(1, min(240, int(minutes)))
         safe_metric = metric.strip().lower()
-        if safe_metric not in {"rows", "turnover", "volume"}:
+        if safe_metric not in _TOP_METRICS:
             safe_metric = "rows"
         cmd = [
             "scripts/hk-tickctl",
@@ -214,7 +222,7 @@ class SafeOpsCommandRunner:
         ]
         if trading_day and _DAY_RE.match(trading_day):
             cmd.extend(["--day", trading_day])
-        return self._sanitize(self._run_allowed(cmd=cmd))
+        return self._sanitize(self._run_allowed(cmd=cmd, timeout_sec=self._command_timeout_sec))
 
     def collect_symbol_ticks(
         self,
@@ -237,20 +245,21 @@ class SafeOpsCommandRunner:
         ]
         if trading_day and _DAY_RE.match(trading_day):
             cmd.extend(["--day", trading_day])
-        return self._sanitize(self._run_allowed(cmd=cmd))
+        return self._sanitize(self._run_allowed(cmd=cmd, timeout_sec=self._command_timeout_sec))
 
-    def _run_allowed(self, *, cmd: list[str]) -> str:
+    def _run_allowed(self, *, cmd: list[str], timeout_sec: float | None = None) -> str:
         allowed_prefixes = {
             ("journalctl", "-u"),
             ("scripts/hk-tickctl", "db"),
         }
         if tuple(cmd[:2]) not in allowed_prefixes:
             raise ValueError("command_not_allowed")
+        effective_timeout = self._timeout_sec if timeout_sec is None else max(1.0, float(timeout_sec))
         completed = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=self._timeout_sec,
+            timeout=effective_timeout,
             check=False,
         )
         text = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
@@ -284,6 +293,8 @@ class TelegramActionRouter:
         render_alert_detail_fn: Callable[[Any, str, bool], RenderOutput],
         market_mode_of_event_fn: Callable[[Any], str],
         get_daily_top_anomalies_fn: Callable[[str], list[tuple[str, int]]],
+        command_allowlist: set[str] | None = None,
+        command_max_lookback_days: int = 30,
     ) -> None:
         self._store = context_store
         self._ops_runner = ops_runner
@@ -292,6 +303,15 @@ class TelegramActionRouter:
         self._log_max_lines = max(1, int(log_max_lines))
         self._refresh_min_interval_sec = max(5, int(refresh_min_interval_sec))
         self._command_rate_limit_per_min = max(1, int(command_rate_limit_per_min))
+        raw_allowlist = set(command_allowlist or _DEFAULT_COMMAND_ALLOWLIST)
+        self._command_allowlist = {
+            self._canonical_command(item.strip().lower())
+            for item in raw_allowlist
+            if item and item.strip()
+        }
+        if not self._command_allowlist:
+            self._command_allowlist = set(_DEFAULT_COMMAND_ALLOWLIST)
+        self._command_max_lookback_days = max(0, int(command_max_lookback_days))
         self._command_hits: dict[int, deque[float]] = {}
         self._mute_chat_fn = mute_chat_fn
         self._is_muted_fn = is_muted_fn
@@ -372,8 +392,15 @@ class TelegramActionRouter:
             )
 
         command, args = parsed
+        command = self._canonical_command(command)
+        if command not in self._command_allowlist:
+            return self._render_command_result(
+                "<b>⛔ 指令未啟用</b>\n"
+                "結論：該命令目前不在允許清單\n"
+                "下一步：請用 /help 查看已啟用命令"
+            )
         try:
-            if command in {"help", "start"}:
+            if command == "help":
                 return self._render_command_result(self._render_help_text())
             if command == "db_stats":
                 return await self._on_command_db_stats(args=args, trading_day=trading_day)
@@ -386,7 +413,9 @@ class TelegramActionRouter:
             )
         except subprocess.TimeoutExpired:
             return self._render_command_result(
-                "<b>⚠️ 操作逾時</b>\n結論：查詢超時\n下一步：請稍後再試"
+                "<b>⚠️ 操作逾時</b>\n"
+                "結論：查詢超過逾時門檻\n"
+                "下一步：縮小範圍（如 minutes/last）或稍後再試"
             )
         except Exception:
             return self._render_command_result(
@@ -609,17 +638,29 @@ class TelegramActionRouter:
         args: list[str],
         trading_day: str | None,
     ) -> CallbackDispatchResult:
-        day_override: str | None = None
-        if args:
-            candidate = args[0].strip()
-            if not _DAY_RE.match(candidate):
-                return self._render_command_result(
-                    "<b>❌ 參數錯誤</b>\n結論：日期需為 YYYYMMDD\n下一步：用 /db_stats 或 /db_stats 20260220"
-                )
-            day_override = candidate
+        try:
+            positional, options = self._split_option_args(args=args, allowed={"day"})
+        except ValueError:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n"
+                "結論：/db_stats 只支援 [YYYYMMDD] 或 --day YYYYMMDD\n"
+                "下一步：例 /db_stats --day 20260220"
+            )
+        if len(positional) > 1:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n"
+                "結論：日期參數只能提供 1 個\n"
+                "下一步：例 /db_stats 20260220"
+            )
+        day_override, day_error = self._resolve_command_day(
+            day_hint=options.get("day") or (positional[0] if positional else None),
+            trading_day=trading_day,
+        )
+        if day_error:
+            return self._render_command_result(day_error)
         output = await asyncio.to_thread(
             self._ops_runner.collect_db_stats,
-            trading_day=day_override or trading_day,
+            trading_day=day_override,
         )
         if not output:
             output = "<b>🗃 DB 統計</b>\n結論：目前無可用資料\n下一步：請稍後再試"
@@ -631,31 +672,66 @@ class TelegramActionRouter:
         args: list[str],
         trading_day: str | None,
     ) -> CallbackDispatchResult:
-        limit = 10
-        minutes = 15
-        metric = "rows"
-        if args:
-            if not args[0].isdigit():
+        try:
+            positional, options = self._split_option_args(
+                args=args, allowed={"limit", "minutes", "metric", "day"}
+            )
+        except ValueError:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n"
+                "結論：可用參數為 --limit/--minutes/--metric/--day\n"
+                "下一步：例 /top_symbols --limit 10 --minutes 15 --metric rows"
+            )
+        if len(positional) > 4:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n"
+                "結論：參數過多\n"
+                "下一步：例 /top_symbols 10 15 rows 20260220"
+            )
+
+        limit_text = options.get("limit") or (positional[0] if len(positional) >= 1 else "")
+        minutes_text = options.get("minutes") or (positional[1] if len(positional) >= 2 else "")
+        metric = (options.get("metric") or (positional[2] if len(positional) >= 3 else "rows")).strip().lower()
+        day_hint = options.get("day") or (positional[3] if len(positional) >= 4 else None)
+
+        if limit_text:
+            try:
+                limit = int(limit_text)
+            except ValueError:
                 return self._render_command_result(
-                    "<b>❌ 參數錯誤</b>\n結論：limit 需為整數\n下一步：例 /top_symbols 10 15 rows"
+                    "<b>❌ 參數錯誤</b>\n"
+                    "結論：limit 需為整數\n"
+                    "下一步：例 /top_symbols 10 15 rows"
                 )
-            limit = int(args[0])
-        if len(args) >= 2:
-            if not args[1].isdigit():
+        else:
+            limit = 10
+
+        if minutes_text:
+            try:
+                minutes = int(minutes_text)
+            except ValueError:
                 return self._render_command_result(
-                    "<b>❌ 參數錯誤</b>\n結論：minutes 需為整數\n下一步：例 /top_symbols 10 15 rows"
+                    "<b>❌ 參數錯誤</b>\n"
+                    "結論：minutes 需為整數\n"
+                    "下一步：例 /top_symbols 10 15 rows"
                 )
-            minutes = int(args[1])
-        if len(args) >= 3:
-            metric = args[2].strip().lower()
-        if metric not in {"rows", "turnover", "volume"}:
+        else:
+            minutes = 15
+
+        if metric not in _TOP_METRICS:
             return self._render_command_result(
                 "<b>❌ 參數錯誤</b>\n結論：metric 只支援 rows/turnover/volume\n下一步：例 /top_symbols 10 15 rows"
             )
+        day_override, day_error = self._resolve_command_day(
+            day_hint=day_hint,
+            trading_day=trading_day,
+        )
+        if day_error:
+            return self._render_command_result(day_error)
 
         output = await asyncio.to_thread(
             self._ops_runner.collect_top_symbols,
-            trading_day=trading_day,
+            trading_day=day_override,
             limit=max(1, min(30, limit)),
             minutes=max(1, min(240, minutes)),
             metric=metric,
@@ -678,23 +754,49 @@ class TelegramActionRouter:
             return self._render_command_result(
                 "<b>❌ 參數錯誤</b>\n結論：缺少 symbol\n下一步：例 /symbol HK.00700 20"
             )
-        symbol = args[0].strip().upper()
+        try:
+            positional, options = self._split_option_args(args=args, allowed={"last", "day"})
+        except ValueError:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n"
+                "結論：可用參數為 --last/--day\n"
+                "下一步：例 /symbol HK.00700 --last 20 --day 20260220"
+            )
+        if not positional:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n結論：缺少 symbol\n下一步：例 /symbol HK.00700 20"
+            )
+        if len(positional) > 3:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n結論：參數過多\n下一步：例 /symbol HK.00700 20 20260220"
+            )
+
+        symbol = positional[0].strip().upper()
         if not _SYMBOL_RE.match(symbol):
             return self._render_command_result(
                 "<b>❌ 參數錯誤</b>\n結論：symbol 格式不正確\n下一步：例 /symbol HK.00700 20"
             )
-        last = 20
-        if len(args) >= 2:
-            if not args[1].isdigit():
+        last_text = options.get("last") or (positional[1] if len(positional) >= 2 else "")
+        if last_text:
+            try:
+                last = int(last_text)
+            except ValueError:
                 return self._render_command_result(
                     "<b>❌ 參數錯誤</b>\n結論：last 需為整數\n下一步：例 /symbol HK.00700 20"
                 )
-            last = int(args[1])
+        else:
+            last = 20
+        day_override, day_error = self._resolve_command_day(
+            day_hint=options.get("day") or (positional[2] if len(positional) >= 3 else None),
+            trading_day=trading_day,
+        )
+        if day_error:
+            return self._render_command_result(day_error)
 
         output = await asyncio.to_thread(
             self._ops_runner.collect_symbol_ticks,
             symbol=symbol,
-            trading_day=trading_day,
+            trading_day=day_override,
             last=max(1, min(100, last)),
         )
         if not output:
@@ -708,10 +810,12 @@ class TelegramActionRouter:
     def _render_help_text(self) -> str:
         return (
             "<b>🤖 可用指令</b>\n"
-            "1) /db_stats [YYYYMMDD]\n"
-            "2) /top_symbols [limit] [minutes] [rows|turnover|volume]\n"
-            "3) /symbol &lt;SYMBOL&gt; [last]\n"
-            "下一步：例 /top_symbols 10 15 rows"
+            "1) /db_stats [YYYYMMDD] 或 /db_stats --day YYYYMMDD\n"
+            "2) /top_symbols [limit] [minutes] [rows|turnover|volume] [YYYYMMDD]\n"
+            "   也可用 --limit/--minutes/--metric/--day\n"
+            "3) /symbol &lt;SYMBOL&gt; [last] [YYYYMMDD]（支援 --last/--day）\n"
+            f"4) 日期查詢最遠可回看 {self._command_max_lookback_days} 天\n"
+            "下一步：例 /top_symbols --limit 10 --minutes 15 --metric rows --day 20260220"
         )
 
     def _render_command_result(self, text: str, *, escape_html: bool = False) -> CallbackDispatchResult:
@@ -728,6 +832,88 @@ class TelegramActionRouter:
         if self._admin_user_ids and (user_id is None or int(user_id) not in self._admin_user_ids):
             return False, "你沒有操作權限"
         return True, ""
+
+    def _canonical_command(self, command: str) -> str:
+        normalized = command.strip().lower()
+        if normalized == "start":
+            return "help"
+        return normalized
+
+    def _split_option_args(
+        self,
+        *,
+        args: list[str],
+        allowed: set[str],
+    ) -> tuple[list[str], dict[str, str]]:
+        positional: list[str] = []
+        options: dict[str, str] = {}
+        index = 0
+        while index < len(args):
+            token = args[index].strip()
+            if token.startswith("--"):
+                option_text = token[2:]
+                if not option_text:
+                    raise ValueError("empty_option")
+                if "=" in option_text:
+                    raw_key, raw_value = option_text.split("=", 1)
+                    value = raw_value.strip()
+                else:
+                    raw_key = option_text
+                    index += 1
+                    if index >= len(args):
+                        raise ValueError("missing_option_value")
+                    value = args[index].strip()
+                key = raw_key.strip().replace("-", "_").lower()
+                if key not in allowed or key in options or not value:
+                    raise ValueError("invalid_option")
+                options[key] = value
+            else:
+                positional.append(token)
+            index += 1
+        return positional, options
+
+    def _resolve_command_day(
+        self,
+        *,
+        day_hint: str | None,
+        trading_day: str | None,
+    ) -> tuple[str | None, str | None]:
+        fallback_day = self._normalize_day(trading_day)
+        if not day_hint:
+            return fallback_day, None
+        target_day = self._normalize_day(day_hint)
+        if target_day is None:
+            return None, (
+                "<b>❌ 參數錯誤</b>\n"
+                "結論：日期需為 YYYYMMDD（亦可用 YYYY-MM-DD）\n"
+                "下一步：例 --day 20260220"
+            )
+        if fallback_day is None:
+            return target_day, None
+        today = datetime.strptime(fallback_day, "%Y%m%d").date()
+        candidate = datetime.strptime(target_day, "%Y%m%d").date()
+        delta_days = (today - candidate).days
+        if delta_days < 0:
+            return None, (
+                "<b>❌ 日期超出範圍</b>\n"
+                f"結論：不可查詢未來日期（today={fallback_day}）\n"
+                "下一步：請改查今天或更早的交易日"
+            )
+        if delta_days > self._command_max_lookback_days:
+            return None, (
+                "<b>❌ 日期超出範圍</b>\n"
+                f"結論：最多只允許回看 {self._command_max_lookback_days} 天\n"
+                f"下一步：請改查 {fallback_day} 往前 {self._command_max_lookback_days} 天內資料"
+            )
+        return target_day, None
+
+    def _normalize_day(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        normalized = value.strip().replace("-", "").replace("/", "")
+        if _DAY_RE.match(normalized):
+            return normalized
+        return None
 
     def _within_command_rate_limit(self, user_id: int) -> bool:
         now = time.monotonic()

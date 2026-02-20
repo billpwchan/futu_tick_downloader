@@ -90,7 +90,12 @@ def _make_alert(*, severity: NotifySeverity = NotifySeverity.ALERT) -> AlertEven
     )
 
 
-def _build_router(store: ActionContextStore) -> TelegramActionRouter:
+def _build_router(
+    store: ActionContextStore,
+    *,
+    command_allowlist: set[str] | None = None,
+    command_max_lookback_days: int = 30,
+) -> TelegramActionRouter:
     class _FakeOps:
         def collect_recent_logs(self):
             return [
@@ -168,6 +173,8 @@ def _build_router(store: ActionContextStore) -> TelegramActionRouter:
         render_alert_detail_fn=_render_alert_detail,
         market_mode_of_event_fn=lambda _event: "open",
         get_daily_top_anomalies_fn=lambda _day: [("PERSIST_STALL", 3), ("SQLITE_BUSY", 2)],
+        command_allowlist=command_allowlist,
+        command_max_lookback_days=command_max_lookback_days,
     )
 
 
@@ -398,6 +405,98 @@ def test_router_help_command_escapes_symbol_placeholder():
         assert dispatch is not None
         assert dispatch.messages
         assert "&lt;SYMBOL&gt;" in dispatch.messages[0].text
+
+    asyncio.run(runner())
+
+
+def test_router_db_stats_supports_day_with_dash_format():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store)
+
+    async def runner():
+        dispatch = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/db_stats --day 2026-02-13",
+            trading_day="20260214",
+        )
+        assert dispatch is not None
+        assert dispatch.messages
+        assert "day=20260213" in dispatch.messages[0].text
+
+    asyncio.run(runner())
+
+
+def test_router_top_symbols_supports_day_argument():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store)
+
+    async def runner():
+        dispatch = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/top_symbols --limit 5 --minutes 10 --metric volume --day 20260213",
+            trading_day="20260214",
+        )
+        assert dispatch is not None
+        assert dispatch.messages
+        text = dispatch.messages[0].text
+        assert "day=20260213" in text
+        assert "metric=volume" in text
+
+    asyncio.run(runner())
+
+
+def test_router_symbol_supports_day_argument():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store)
+
+    async def runner():
+        dispatch = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/symbol HK.00700 10 --day 20260213",
+            trading_day="20260214",
+        )
+        assert dispatch is not None
+        assert dispatch.messages
+        assert "day=20260213" in dispatch.messages[0].text
+
+    asyncio.run(runner())
+
+
+def test_router_rejects_day_beyond_lookback():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store, command_max_lookback_days=7)
+
+    async def runner():
+        dispatch = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/db_stats --day 20260101",
+            trading_day="20260214",
+        )
+        assert dispatch is not None
+        assert dispatch.messages
+        assert "最多只允許回看 7 天" in dispatch.messages[0].text
+
+    asyncio.run(runner())
+
+
+def test_router_respects_command_allowlist():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store, command_allowlist={"help"})
+
+    async def runner():
+        dispatch = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/db_stats",
+            trading_day="20260214",
+        )
+        assert dispatch is not None
+        assert dispatch.messages
+        assert "指令未啟用" in dispatch.messages[0].text
 
     asyncio.run(runner())
 

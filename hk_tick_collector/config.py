@@ -152,6 +152,9 @@ class Config:
     telegram_action_refresh_min_interval_sec: int
     telegram_action_command_rate_limit_per_min: int
     telegram_action_timeout_sec: float
+    telegram_action_command_timeout_sec: float
+    telegram_action_command_allowlist: List[str]
+    telegram_action_command_max_lookback_days: int
     instance_id: str
     log_level: str
 
@@ -268,6 +271,16 @@ class Config:
                 "TG_ACTION_COMMAND_RATE_LIMIT_PER_MIN", 8
             ),
             telegram_action_timeout_sec=_get_env_float("TG_ACTION_TIMEOUT_SEC", 3.0),
+            telegram_action_command_timeout_sec=_get_env_float(
+                "TG_ACTION_COMMAND_TIMEOUT_SEC", 10.0
+            ),
+            telegram_action_command_allowlist=_get_env_list(
+                "TG_ACTION_COMMAND_ALLOWLIST",
+                ["help", "db_stats", "top_symbols", "symbol"],
+            ),
+            telegram_action_command_max_lookback_days=_get_env_int(
+                "TG_ACTION_COMMAND_MAX_LOOKBACK_DAYS", 30
+            ),
             instance_id=os.getenv("INSTANCE_ID", "").strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

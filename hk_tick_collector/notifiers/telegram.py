@@ -1547,6 +1547,9 @@ class TelegramNotifier:
         action_refresh_min_interval_sec: int = 15,
         action_command_rate_limit_per_min: int = 8,
         action_timeout_sec: float = 3.0,
+        action_command_timeout_sec: float = 10.0,
+        action_command_allowlist: Sequence[str] | None = None,
+        action_command_max_lookback_days: int = 30,
         service_name: str = "hk-tick-collector",
     ) -> None:
         self._enabled = bool(enabled)
@@ -1639,6 +1642,7 @@ class TelegramNotifier:
             service_name=service_name,
             log_window_minutes=20,
             timeout_sec=action_timeout_sec,
+            command_timeout_sec=action_command_timeout_sec,
         )
         self._action_router = TelegramActionRouter(
             context_store=self._action_store,
@@ -1648,6 +1652,8 @@ class TelegramNotifier:
             log_max_lines=action_log_max_lines,
             refresh_min_interval_sec=action_refresh_min_interval_sec,
             command_rate_limit_per_min=action_command_rate_limit_per_min,
+            command_allowlist=set(action_command_allowlist or []),
+            command_max_lookback_days=action_command_max_lookback_days,
             mute_chat_fn=self._mute_chat_for,
             is_muted_fn=self._is_chat_muted,
             get_latest_health_ctx_fn=self._get_latest_health_context,

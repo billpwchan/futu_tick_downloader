@@ -2,6 +2,10 @@
 
 `hk-tickctl` 是給交易者 / 使用者快速判斷資料可用性的 CLI。
 
+> 建議在專案根目錄執行（`/opt/futu_tick_downloader`），或直接用：
+> `/opt/futu_tick_downloader/.venv/bin/python -m hk_tick_collector.cli.main ...`
+> 以避免 `ModuleNotFoundError: hk_tick_collector`。
+
 ## 1) status
 
 ```bash
@@ -75,3 +79,4 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK \
 - `scripts/hk-tickctl db symbols`
 - `scripts/hk-tickctl db symbol HK.00700`
 - `scripts/hk-tickctl db top-symbols --limit 10 --minutes 15 --metric rows`
+- `scripts/hk-tickctl db top-symbols --day 20260216 --limit 10 --minutes 15 --metric rows`

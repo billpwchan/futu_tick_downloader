@@ -75,6 +75,9 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.telegram_action_refresh_min_interval_sec == 15
     assert cfg.telegram_action_command_rate_limit_per_min == 8
     assert cfg.telegram_action_timeout_sec == 3.0
+    assert cfg.telegram_action_command_timeout_sec == 10.0
+    assert cfg.telegram_action_command_allowlist == ["help", "db_stats", "top_symbols", "symbol"]
+    assert cfg.telegram_action_command_max_lookback_days == 30
 
 
 def test_config_bool_and_list_parsing(monkeypatch):
@@ -128,6 +131,9 @@ def test_config_parses_telegram_env(monkeypatch):
     monkeypatch.setenv("TG_ACTION_REFRESH_MIN_INTERVAL_SEC", "22")
     monkeypatch.setenv("TG_ACTION_COMMAND_RATE_LIMIT_PER_MIN", "6")
     monkeypatch.setenv("TG_ACTION_TIMEOUT_SEC", "4.5")
+    monkeypatch.setenv("TG_ACTION_COMMAND_TIMEOUT_SEC", "12")
+    monkeypatch.setenv("TG_ACTION_COMMAND_ALLOWLIST", "help,db_stats,symbol")
+    monkeypatch.setenv("TG_ACTION_COMMAND_MAX_LOOKBACK_DAYS", "45")
 
     cfg = Config.from_env()
     assert cfg.telegram_enabled is True
@@ -153,6 +159,9 @@ def test_config_parses_telegram_env(monkeypatch):
     assert cfg.telegram_action_refresh_min_interval_sec == 22
     assert cfg.telegram_action_command_rate_limit_per_min == 6
     assert cfg.telegram_action_timeout_sec == 4.5
+    assert cfg.telegram_action_command_timeout_sec == 12.0
+    assert cfg.telegram_action_command_allowlist == ["help", "db_stats", "symbol"]
+    assert cfg.telegram_action_command_max_lookback_days == 45
 
 
 def test_config_ignores_legacy_telegram_aliases(monkeypatch):

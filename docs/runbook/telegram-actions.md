@@ -65,3 +65,16 @@
 1. ALERT 持續超過 10 分鐘且無恢復
 2. DB `max_ts` 明顯停滯
 3. queue 長時間維持高位且持續上升
+
+## 文字命令速查（管理員）
+
+- `/db_stats --day YYYYMMDD`：看指定交易日 DB 摘要
+- `/top_symbols --limit 10 --minutes 15 --metric rows --day YYYYMMDD`：看窗口排行
+- `/symbol HK.00700 --last 20 --day YYYYMMDD`：看單票明細
+
+若命令沒反應，依序檢查：
+
+1. `TG_CHAT_ID` 是否對應目前群組
+2. `TG_ADMIN_USER_IDS` 是否包含你
+3. 日誌是否出現 `telegram_send_failed`
+4. 是否觸發速率限制（每分鐘次數）
