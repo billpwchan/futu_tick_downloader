@@ -48,6 +48,12 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK \
   --verify 1
 ```
 
+## 每日自動化（systemd + 本地拉取）
+
+若要啟用「16:30（UTC+8）服務器歸檔 + 17:10（UTC+8）本地拉取轉 zip」，請看：
+
+- [`/docs/09-收盤後自動化（歸檔與本地拉取）.md`](09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)
+
 ## 匯出資料給策略/研究
 
 ```bash

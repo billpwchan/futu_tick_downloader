@@ -60,6 +60,52 @@ def test_script_db_stats(tmp_path: Path) -> None:
     assert "rows=1" in result.stdout
 
 
+def test_script_db_top_symbols(tmp_path: Path) -> None:
+    day = "20260216"
+    _prepare_db(tmp_path, day)
+    db_path = tmp_path / f"{day}.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            (
+                "INSERT INTO ticks (market,symbol,ts_ms,price,volume,turnover,direction,seq,tick_type,"
+                "push_type,provider,trading_day,recv_ts_ms,inserted_at_ms) "
+                "VALUES ('HK','HK.00981',1708056602000,12.0,300,3600.0,'BUY',2,'AUTO_MATCH',"
+                "'push','futu',?,1708056602001,1708056602001)"
+            ),
+            (day,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "db",
+            "top-symbols",
+            "--data-root",
+            str(tmp_path),
+            "--day",
+            day,
+            "--limit",
+            "2",
+            "--minutes",
+            "30",
+            "--metric",
+            "volume",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "=== Top Symbols ===" in result.stdout
+    assert "metric=volume" in result.stdout
+    assert "HK.00981" in result.stdout
+
+
 def test_script_status_and_export_report(tmp_path: Path) -> None:
     day = "20260216"
     _prepare_db(tmp_path, day)

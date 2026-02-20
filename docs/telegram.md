@@ -15,6 +15,7 @@ TG_ADMIN_USER_IDS=1001,1002
 TG_ACTION_CONTEXT_TTL_SEC=43200
 TG_ACTION_LOG_MAX_LINES=20
 TG_ACTION_REFRESH_MIN_INTERVAL_SEC=15
+TG_ACTION_COMMAND_RATE_LIMIT_PER_MIN=8
 TG_ACTION_TIMEOUT_SEC=3.0
 ```
 
@@ -40,7 +41,15 @@ sudo systemctl status hk-tick-collector --no-pager
 - `🔕 靜音 1h`：暫停 HEALTH/WARN 心跳（ALERT 不靜音）
 - `🔄 刷新`：重算最新 health（有最小間隔保護）
 
-## 4) 常見問題
+## 4) 文字指令（管理員）
+
+- `/help`：顯示可用指令
+- `/db_stats [YYYYMMDD]`：DB 摘要
+- `/top_symbols [limit] [minutes] [rows|turnover|volume]`：近期 Top symbols
+- `/symbol HK.00700 [last]`：指定 symbol 最新 ticks
+- 所有文字指令都會套用 `TG_ACTION_TIMEOUT_SEC` 與 `TG_ACTION_COMMAND_RATE_LIMIT_PER_MIN`
+
+## 5) 常見問題
 
 ### Q1. 按鈕沒反應
 
@@ -82,9 +91,9 @@ curl -s "https://api.telegram.org/bot${TG_TOKEN}/getUpdates"
 - `TG_ACTION_TIMEOUT_SEC` 預設 3 秒，超時會回「逾時，請稍後再試」
 - `TG_ACTION_LOG_MAX_LINES` 建議 20~40，避免刷屏
 
-## 5) 安全設計
+## 6) 安全設計
 
 - callback_data 使用短路由（<=64 bytes）
-- 僅允許白名單命令（journalctl / `scripts/hk-tickctl db stats`）
+- 僅允許白名單命令（journalctl / `scripts/hk-tickctl db stats|top-symbols|symbol`）
 - 命令有 timeout，且失敗時會優雅降級
 - 互動處理在 notifier callback/task 與 worker，不阻塞採集主鏈路

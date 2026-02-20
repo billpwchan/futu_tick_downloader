@@ -622,6 +622,62 @@ def cmd_db_symbol(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_db_top_symbols(args: argparse.Namespace) -> int:
+    day = args.day or _today_day()
+    db_path = _db_path(data_root=Path(args.data_root), day=day, db_arg=args.db)
+    if not db_path.exists():
+        print(f"FAIL db_not_found {db_path}")
+        return 2
+    metric = str(args.metric or "rows").strip().lower()
+    if metric not in {"rows", "turnover", "volume"}:
+        print("FAIL invalid_metric_use_rows_turnover_or_volume")
+        return 2
+    limit = max(1, min(50, int(args.limit)))
+    minutes = max(1, min(240, int(args.minutes)))
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        if not _table_exists(conn, "ticks"):
+            print("FAIL ticks_table_missing")
+            return 2
+        max_ts_row = conn.execute("SELECT MAX(ts_ms) FROM ticks").fetchone()[0]
+        if max_ts_row is None:
+            print("FAIL ticks_empty")
+            return 2
+        cutoff_ts_ms = int(max_ts_row) - (minutes * 60 * 1000)
+        order_by = {
+            "rows": "rows DESC, symbol ASC",
+            "turnover": "turnover DESC, symbol ASC",
+            "volume": "volume DESC, symbol ASC",
+        }[metric]
+        rows = conn.execute(
+            (
+                "SELECT symbol, COUNT(*) AS rows, IFNULL(SUM(turnover),0.0) AS turnover, "
+                "IFNULL(SUM(volume),0) AS volume, MAX(ts_ms) AS latest_ts "
+                "FROM ticks WHERE ts_ms >= ? "
+                f"GROUP BY symbol ORDER BY {order_by} LIMIT ?"
+            ),
+            (cutoff_ts_ms, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    now_ms = int(time.time() * 1000)
+    print("=== Top Symbols ===")
+    print(f"db={db_path}")
+    print(f"metric={metric}")
+    print(f"window_minutes={minutes}")
+    print(f"limit={limit}")
+    print("symbol,rows,turnover,volume,latest_ts_hkt,last_tick_age_sec")
+    for symbol, row_count, turnover, volume, latest in rows:
+        lag = round(max(0.0, (now_ms - int(latest)) / 1000.0), 3) if latest is not None else None
+        print(
+            f"{symbol},{int(row_count or 0)},{float(turnover or 0.0):.3f},"
+            f"{int(volume or 0)},{_fmt_hkt(int(latest) if latest else None, HK_TZ)},{lag}"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hk-tickctl", description="HK Tick Collector CLI")
 
@@ -709,6 +765,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_db_symbol.add_argument("--day", default=None)
     p_db_symbol.add_argument("--last", default=20, type=int)
     p_db_symbol.set_defaults(func=cmd_db_symbol)
+
+    p_db_top = db_sub.add_parser("top-symbols", help="近期 Top symbols 排行")
+    add_data_root_arg(p_db_top)
+    p_db_top.add_argument("--db", default=None)
+    p_db_top.add_argument("--day", default=None)
+    p_db_top.add_argument("--limit", default=10, type=int)
+    p_db_top.add_argument("--minutes", default=15, type=int)
+    p_db_top.add_argument("--metric", default="rows", choices=["rows", "turnover", "volume"])
+    p_db_top.set_defaults(func=cmd_db_top_symbols)
 
     p_tg = sub.add_parser("tg", help="Telegram 測試工具")
     tg_sub = p_tg.add_subparsers(dest="tg_command", required=True)

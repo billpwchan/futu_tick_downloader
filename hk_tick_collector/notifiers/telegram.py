@@ -1397,7 +1397,7 @@ class TelegramClient:
         payload: Dict[str, str | int] = {
             "offset": int(offset),
             "timeout": max(1, int(timeout_sec)),
-            "allowed_updates": json.dumps(["callback_query"]),
+            "allowed_updates": json.dumps(["callback_query", "message"]),
         }
         data = self._post_json(endpoint="getUpdates", payload=payload)
         result = data.get("result")
@@ -1545,6 +1545,7 @@ class TelegramNotifier:
         action_context_ttl_sec: int = 43200,
         action_log_max_lines: int = 20,
         action_refresh_min_interval_sec: int = 15,
+        action_command_rate_limit_per_min: int = 8,
         action_timeout_sec: float = 3.0,
         service_name: str = "hk-tick-collector",
     ) -> None:
@@ -1646,6 +1647,7 @@ class TelegramNotifier:
             admin_user_ids=self._admin_user_ids,
             log_max_lines=action_log_max_lines,
             refresh_min_interval_sec=action_refresh_min_interval_sec,
+            command_rate_limit_per_min=action_command_rate_limit_per_min,
             mute_chat_fn=self._mute_chat_for,
             is_muted_fn=self._is_chat_muted,
             get_latest_health_ctx_fn=self._get_latest_health_context,
@@ -2260,6 +2262,9 @@ class TelegramNotifier:
                     callback = update.get("callback_query")
                     if isinstance(callback, dict):
                         await self._handle_callback(callback)
+                    message = update.get("message")
+                    if isinstance(message, dict):
+                        await self._handle_command_message(message)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -2326,6 +2331,53 @@ class TelegramNotifier:
                 severity=severity,
                 fingerprint=f"CALLBACK:{item.kind}:{item.sid or item.eid or 'none'}",
                 reason="button_callback",
+                sid=item.sid,
+                eid=item.eid,
+                thread_id=thread_id,
+                chat_id=chat_id,
+                mode=item.mode,
+                message_id=item.message_id,
+            )
+
+    async def _handle_command_message(self, message: dict[str, Any]) -> None:
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or chat.get("id") is None:
+            return
+        chat_id = str(chat.get("id"))
+        text = str(message.get("text") or "").strip()
+        if not text or not text.startswith("/"):
+            return
+        sender = message.get("from")
+        user_id: int | None = None
+        if isinstance(sender, dict):
+            raw_user_id = sender.get("id")
+            if isinstance(raw_user_id, int):
+                user_id = raw_user_id
+        raw_thread = message.get("message_thread_id")
+        thread_id = raw_thread if isinstance(raw_thread, int) else None
+        trading_day = datetime.now(tz=HK_TZ).strftime("%Y%m%d")
+
+        dispatch = await self._action_router.handle_text_command(
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            trading_day=trading_day,
+        )
+        if dispatch is None:
+            return
+        for item in dispatch.messages:
+            severity = _severity_from(item.severity)
+            outbound = RenderedMessage(
+                text=item.text,
+                parse_mode=item.parse_mode,
+                reply_markup=item.reply_markup,
+            )
+            self._enqueue_message(
+                kind=item.kind,
+                message=outbound,
+                severity=severity,
+                fingerprint=f"COMMAND:{text.split(' ', 1)[0]}",
+                reason="text_command",
                 sid=item.sid,
                 eid=item.eid,
                 thread_id=thread_id,

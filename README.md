@@ -171,6 +171,7 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK --day 20260213 --verify 1
 - CLI 手冊：[`docs/hk-tickctl.md`](docs/hk-tickctl.md)
 - 品質報告：[`docs/quality.md`](docs/quality.md)
 - 歸檔策略：[`docs/archive.md`](docs/archive.md)
+- 收盤自動化：[`docs/09-收盤後自動化（歸檔與本地拉取）.md`](docs/09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)
 - 快速開始（本機）：[`docs/01-快速開始（本機）.md`](docs/01-%E5%BF%AB%E9%80%9F%E9%96%8B%E5%A7%8B%EF%BC%88%E6%9C%AC%E6%A9%9F%EF%BC%89.md)
 - Lightsail 部署：[`docs/02-部署到 AWS Lightsail（Ubuntu）.md`](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)
 - Runbook：[`docs/04-運維 Runbook.md`](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)

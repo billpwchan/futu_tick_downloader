@@ -73,6 +73,7 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.telegram_action_context_ttl_sec == 43200
     assert cfg.telegram_action_log_max_lines == 20
     assert cfg.telegram_action_refresh_min_interval_sec == 15
+    assert cfg.telegram_action_command_rate_limit_per_min == 8
     assert cfg.telegram_action_timeout_sec == 3.0
 
 
@@ -125,6 +126,7 @@ def test_config_parses_telegram_env(monkeypatch):
     monkeypatch.setenv("TG_ACTION_CONTEXT_TTL_SEC", "21600")
     monkeypatch.setenv("TG_ACTION_LOG_MAX_LINES", "30")
     monkeypatch.setenv("TG_ACTION_REFRESH_MIN_INTERVAL_SEC", "22")
+    monkeypatch.setenv("TG_ACTION_COMMAND_RATE_LIMIT_PER_MIN", "6")
     monkeypatch.setenv("TG_ACTION_TIMEOUT_SEC", "4.5")
 
     cfg = Config.from_env()
@@ -149,6 +151,7 @@ def test_config_parses_telegram_env(monkeypatch):
     assert cfg.telegram_action_context_ttl_sec == 21600
     assert cfg.telegram_action_log_max_lines == 30
     assert cfg.telegram_action_refresh_min_interval_sec == 22
+    assert cfg.telegram_action_command_rate_limit_per_min == 6
     assert cfg.telegram_action_timeout_sec == 4.5
 
 

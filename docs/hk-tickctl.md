@@ -74,3 +74,4 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK \
 - `scripts/hk-tickctl db stats`
 - `scripts/hk-tickctl db symbols`
 - `scripts/hk-tickctl db symbol HK.00700`
+- `scripts/hk-tickctl db top-symbols --limit 10 --minutes 15 --metric rows`

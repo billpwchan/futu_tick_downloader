@@ -150,6 +150,7 @@ class Config:
     telegram_action_context_ttl_sec: int
     telegram_action_log_max_lines: int
     telegram_action_refresh_min_interval_sec: int
+    telegram_action_command_rate_limit_per_min: int
     telegram_action_timeout_sec: float
     instance_id: str
     log_level: str
@@ -262,6 +263,9 @@ class Config:
             telegram_action_log_max_lines=_get_env_int("TG_ACTION_LOG_MAX_LINES", 20),
             telegram_action_refresh_min_interval_sec=_get_env_int(
                 "TG_ACTION_REFRESH_MIN_INTERVAL_SEC", 15
+            ),
+            telegram_action_command_rate_limit_per_min=_get_env_int(
+                "TG_ACTION_COMMAND_RATE_LIMIT_PER_MIN", 8
             ),
             telegram_action_timeout_sec=_get_env_float("TG_ACTION_TIMEOUT_SEC", 3.0),
             instance_id=os.getenv("INSTANCE_ID", "").strip(),

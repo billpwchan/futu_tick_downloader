@@ -75,6 +75,7 @@ async def run() -> None:
                 action_context_ttl_sec=config.telegram_action_context_ttl_sec,
                 action_log_max_lines=config.telegram_action_log_max_lines,
                 action_refresh_min_interval_sec=config.telegram_action_refresh_min_interval_sec,
+                action_command_rate_limit_per_min=config.telegram_action_command_rate_limit_per_min,
                 action_timeout_sec=config.telegram_action_timeout_sec,
             )
             await notifier.start()

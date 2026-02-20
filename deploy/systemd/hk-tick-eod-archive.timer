@@ -1,0 +1,11 @@
+[Unit]
+Description=Run HK Tick EOD archive daily at 16:30 HKT (08:30 UTC)
+
+[Timer]
+OnCalendar=*-*-* 08:30:00 UTC
+Persistent=true
+AccuracySec=1m
+Unit=hk-tick-eod-archive.service
+
+[Install]
+WantedBy=timers.target

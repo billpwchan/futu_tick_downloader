@@ -102,6 +102,16 @@ def _build_router(store: ActionContextStore) -> TelegramActionRouter:
         def collect_db_stats(self, *, trading_day):
             return f"rows=10 max_ts=2026 drift=1.2 day={trading_day}"
 
+        def collect_top_symbols(self, *, trading_day, limit, minutes, metric):
+            return (
+                "=== Top Symbols ===\n"
+                f"day={trading_day} limit={limit} minutes={minutes} metric={metric}\n"
+                "symbol,rows\nHK.00700,100"
+            )
+
+        def collect_symbol_ticks(self, *, symbol, trading_day, last):
+            return f"symbol,rows\n{symbol},{last} day={trading_day}"
+
     snapshot = _make_snapshot()
     sm = AlertStateMachine(drift_warn_sec=120)
     assessment = sm.assess_health(snapshot)
@@ -148,6 +158,7 @@ def _build_router(store: ActionContextStore) -> TelegramActionRouter:
         admin_user_ids={1001},
         log_max_lines=2,
         refresh_min_interval_sec=5,
+        command_rate_limit_per_min=5,
         mute_chat_fn=lambda _chat_id, _seconds: None,
         is_muted_fn=lambda _chat_id: False,
         get_latest_health_ctx_fn=_latest_ctx,
@@ -290,6 +301,7 @@ def test_router_db_output_is_truncated():
         admin_user_ids={1001},
         log_max_lines=20,
         refresh_min_interval_sec=5,
+        command_rate_limit_per_min=5,
         mute_chat_fn=lambda _chat_id, _seconds: None,
         is_muted_fn=lambda _chat_id: False,
         get_latest_health_ctx_fn=lambda: None,
@@ -350,6 +362,76 @@ def test_router_rejects_non_admin_user():
         )
         assert dispatch.messages == []
         assert dispatch.ack_text == "你沒有操作權限"
+
+    asyncio.run(runner())
+
+
+def test_router_supports_text_commands():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store)
+
+    async def runner():
+        dispatch = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/top_symbols 5 10 rows",
+            trading_day="20260214",
+        )
+        assert dispatch is not None
+        assert dispatch.messages
+        assert "Top Symbols" in dispatch.messages[0].text
+
+    asyncio.run(runner())
+
+
+def test_router_text_command_rate_limit():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store)
+
+    async def runner():
+        first = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/help",
+            trading_day="20260214",
+        )
+        assert first is not None
+        second = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/help",
+            trading_day="20260214",
+        )
+        assert second is not None
+        third = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/help",
+            trading_day="20260214",
+        )
+        assert third is not None
+        fourth = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/help",
+            trading_day="20260214",
+        )
+        assert fourth is not None
+        fifth = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/help",
+            trading_day="20260214",
+        )
+        assert fifth is not None
+        blocked = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/help",
+            trading_day="20260214",
+        )
+        assert blocked is not None
+        assert "查詢過於頻繁" in blocked.messages[0].text
 
     asyncio.run(runner())
 
@@ -424,6 +506,43 @@ def test_notifier_callback_calls_answer_then_emits_edit_message():
 
         assert events[0] == "answer"
         assert "edit" in events
+
+    asyncio.run(runner())
+
+
+def test_notifier_text_command_emits_reply_message():
+    async def runner() -> None:
+        calls: list[dict] = []
+
+        def fake_sender(payload):
+            calls.append(dict(payload))
+            return TelegramSendResult(ok=True, status_code=200, message_id=77)
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            parse_mode="HTML",
+            sender=fake_sender,
+            enable_callbacks=False,
+            interactive_enabled=False,
+            admin_user_ids=[1001],
+        )
+        await notifier.start()
+        await notifier._handle_command_message(  # type: ignore[attr-defined]
+            {
+                "chat": {"id": -100123},
+                "text": "/help",
+                "from": {"id": 1001},
+                "message_thread_id": 321,
+            }
+        )
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        await notifier.stop()
+
+        assert calls
+        assert "可用指令" in calls[0]["text"]
+        assert calls[0]["message_thread_id"] == 321
 
     asyncio.run(runner())
 

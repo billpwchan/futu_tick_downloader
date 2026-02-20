@@ -162,6 +162,7 @@ def build_config(**overrides) -> Config:
         telegram_action_context_ttl_sec=43200,
         telegram_action_log_max_lines=20,
         telegram_action_refresh_min_interval_sec=15,
+        telegram_action_command_rate_limit_per_min=8,
         telegram_action_timeout_sec=3.0,
         instance_id="",
         log_level="INFO",

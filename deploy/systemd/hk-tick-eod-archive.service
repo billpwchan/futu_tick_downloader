@@ -1,0 +1,27 @@
+[Unit]
+Description=HK Tick EOD Archive (daily SQLite snapshot + archive)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/futu_tick_downloader/scripts/hk-tickctl
+
+[Service]
+Type=oneshot
+User=hkcollector
+Group=hkcollector
+WorkingDirectory=/opt/futu_tick_downloader
+EnvironmentFile=-/etc/hk-tick-eod-archive.env
+ExecStart=/opt/futu_tick_downloader/deploy/scripts/eod_archive.sh
+TimeoutStartSec=1h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/data/sqlite/HK /opt/futu_tick_downloader /tmp
+

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
 import subprocess
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
@@ -18,6 +19,8 @@ from .telegram_render import (
 )
 
 _CALLBACK_MAX_BYTES = 64
+_DAY_RE = re.compile(r"^\d{8}$")
+_SYMBOL_RE = re.compile(r"^[A-Za-z0-9._-]{2,24}$")
 
 
 @dataclass
@@ -184,6 +187,57 @@ class SafeOpsCommandRunner:
             cmd = ["scripts/hk-tickctl", "db", "stats"]
         return self._sanitize(self._run_allowed(cmd=cmd))
 
+    def collect_top_symbols(
+        self,
+        *,
+        trading_day: str | None,
+        limit: int,
+        minutes: int,
+        metric: str,
+    ) -> str:
+        safe_limit = max(1, min(30, int(limit)))
+        safe_minutes = max(1, min(240, int(minutes)))
+        safe_metric = metric.strip().lower()
+        if safe_metric not in {"rows", "turnover", "volume"}:
+            safe_metric = "rows"
+        cmd = [
+            "scripts/hk-tickctl",
+            "db",
+            "top-symbols",
+            "--limit",
+            str(safe_limit),
+            "--minutes",
+            str(safe_minutes),
+            "--metric",
+            safe_metric,
+        ]
+        if trading_day and _DAY_RE.match(trading_day):
+            cmd.extend(["--day", trading_day])
+        return self._sanitize(self._run_allowed(cmd=cmd))
+
+    def collect_symbol_ticks(
+        self,
+        *,
+        symbol: str,
+        trading_day: str | None,
+        last: int,
+    ) -> str:
+        safe_symbol = symbol.strip().upper()
+        if not _SYMBOL_RE.match(safe_symbol):
+            raise ValueError("symbol_not_allowed")
+        safe_last = max(1, min(100, int(last)))
+        cmd = [
+            "scripts/hk-tickctl",
+            "db",
+            "symbol",
+            safe_symbol,
+            "--last",
+            str(safe_last),
+        ]
+        if trading_day and _DAY_RE.match(trading_day):
+            cmd.extend(["--day", trading_day])
+        return self._sanitize(self._run_allowed(cmd=cmd))
+
     def _run_allowed(self, *, cmd: list[str]) -> str:
         allowed_prefixes = {
             ("journalctl", "-u"),
@@ -219,6 +273,7 @@ class TelegramActionRouter:
         admin_user_ids: set[int],
         log_max_lines: int,
         refresh_min_interval_sec: int,
+        command_rate_limit_per_min: int,
         mute_chat_fn: Callable[[str, int], None],
         is_muted_fn: Callable[[str], bool],
         get_latest_health_ctx_fn: Callable[[], ActionContext | None],
@@ -235,6 +290,8 @@ class TelegramActionRouter:
         self._admin_user_ids = set(admin_user_ids)
         self._log_max_lines = max(1, int(log_max_lines))
         self._refresh_min_interval_sec = max(5, int(refresh_min_interval_sec))
+        self._command_rate_limit_per_min = max(1, int(command_rate_limit_per_min))
+        self._command_hits: dict[int, deque[float]] = {}
         self._mute_chat_fn = mute_chat_fn
         self._is_muted_fn = is_muted_fn
         self._get_latest_health_ctx_fn = get_latest_health_ctx_fn
@@ -260,6 +317,81 @@ class TelegramActionRouter:
             return None
         return CallbackRoute(action=normalized, value=value.strip())
 
+    def parse_text_command(self, text: str) -> tuple[str, list[str]] | None:
+        raw = text.strip()
+        if not raw.startswith("/"):
+            return None
+        try:
+            tokens = shlex.split(raw)
+        except ValueError:
+            tokens = raw.split()
+        if not tokens:
+            return None
+        command_token = tokens[0]
+        command_name = command_token[1:].split("@", 1)[0].strip().lower()
+        return command_name, tokens[1:]
+
+    async def handle_text_command(
+        self,
+        *,
+        chat_id: str,
+        user_id: int | None,
+        text: str,
+        trading_day: str | None,
+    ) -> CallbackDispatchResult | None:
+        parsed = self.parse_text_command(text)
+        if parsed is None:
+            return None
+
+        authorized, deny_text = self._authorize(chat_id=chat_id, user_id=user_id)
+        if not authorized:
+            return CallbackDispatchResult(
+                ack_text=None,
+                messages=[RouterMessage(mode="send", kind="COMMAND", text=deny_text)],
+            )
+        if user_id is None:
+            return CallbackDispatchResult(
+                ack_text=None,
+                messages=[RouterMessage(mode="send", kind="COMMAND", text="無法辨識操作者")],
+            )
+        if not self._within_command_rate_limit(user_id):
+            return CallbackDispatchResult(
+                ack_text=None,
+                messages=[
+                    RouterMessage(
+                        mode="send",
+                        kind="COMMAND",
+                        text=(
+                            "<b>⏱ 查詢過於頻繁</b>\n"
+                            "結論：已觸發每分鐘頻率限制\n"
+                            "下一步：請稍後約 1 分鐘再試"
+                        ),
+                    )
+                ],
+            )
+
+        command, args = parsed
+        try:
+            if command in {"help", "start"}:
+                return self._render_command_result(self._render_help_text())
+            if command == "db_stats":
+                return await self._on_command_db_stats(args=args, trading_day=trading_day)
+            if command == "top_symbols":
+                return await self._on_command_top_symbols(args=args, trading_day=trading_day)
+            if command == "symbol":
+                return await self._on_command_symbol(args=args, trading_day=trading_day)
+            return self._render_command_result(
+                "<b>❔ 未知指令</b>\n結論：目前不支援該命令\n下一步：請用 /help 查看可用命令"
+            )
+        except subprocess.TimeoutExpired:
+            return self._render_command_result(
+                "<b>⚠️ 操作逾時</b>\n結論：查詢超時\n下一步：請稍後再試"
+            )
+        except Exception:
+            return self._render_command_result(
+                "<b>⚠️ 操作失敗</b>\n結論：指令執行失敗\n下一步：請稍後再試或查看服務日誌"
+            )
+
     async def handle_callback_query(
         self,
         *,
@@ -272,10 +404,9 @@ class TelegramActionRouter:
         if route is None:
             return CallbackDispatchResult(ack_text="未知操作", messages=[])
 
-        if self._allowed_chat_id and chat_id != self._allowed_chat_id:
-            return CallbackDispatchResult(ack_text="此 chat 不允許操作", messages=[])
-        if self._admin_user_ids and (user_id is None or int(user_id) not in self._admin_user_ids):
-            return CallbackDispatchResult(ack_text="你沒有操作權限", messages=[])
+        authorized, deny_text = self._authorize(chat_id=chat_id, user_id=user_id)
+        if not authorized:
+            return CallbackDispatchResult(ack_text=deny_text, messages=[])
 
         try:
             if route.action == "d":
@@ -470,6 +601,141 @@ class TelegramActionRouter:
             ack_text="已整理今日異常",
             messages=[RouterMessage(mode="send", text=text)],
         )
+
+    async def _on_command_db_stats(
+        self,
+        *,
+        args: list[str],
+        trading_day: str | None,
+    ) -> CallbackDispatchResult:
+        day_override: str | None = None
+        if args:
+            candidate = args[0].strip()
+            if not _DAY_RE.match(candidate):
+                return self._render_command_result(
+                    "<b>❌ 參數錯誤</b>\n結論：日期需為 YYYYMMDD\n下一步：用 /db_stats 或 /db_stats 20260220"
+                )
+            day_override = candidate
+        output = await asyncio.to_thread(
+            self._ops_runner.collect_db_stats,
+            trading_day=day_override or trading_day,
+        )
+        if not output:
+            output = "<b>🗃 DB 統計</b>\n結論：目前無可用資料\n下一步：請稍後再試"
+        return self._render_command_result(output)
+
+    async def _on_command_top_symbols(
+        self,
+        *,
+        args: list[str],
+        trading_day: str | None,
+    ) -> CallbackDispatchResult:
+        limit = 10
+        minutes = 15
+        metric = "rows"
+        if args:
+            if not args[0].isdigit():
+                return self._render_command_result(
+                    "<b>❌ 參數錯誤</b>\n結論：limit 需為整數\n下一步：例 /top_symbols 10 15 rows"
+                )
+            limit = int(args[0])
+        if len(args) >= 2:
+            if not args[1].isdigit():
+                return self._render_command_result(
+                    "<b>❌ 參數錯誤</b>\n結論：minutes 需為整數\n下一步：例 /top_symbols 10 15 rows"
+                )
+            minutes = int(args[1])
+        if len(args) >= 3:
+            metric = args[2].strip().lower()
+        if metric not in {"rows", "turnover", "volume"}:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n結論：metric 只支援 rows/turnover/volume\n下一步：例 /top_symbols 10 15 rows"
+            )
+
+        output = await asyncio.to_thread(
+            self._ops_runner.collect_top_symbols,
+            trading_day=trading_day,
+            limit=max(1, min(30, limit)),
+            minutes=max(1, min(240, minutes)),
+            metric=metric,
+        )
+        if not output:
+            output = (
+                "<b>📈 Top Symbols</b>\n"
+                "結論：查無資料\n"
+                "下一步：稍後再試，或確認 ticks 是否有落盤"
+            )
+        return self._render_command_result(output)
+
+    async def _on_command_symbol(
+        self,
+        *,
+        args: list[str],
+        trading_day: str | None,
+    ) -> CallbackDispatchResult:
+        if not args:
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n結論：缺少 symbol\n下一步：例 /symbol HK.00700 20"
+            )
+        symbol = args[0].strip().upper()
+        if not _SYMBOL_RE.match(symbol):
+            return self._render_command_result(
+                "<b>❌ 參數錯誤</b>\n結論：symbol 格式不正確\n下一步：例 /symbol HK.00700 20"
+            )
+        last = 20
+        if len(args) >= 2:
+            if not args[1].isdigit():
+                return self._render_command_result(
+                    "<b>❌ 參數錯誤</b>\n結論：last 需為整數\n下一步：例 /symbol HK.00700 20"
+                )
+            last = int(args[1])
+
+        output = await asyncio.to_thread(
+            self._ops_runner.collect_symbol_ticks,
+            symbol=symbol,
+            trading_day=trading_day,
+            last=max(1, min(100, last)),
+        )
+        if not output:
+            output = (
+                "<b>🔎 Symbol 查詢</b>\n"
+                "結論：查無資料\n"
+                "下一步：確認 symbol 與交易日是否正確"
+            )
+        return self._render_command_result(output)
+
+    def _render_help_text(self) -> str:
+        return (
+            "<b>🤖 可用指令</b>\n"
+            "1) /db_stats [YYYYMMDD]\n"
+            "2) /top_symbols [limit] [minutes] [rows|turnover|volume]\n"
+            "3) /symbol <SYMBOL> [last]\n"
+            "下一步：例 /top_symbols 10 15 rows"
+        )
+
+    def _render_command_result(self, text: str) -> CallbackDispatchResult:
+        rendered, _ = truncate_text(text)
+        return CallbackDispatchResult(
+            ack_text=None,
+            messages=[RouterMessage(mode="send", kind="COMMAND", text=rendered)],
+        )
+
+    def _authorize(self, *, chat_id: str, user_id: int | None) -> tuple[bool, str]:
+        if self._allowed_chat_id and chat_id != self._allowed_chat_id:
+            return False, "此 chat 不允許操作"
+        if self._admin_user_ids and (user_id is None or int(user_id) not in self._admin_user_ids):
+            return False, "你沒有操作權限"
+        return True, ""
+
+    def _within_command_rate_limit(self, user_id: int) -> bool:
+        now = time.monotonic()
+        bucket = self._command_hits.setdefault(user_id, deque())
+        while bucket and (now - bucket[0]) >= 60.0:
+            bucket.popleft()
+        if len(bucket) >= self._command_rate_limit_per_min:
+            return False
+        bucket.append(now)
+        return True
 
 
 def summarize_alert_counts(events: Sequence[Any], *, trading_day: str) -> list[tuple[str, int]]:
