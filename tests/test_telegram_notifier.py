@@ -384,6 +384,24 @@ def test_router_supports_text_commands():
     asyncio.run(runner())
 
 
+def test_router_help_command_escapes_symbol_placeholder():
+    store = ActionContextStore(ttl_sec=3600)
+    router = _build_router(store)
+
+    async def runner():
+        dispatch = await router.handle_text_command(
+            chat_id="-100123",
+            user_id=1001,
+            text="/help",
+            trading_day="20260214",
+        )
+        assert dispatch is not None
+        assert dispatch.messages
+        assert "&lt;SYMBOL&gt;" in dispatch.messages[0].text
+
+    asyncio.run(runner())
+
+
 def test_router_text_command_rate_limit():
     store = ActionContextStore(ttl_sec=3600)
     router = _build_router(store)

@@ -7,6 +7,7 @@ import subprocess
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
+from html import escape
 from typing import Any, Callable, Sequence
 
 from .telegram_render import (
@@ -622,7 +623,7 @@ class TelegramActionRouter:
         )
         if not output:
             output = "<b>🗃 DB 統計</b>\n結論：目前無可用資料\n下一步：請稍後再試"
-        return self._render_command_result(output)
+        return self._render_command_result(output, escape_html=True)
 
     async def _on_command_top_symbols(
         self,
@@ -665,7 +666,7 @@ class TelegramActionRouter:
                 "結論：查無資料\n"
                 "下一步：稍後再試，或確認 ticks 是否有落盤"
             )
-        return self._render_command_result(output)
+        return self._render_command_result(output, escape_html=True)
 
     async def _on_command_symbol(
         self,
@@ -702,19 +703,20 @@ class TelegramActionRouter:
                 "結論：查無資料\n"
                 "下一步：確認 symbol 與交易日是否正確"
             )
-        return self._render_command_result(output)
+        return self._render_command_result(output, escape_html=True)
 
     def _render_help_text(self) -> str:
         return (
             "<b>🤖 可用指令</b>\n"
             "1) /db_stats [YYYYMMDD]\n"
             "2) /top_symbols [limit] [minutes] [rows|turnover|volume]\n"
-            "3) /symbol <SYMBOL> [last]\n"
+            "3) /symbol &lt;SYMBOL&gt; [last]\n"
             "下一步：例 /top_symbols 10 15 rows"
         )
 
-    def _render_command_result(self, text: str) -> CallbackDispatchResult:
-        rendered, _ = truncate_text(text)
+    def _render_command_result(self, text: str, *, escape_html: bool = False) -> CallbackDispatchResult:
+        rendered_text = escape(text) if escape_html else text
+        rendered, _ = truncate_text(rendered_text)
         return CallbackDispatchResult(
             ack_text=None,
             messages=[RouterMessage(mode="send", kind="COMMAND", text=rendered)],

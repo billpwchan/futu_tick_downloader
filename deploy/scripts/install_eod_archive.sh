@@ -4,6 +4,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/futu_tick_downloader}"
 SERVICE_NAME="${SERVICE_NAME:-hk-tick-eod-archive}"
 ENV_FILE="${ENV_FILE:-/etc/hk-tick-eod-archive.env}"
+RUN_USER="${RUN_USER:-hkcollector}"
 RUN_GROUP="${RUN_GROUP:-hkcollector}"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -29,6 +30,14 @@ fi
 if [[ ! -f "${APP_DIR}/deploy/scripts/eod_archive.sh" ]]; then
   echo "[失敗] 找不到腳本: deploy/scripts/eod_archive.sh" >&2
   exit 1
+fi
+
+if ! getent group "${RUN_GROUP}" >/dev/null 2>&1; then
+  groupadd --system "${RUN_GROUP}"
+fi
+
+if ! id -u "${RUN_USER}" >/dev/null 2>&1; then
+  useradd --system --gid "${RUN_GROUP}" --home-dir "${APP_DIR}" --shell /usr/sbin/nologin "${RUN_USER}"
 fi
 
 chmod 0755 "${APP_DIR}/deploy/scripts/eod_archive.sh"
