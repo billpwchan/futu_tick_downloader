@@ -10,6 +10,8 @@
 TG_ENABLED=1
 TG_TOKEN=<bot-token>
 TG_CHAT_ID=<chat-id>
+HEALTH_FIXED_INTERVAL_SEC=600
+TG_INCLUDE_SYSTEM_METRICS=1
 TG_INTERACTIVE_ENABLED=1
 TG_ADMIN_USER_IDS=1001,1002
 TG_ACTION_CONTEXT_TTL_SEC=43200
@@ -34,6 +36,12 @@ sudo systemctl status hk-tick-collector --no-pager
 - 一般健康訊息：`TG_THREAD_HEALTH_ID`
 - 告警與處置：`TG_THREAD_OPS_ID`
 - 若未拆 thread，全部走 `TG_MESSAGE_THREAD_ID`
+
+## 2.1) 固定心跳建議（值班）
+
+- 建議設定：`HEALTH_FIXED_INTERVAL_SEC=600`（每 10 分鐘）
+- 啟用後會固定 cadence 發 HEALTH，不再受盤前/午休/盤後「只發一次」策略影響
+- 配合 `TG_INCLUDE_SYSTEM_METRICS=1` 可在訊息直接看到 CPU(load1)、RSS、磁碟空間
 
 ## 3) 目前支援按鈕
 

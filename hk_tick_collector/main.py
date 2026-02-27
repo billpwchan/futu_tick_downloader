@@ -58,6 +58,7 @@ async def run() -> None:
                 health_interval_sec=config.telegram_health_interval_sec,
                 health_trading_interval_sec=config.telegram_health_trading_interval_sec,
                 health_offhours_interval_sec=config.telegram_health_offhours_interval_sec,
+                health_fixed_interval_sec=config.telegram_health_fixed_interval_sec,
                 health_lunch_once=config.telegram_health_lunch_once,
                 health_after_close_once=config.telegram_health_after_close_once,
                 health_holiday_mode=config.telegram_health_holiday_mode,

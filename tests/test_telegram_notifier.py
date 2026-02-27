@@ -731,3 +731,40 @@ def test_notifier_renders_productized_health_and_alert():
         assert any("下一步：" in item["text"] for item in calls)
 
     asyncio.run(runner())
+
+
+def test_notifier_health_fixed_interval_sends_periodic_after_hours():
+    async def runner() -> None:
+        calls: list[dict] = []
+        clock = {"now": 0.0}
+
+        def fake_now() -> float:
+            return float(clock["now"])
+
+        def fake_sender(payload):
+            calls.append(dict(payload))
+            return TelegramSendResult(ok=True, status_code=200, message_id=55)
+
+        notifier = TelegramNotifier(
+            enabled=True,
+            bot_token="1234567890:ABCDEF",
+            chat_id="-100123",
+            parse_mode="HTML",
+            sender=fake_sender,
+            now_monotonic=fake_now,
+            interactive_enabled=False,
+            health_fixed_interval_sec=600,
+        )
+        await notifier.start()
+
+        after_hours_utc = datetime(2026, 2, 14, 10, 30, tzinfo=timezone.utc)
+        notifier.submit_health(_make_snapshot(created_at=after_hours_utc, sid="sid-fixed-1"))
+        clock["now"] = 601.0
+        notifier.submit_health(_make_snapshot(created_at=after_hours_utc, sid="sid-fixed-2"))
+        await asyncio.wait_for(notifier._queue.join(), timeout=1)
+        await notifier.stop()
+
+        assert len(calls) >= 2
+        assert all("HEALTH" in call["text"] for call in calls[:2])
+
+    asyncio.run(runner())

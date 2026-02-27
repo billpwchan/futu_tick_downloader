@@ -78,6 +78,10 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK \
 
 - [`/docs/09-收盤後自動化（歸檔與本地拉取）.md`](09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)
 
+若要全手動（低 CPU，不走 zstd 歸檔），請看：
+
+- [`/docs/10-手動批次拉回與轉ZIP（低CPU）.md`](10-%E6%89%8B%E5%8B%95%E6%89%B9%E6%AC%A1%E6%8B%89%E5%9B%9E%E8%88%87%E8%BD%89ZIP%EF%BC%88%E4%BD%8ECPU%EF%BC%89.md)
+
 ## 7) 匯出資料給策略/研究
 
 ```bash

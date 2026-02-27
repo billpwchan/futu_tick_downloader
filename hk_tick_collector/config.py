@@ -133,6 +133,7 @@ class Config:
     telegram_health_interval_sec: int
     telegram_health_trading_interval_sec: int
     telegram_health_offhours_interval_sec: int
+    telegram_health_fixed_interval_sec: int | None
     telegram_health_lunch_once: bool
     telegram_health_after_close_once: bool
     telegram_health_holiday_mode: str
@@ -162,6 +163,12 @@ class Config:
     def from_env(cls) -> "Config":
         _load_dotenv()
         poll_offhours_probe_num = _get_env_int("FUTU_POLL_OFFHOURS_PROBE_NUM", 1)
+        health_fixed_interval_raw = _get_env_optional_int("HEALTH_FIXED_INTERVAL_SEC")
+        health_fixed_interval_sec = (
+            int(health_fixed_interval_raw)
+            if health_fixed_interval_raw is not None and int(health_fixed_interval_raw) > 0
+            else None
+        )
         return cls(
             futu_host=os.getenv("FUTU_HOST", "127.0.0.1"),
             futu_port=_get_env_int("FUTU_PORT", 11111),
@@ -224,6 +231,7 @@ class Config:
                 "HEALTH_OFFHOURS_INTERVAL_SEC",
                 _get_env_int("HEALTH_INTERVAL_SEC", 900),
             ),
+            telegram_health_fixed_interval_sec=health_fixed_interval_sec,
             telegram_health_lunch_once=_get_env_bool("TG_HEALTH_LUNCH_ONCE", True),
             telegram_health_after_close_once=_get_env_bool(
                 "TG_HEALTH_AFTER_CLOSE_ONCE",

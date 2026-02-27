@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUNNER="${SCRIPT_DIR}/scripts/local_pull_convert.sh"
+RUNNER="${SCRIPT_DIR}/local_pull_convert.sh"
 
 if [[ ! -x "${RUNNER}" ]]; then
   echo "Cannot execute ${RUNNER}"

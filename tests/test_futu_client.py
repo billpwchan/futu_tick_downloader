@@ -145,6 +145,7 @@ def build_config(**overrides) -> Config:
         telegram_health_interval_sec=900,
         telegram_health_trading_interval_sec=900,
         telegram_health_offhours_interval_sec=1800,
+        telegram_health_fixed_interval_sec=None,
         telegram_health_lunch_once=True,
         telegram_health_after_close_once=True,
         telegram_health_holiday_mode="daily",
@@ -164,6 +165,9 @@ def build_config(**overrides) -> Config:
         telegram_action_refresh_min_interval_sec=15,
         telegram_action_command_rate_limit_per_min=8,
         telegram_action_timeout_sec=3.0,
+        telegram_action_command_timeout_sec=10.0,
+        telegram_action_command_allowlist=["help", "db_stats", "top_symbols", "symbol"],
+        telegram_action_command_max_lookback_days=30,
         instance_id="",
         log_level="INFO",
     )

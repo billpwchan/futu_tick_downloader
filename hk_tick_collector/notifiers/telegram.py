@@ -1520,6 +1520,7 @@ class TelegramNotifier:
         health_interval_sec: int | None = None,
         health_trading_interval_sec: int | None = None,
         health_offhours_interval_sec: int | None = None,
+        health_fixed_interval_sec: int | None = None,
         health_lunch_once: bool = True,
         health_after_close_once: bool = True,
         health_holiday_mode: str = "daily",
@@ -1590,6 +1591,11 @@ class TelegramNotifier:
                 if health_offhours_interval_sec is not None
                 else self._health_interval_sec
             ),
+        )
+        self._health_fixed_interval_sec = (
+            max(30, int(health_fixed_interval_sec))
+            if health_fixed_interval_sec is not None and int(health_fixed_interval_sec) > 0
+            else None
         )
 
         self._client = TelegramClient(
@@ -1685,7 +1691,7 @@ class TelegramNotifier:
         logger.info(
             "telegram_notifier_started notify_schema=%s version=%s chat_id=%s thread_id=%s "
             "thread_health_id=%s thread_ops_id=%s parse_mode=%s render_mode_default=%s "
-            "token=%s rate_limit_per_min=%s interactive_enabled=%s cadence_ok_preopen=%s cadence_ok_open=%s "
+            "token=%s rate_limit_per_min=%s interactive_enabled=%s cadence_fixed=%s cadence_ok_preopen=%s cadence_ok_open=%s "
             "cadence_ok_lunch=%s cadence_ok_after_hours=%s cadence_warn=%s cadence_alert=%s",
             NOTIFY_SCHEMA_VERSION,
             self._collector_version,
@@ -1698,6 +1704,7 @@ class TelegramNotifier:
             self._client.masked_token,
             self._rate_limiter.limit_per_window,
             self._enable_callbacks,
+            self._health_fixed_interval_sec if self._health_fixed_interval_sec is not None else "disabled",
             PREOPEN_CADENCE_SEC,
             self._health_trading_interval_sec,
             LUNCH_CADENCE_SEC,
@@ -2042,7 +2049,7 @@ class TelegramNotifier:
         now: float,
     ) -> tuple[bool, str]:
         phase_key = f"{snapshot.trading_day}:{assessment.market_mode}"
-        if assessment.severity == NotifySeverity.OK:
+        if self._health_fixed_interval_sec is None and assessment.severity == NotifySeverity.OK:
             if (
                 assessment.market_mode == "holiday-closed"
                 and self._health_holiday_mode == "disabled"
@@ -2100,6 +2107,8 @@ class TelegramNotifier:
         return False, "ok_cooldown"
 
     def _health_cadence_sec(self, *, market_mode: str, severity: NotifySeverity) -> int:
+        if self._health_fixed_interval_sec is not None:
+            return self._health_fixed_interval_sec
         if severity == NotifySeverity.ALERT:
             return ALERT_CADENCE_SEC
         if severity == NotifySeverity.WARN:

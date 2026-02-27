@@ -64,6 +64,7 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.telegram_mode_default == "product"
     assert cfg.telegram_parse_mode == "HTML"
     assert cfg.telegram_health_interval_sec == 900
+    assert cfg.telegram_health_fixed_interval_sec is None
     assert cfg.telegram_health_lunch_once is True
     assert cfg.telegram_health_after_close_once is True
     assert cfg.telegram_health_holiday_mode == "daily"
@@ -117,6 +118,7 @@ def test_config_parses_telegram_env(monkeypatch):
     monkeypatch.setenv("TG_MODE_DEFAULT", "ops")
     monkeypatch.setenv("TG_PARSE_MODE", "HTML")
     monkeypatch.setenv("HEALTH_INTERVAL_SEC", "700")
+    monkeypatch.setenv("HEALTH_FIXED_INTERVAL_SEC", "600")
     monkeypatch.setenv("HEALTH_TRADING_INTERVAL_SEC", "1500")
     monkeypatch.setenv("HEALTH_OFFHOURS_INTERVAL_SEC", "1800")
     monkeypatch.setenv("TG_HEALTH_LUNCH_ONCE", "0")
@@ -145,6 +147,7 @@ def test_config_parses_telegram_env(monkeypatch):
     assert cfg.telegram_mode_default == "ops"
     assert cfg.telegram_parse_mode == "HTML"
     assert cfg.telegram_health_interval_sec == 700
+    assert cfg.telegram_health_fixed_interval_sec == 600
     assert cfg.telegram_health_trading_interval_sec == 1500
     assert cfg.telegram_health_offhours_interval_sec == 1800
     assert cfg.telegram_health_lunch_once is False

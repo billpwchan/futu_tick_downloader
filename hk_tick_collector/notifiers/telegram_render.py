@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from html import escape
@@ -31,6 +32,25 @@ def _format_float(value: float | None, digits: int = 1) -> str:
     if value is None:
         return "n/a"
     return f"{value:.{digits}f}"
+
+
+def _format_uptime(seconds: int | None) -> str:
+    if seconds is None:
+        return "n/a"
+    total = max(0, int(seconds))
+    hours, remain = divmod(total, 3600)
+    minutes, secs = divmod(remain, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _cpu_load_summary(load1: float | None) -> tuple[str, str]:
+    if load1 is None:
+        return "n/a", "n/a"
+    cores = os.cpu_count()
+    if cores is None or cores <= 0:
+        return f"{load1:.2f}", "n/a"
+    pct = max(0.0, (float(load1) / float(cores)) * 100.0)
+    return f"{load1:.2f}/{cores}c", f"{pct:.1f}%"
 
 
 def _build_cb(prefix: str, value: str) -> str:
@@ -113,6 +133,9 @@ def render_health_compact(
     queue_max = int(getattr(snapshot, "queue_maxsize", 0))
     disk_free = getattr(snapshot, "system_disk_free_gb", None)
     load1 = getattr(snapshot, "system_load1", None)
+    rss_mb = getattr(snapshot, "system_rss_mb", None)
+    uptime_sec = getattr(snapshot, "uptime_sec", None)
+    load_text, cpu_pct = _cpu_load_summary(load1)
 
     summary = str(getattr(assessment, "conclusion", "狀態已更新")).strip()
     context_id = str(getattr(snapshot, "sid", "sid-unknown"))
@@ -129,8 +152,13 @@ def render_health_compact(
     if include_system_metrics:
         lines.append(
             "資源："
-            f"disk_free={_format_float(disk_free, 1)}GB | load1={_format_float(load1, 2)}"
+            f"cpu(load1)={cpu_pct} | load1={load_text} | "
+            f"rss={_format_float(rss_mb, 1)}MB | disk_free={_format_float(disk_free, 1)}GB"
         )
+    lines.append(
+        "運行："
+        f"uptime={_format_uptime(uptime_sec)} | pid={getattr(snapshot, 'pid', 'n/a')}"
+    )
     lines.extend(
         [
             "下一步：需要更多上下文請按「🔎 詳情」，要排查請先按「🧾 日誌」或「🗃 DB 狀態」。",
@@ -191,10 +219,13 @@ def render_health_detail(
         f"詳情：symbols={symbol_count} | max_tick_age={max_age:.1f}s | max_seq_lag={max_lag}",
     ]
     if include_system_metrics:
+        load_text, cpu_pct = _cpu_load_summary(getattr(snapshot, "system_load1", None))
         lines.append(
             "詳情："
+            f"cpu(load1)={cpu_pct} | load1={load_text} | "
+            f"uptime={_format_uptime(getattr(snapshot, 'uptime_sec', None))} | "
+            f"pid={getattr(snapshot, 'pid', 'n/a')} | "
             f"disk_free={_format_float(getattr(snapshot, 'system_disk_free_gb', None), 2)}GB | "
-            f"load1={_format_float(getattr(snapshot, 'system_load1', None), 2)} | "
             f"rss={_format_float(getattr(snapshot, 'system_rss_mb', None), 1)}MB"
         )
     lines.append("下一步：內容已截斷，請用 🧾/🗃 看更多。")
