@@ -95,6 +95,18 @@ class DummyCollector:
         return self.recovery_result
 
 
+class DummyNotifier:
+    def __init__(self) -> None:
+        self.alerts = []
+        self.resolved = []
+
+    def submit_alert(self, event) -> None:
+        self.alerts.append(event)
+
+    def resolve_alert(self, **kwargs) -> None:
+        self.resolved.append(kwargs)
+
+
 def build_config(**overrides) -> Config:
     data = dict(
         futu_host="127.0.0.1",
@@ -583,6 +595,80 @@ def test_reconnect_triggers_resubscribe_and_close():
 
         assert calls["subscribe"] >= 2
         assert any(ctx.closed for ctx in contexts)
+
+    asyncio.run(runner())
+
+
+def test_connect_and_subscribe_skips_unavailable_symbols():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+        notifier = DummyNotifier()
+
+        class FakeContext:
+            def __init__(self, host, port):
+                self.host = host
+                self.port = port
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def subscribe(self, symbols, subtypes, subscribe_push=True, session=None):
+                if "HK.00489" in symbols:
+                    return 1, "未知股票 00489"
+                return RET_OK, "ok"
+
+            def close(self):
+                return None
+
+        client = FutuQuoteClient(
+            build_config(symbols=["HK.00700", "HK.00489", "HK.00981"]),
+            collector,
+            loop,
+            context_factory=FakeContext,
+            notifier=notifier,
+        )
+
+        await client._connect_and_subscribe()
+
+        assert client._subscribed_symbols == ["HK.00700", "HK.00981"]
+        assert client._unavailable_symbols == {"HK.00489": "未知股票 00489"}
+        assert notifier.alerts
+        event = notifier.alerts[-1]
+        assert event.code == "SYMBOL_UNAVAILABLE"
+        assert event.severity == "WARN"
+
+    asyncio.run(runner())
+
+
+def test_connect_and_subscribe_raises_when_no_symbols_are_subscribable():
+    async def runner():
+        loop = asyncio.get_running_loop()
+        collector = DummyCollector()
+
+        class FakeContext:
+            def __init__(self, host, port):
+                self.host = host
+                self.port = port
+
+            def set_handler(self, handler):
+                self.handler = handler
+
+            def subscribe(self, symbols, subtypes, subscribe_push=True, session=None):
+                return 1, f"未知股票 {symbols[0].split('.')[-1]}"
+
+            def close(self):
+                return None
+
+        client = FutuQuoteClient(
+            build_config(symbols=["HK.00489"]),
+            collector,
+            loop,
+            context_factory=FakeContext,
+        )
+
+        with pytest.raises(RuntimeError, match="no subscribable symbols"):
+            await client._connect_and_subscribe()
 
     asyncio.run(runner())
 

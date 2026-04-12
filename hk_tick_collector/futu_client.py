@@ -121,6 +121,10 @@ class FutuQuoteClient:
         self._sqlite_busy_eid: str | None = None
         self._disconnect_active = False
         self._disconnect_eid: str | None = None
+        self._subscribed_symbols: List[str] = list(self._config.symbols)
+        self._unavailable_symbols: Dict[str, str] = {}
+        self._symbol_unavailable_active = False
+        self._symbol_unavailable_eid: str | None = None
         self._last_poll_stats_log_at: float = 0.0
         self._last_offhours_probe_at: float = 0.0
         self._market_calendar = MarketCalendar(
@@ -256,23 +260,155 @@ class FutuQuoteClient:
         logger.info(
             "futu_connecting host=%s port=%s", self._config.futu_host, self._config.futu_port
         )
-        ret, data = self._ctx.subscribe(
-            self._config.symbols,
-            [SubType.TICKER],
-            subscribe_push=True,
-            session=Session.ALL,
+        subscribed_symbols, unavailable_symbols = self._subscribe_symbols_resilient(
+            self._config.symbols
         )
-        logger.info("subscribe ret=%s msg=%s symbols=%s", ret, data, ",".join(self._config.symbols))
-        if ret != RET_OK:
-            raise RuntimeError(f"subscribe failed: {data}")
+        self._subscribed_symbols = subscribed_symbols
+        previous_unavailable = dict(self._unavailable_symbols)
+        self._unavailable_symbols = unavailable_symbols
+        if not self._subscribed_symbols:
+            summary = self._format_unavailable_symbols(unavailable_symbols)
+            raise RuntimeError(f"subscribe failed: no subscribable symbols ({summary})")
 
         self._connected = True
         logger.info(
-            "futu_connected host=%s port=%s", self._config.futu_host, self._config.futu_port
+            "futu_connected host=%s port=%s subscribed_symbols=%s unavailable_symbols=%s",
+            self._config.futu_host,
+            self._config.futu_port,
+            len(self._subscribed_symbols),
+            len(self._unavailable_symbols),
+        )
+        self._publish_symbol_availability_alert(previous_unavailable=previous_unavailable)
+        logger.info(
+            "futu_subscribed active=%s unavailable=%s",
+            ",".join(self._subscribed_symbols),
+            self._format_unavailable_symbols(self._unavailable_symbols),
         )
 
         if self._config.backfill_n > 0:
             await self._backfill_recent()
+
+    def _subscribe_symbols_resilient(
+        self, symbols: Sequence[str]
+    ) -> tuple[List[str], Dict[str, str]]:
+        if self._ctx is None:
+            raise RuntimeError("quote context is not initialized")
+        subscribed, unavailable = self._subscribe_symbol_group(list(symbols))
+        if unavailable:
+            logger.warning(
+                "subscribe_partial_ok subscribed=%s unavailable=%s details=%s",
+                len(subscribed),
+                len(unavailable),
+                self._format_unavailable_symbols(unavailable),
+            )
+        return subscribed, unavailable
+
+    def _subscribe_symbol_group(self, symbols: Sequence[str]) -> tuple[List[str], Dict[str, str]]:
+        if not symbols:
+            return [], {}
+        if self._ctx is None:
+            raise RuntimeError("quote context is not initialized")
+
+        ret, data = self._ctx.subscribe(
+            list(symbols),
+            [SubType.TICKER],
+            subscribe_push=True,
+            session=Session.ALL,
+        )
+        logger.info("subscribe ret=%s msg=%s symbols=%s", ret, data, ",".join(symbols))
+        if ret == RET_OK:
+            return list(symbols), {}
+
+        if len(symbols) == 1:
+            symbol = str(symbols[0])
+            reason = self._truncate_subscribe_error(data)
+            logger.warning("subscribe_symbol_failed symbol=%s msg=%s", symbol, reason)
+            return [], {symbol: reason}
+
+        midpoint = max(1, len(symbols) // 2)
+        left_subscribed, left_unavailable = self._subscribe_symbol_group(symbols[:midpoint])
+        right_subscribed, right_unavailable = self._subscribe_symbol_group(symbols[midpoint:])
+        unavailable = dict(left_unavailable)
+        unavailable.update(right_unavailable)
+        return left_subscribed + right_subscribed, unavailable
+
+    @staticmethod
+    def _truncate_subscribe_error(data: object) -> str:
+        text = str(data).strip()
+        return text[:200] if text else "unknown subscribe error"
+
+    def _format_unavailable_symbols(self, items: Dict[str, str]) -> str:
+        if not items:
+            return "none"
+        pairs = [f"{symbol}({reason})" for symbol, reason in sorted(items.items())[:5]]
+        if len(items) > 5:
+            pairs.append(f"+{len(items) - 5} more")
+        return ",".join(pairs)
+
+    def _publish_symbol_availability_alert(
+        self, *, previous_unavailable: Dict[str, str]
+    ) -> None:
+        if self._notifier is None:
+            return
+
+        trading_day = self._current_trading_day()
+        if self._unavailable_symbols:
+            if self._symbol_unavailable_active and previous_unavailable == self._unavailable_symbols:
+                return
+            if self._symbol_unavailable_active:
+                self._notifier.resolve_alert(
+                    code="SYMBOL_UNAVAILABLE",
+                    fingerprint="SYMBOL_UNAVAILABLE",
+                    trading_day=trading_day,
+                    summary_lines=[
+                        f"cleared_previous={self._format_unavailable_symbols(previous_unavailable)}"
+                    ],
+                    sid=self._last_snapshot_sid,
+                    eid=self._symbol_unavailable_eid,
+                )
+
+            event = AlertEvent(
+                created_at=datetime.now(tz=timezone.utc),
+                code="SYMBOL_UNAVAILABLE",
+                key="SYMBOL_UNAVAILABLE",
+                fingerprint="SYMBOL_UNAVAILABLE",
+                trading_day=trading_day,
+                severity=NotifySeverity.WARN.value,
+                headline="注意：部分股票無法訂閱，已自動跳過",
+                impact="其餘股票維持採集；被跳過的股票暫時不會有即時資料",
+                summary_lines=[
+                    f"configured={len(self._config.symbols)} subscribed={len(self._subscribed_symbols)} unavailable={len(self._unavailable_symbols)}",
+                    f"symbols={','.join(sorted(self._unavailable_symbols)[:8])}",
+                    f"detail={self._format_unavailable_symbols(self._unavailable_symbols)}",
+                ],
+                suggestions=[
+                    "sudo grep -n '^FUTU_SYMBOLS=' /etc/hk-tick-collector.env",
+                    "移除已下市/改代碼股票後重啟 hk-tick-collector",
+                ],
+                sid=self._last_snapshot_sid,
+            )
+            self._symbol_unavailable_active = True
+            self._symbol_unavailable_eid = event.eid
+            logger.warning(
+                "alert_event code=SYMBOL_UNAVAILABLE eid=%s sid=%s count=%s",
+                event.eid,
+                event.sid or "none",
+                len(self._unavailable_symbols),
+            )
+            self._notifier.submit_alert(event)
+            return
+
+        if self._symbol_unavailable_active:
+            self._notifier.resolve_alert(
+                code="SYMBOL_UNAVAILABLE",
+                fingerprint="SYMBOL_UNAVAILABLE",
+                trading_day=trading_day,
+                summary_lines=[f"subscribed={len(self._subscribed_symbols)} unavailable=0"],
+                sid=self._last_snapshot_sid,
+                eid=self._symbol_unavailable_eid,
+            )
+            self._symbol_unavailable_active = False
+            self._symbol_unavailable_eid = None
 
     async def _monitor_connection(self) -> None:
         while not self._stop_event.is_set():
@@ -314,7 +450,7 @@ class FutuQuoteClient:
                 await self._sleep_with_stop(self._config.poll_interval_sec)
                 continue
 
-            for symbol in self._config.symbols:
+            for symbol in self._subscribed_symbols:
                 if self._stop_event.is_set():
                     break
                 if self._ctx is None:
@@ -571,7 +707,7 @@ class FutuQuoteClient:
     async def _backfill_recent(self) -> None:
         if self._ctx is None:
             return
-        for symbol in self._config.symbols:
+        for symbol in self._subscribed_symbols:
             ret, data = self._ctx.get_rt_ticker(symbol, num=self._config.backfill_n)
             if ret != RET_OK:
                 logger.warning("backfill failed for %s: %s", symbol, data)
@@ -855,7 +991,7 @@ class FutuQuoteClient:
         if self._notifier is not None:
             trading_day = self._current_trading_day()
             persisted_parts = []
-            for symbol in self._config.symbols:
+            for symbol in self._subscribed_symbols:
                 persisted_parts.append(f"{symbol}={self._last_persisted_seq.get(symbol, 'none')}")
             event = AlertEvent(
                 created_at=datetime.now(tz=timezone.utc),
@@ -1170,7 +1306,7 @@ class FutuQuoteClient:
             drift_from_db = drift_sec
 
         symbols: List[SymbolSnapshot] = []
-        for symbol in self._config.symbols:
+        for symbol in self._subscribed_symbols:
             last_tick = self._last_tick_seen_at.get(symbol)
             age_sec = None if last_tick is None else max(0.0, now - last_tick)
             seen = self._last_seen_seq.get(symbol)
