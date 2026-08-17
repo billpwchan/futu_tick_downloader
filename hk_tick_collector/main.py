@@ -41,7 +41,7 @@ def _install_fault_diagnostics() -> None:
 
 async def run() -> None:
     config = Config.from_env()
-    setup_logging(config.log_level)
+    setup_logging(config.log_level, config.futu_sdk_log_level)
     _install_fault_diagnostics()
     notifier: TelegramNotifier | None = None
     if config.telegram_enabled:

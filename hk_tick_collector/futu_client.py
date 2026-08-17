@@ -20,6 +20,8 @@ from .db import PersistResult, SQLiteTickStore, db_path_for_trading_day
 from .market_state import MarketCalendar, MarketState, resolve_market_state
 from .mapping import ticker_df_to_rows
 from .models import TickRow
+from .host_alerts import HostAlertEvaluator, HostAlertThresholds
+from .host_sensor import HostSensor, HostSnapshot
 from .notifiers.telegram import (
     AlertEvent,
     HealthSnapshot,
@@ -117,6 +119,26 @@ class FutuQuoteClient:
         self._watchdog_dumped = False
         self._last_busy_backoff_count = 0
         self._last_snapshot_sid: str | None = None
+        # Host sensing runs on the same 60s cadence as the health loop; the
+        # evaluator keeps the fire/resolve state so nothing is periodic.
+        self._host_sensor: HostSensor | None = None
+        self._host_evaluator: HostAlertEvaluator | None = None
+        self._host_snapshot: HostSnapshot | None = None
+        if getattr(self._config, "host_monitor_enabled", False):
+            self._host_sensor = HostSensor(
+                baseline_pct=self._config.host_cpu_baseline_pct,
+                disk_path=self._config.host_disk_path,
+            )
+            self._host_evaluator = HostAlertEvaluator(
+                HostAlertThresholds(
+                    cpu_burn_sustain_sec=self._config.host_cpu_burn_sustain_sec,
+                    cpu_steal_alert_pct=self._config.host_cpu_steal_alert_pct,
+                    disk_warn_pct=self._config.host_disk_warn_pct,
+                    disk_alert_pct=self._config.host_disk_alert_pct,
+                    mem_pressure_full_avg60=self._config.host_mem_pressure_full_avg60,
+                    swap_used_warn_mb=self._config.host_swap_used_warn_mb,
+                )
+            )
         self._sqlite_busy_active = False
         self._sqlite_busy_eid: str | None = None
         self._disconnect_active = False
@@ -583,6 +605,8 @@ class FutuQuoteClient:
                     self._max_ts_ms_seen,
                     max_ts_utc,
                 )
+
+            await self._tick_host_monitor()
 
             snapshot = await self._build_health_snapshot(
                 now=now,
@@ -1344,7 +1368,77 @@ class FutuQuoteClient:
             system_load1=load1,
             system_rss_mb=rss_mb,
             system_disk_free_gb=disk_free_gb,
+            host=self._host_snapshot,
+            host_alert_codes=self._active_host_alert_codes(),
         )
+
+    def _active_host_alert_codes(self) -> tuple[str, ...]:
+        if self._host_evaluator is None:
+            return ()
+        return self._host_evaluator.active_codes
+
+    async def _tick_host_monitor(self) -> None:
+        """Sample the host and dispatch any threshold transitions.
+
+        Sampling touches ~400 /proc entries, so it is pushed off the event
+        loop. Failures here must never disturb ingestion: the collector was
+        the healthy component during the incident this monitors for.
+        """
+
+        if self._host_sensor is None or self._host_evaluator is None:
+            return
+        try:
+            snapshot = await asyncio.to_thread(self._host_sensor.sample)
+        except Exception:
+            logger.exception("host_sensor_sample_failed")
+            return
+        self._host_snapshot = snapshot
+
+        try:
+            transitions = self._host_evaluator.evaluate(snapshot)
+        except Exception:
+            logger.exception("host_alert_evaluate_failed")
+            return
+        if not transitions or self._notifier is None:
+            return
+
+        trading_day = self._current_trading_day()
+        for transition in transitions:
+            if transition.action == "resolve":
+                logger.info("host_alert_resolved code=%s", transition.code)
+                self._notifier.resolve_alert(
+                    code=transition.code,
+                    fingerprint=transition.fingerprint,
+                    trading_day=trading_day,
+                    summary_lines=list(transition.summary_lines),
+                    sid=self._last_snapshot_sid,
+                )
+                continue
+            severity = (
+                NotifySeverity.ALERT.value
+                if transition.severity == "ALERT"
+                else NotifySeverity.WARN.value
+            )
+            event = AlertEvent(
+                created_at=datetime.now(tz=timezone.utc),
+                code=transition.code,
+                key=transition.code,
+                fingerprint=transition.fingerprint,
+                trading_day=trading_day,
+                severity=severity,
+                headline=transition.headline,
+                impact=transition.impact,
+                summary_lines=list(transition.summary_lines),
+                suggestions=list(transition.suggestions),
+                sid=self._last_snapshot_sid,
+            )
+            logger.warning(
+                "alert_event code=%s eid=%s severity=%s",
+                transition.code,
+                event.eid,
+                severity,
+            )
+            self._notifier.submit_alert(event)
 
     async def _sleep_with_stop(self, delay: float) -> None:
         if delay <= 0:
