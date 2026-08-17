@@ -49,7 +49,11 @@ class HostAlertThresholds:
     # PSI "full" = share of wall time during which *every* task was stalled on
     # memory. Anything sustained above a few percent is real thrashing.
     mem_pressure_full_avg60: float = 5.0
-    swap_used_warn_mb: float = 512.0
+    # Swap *churn*, not occupancy. Absolute swap-used is a false-positive
+    # factory: 611MB left parked after an incident sat there for hours on this
+    # host with PSI flat at 0.0 -- nothing was wrong, the pages were simply
+    # cold. Paging traffic is what actually costs latency.
+    swap_pages_per_sec_warn: float = 200.0
 
 
 @dataclass(frozen=True)
@@ -261,11 +265,11 @@ class HostAlertEvaluator:
     ) -> tuple[str, Tier | None, HostAlertTransition | None] | None:
         code = "HOST_MEM_PRESSURE"
         psi = s.mem_pressure_full_avg60
-        swap_used = s.swap_used_mb
-        if psi is None and swap_used is None:
+        swap_rate = s.swap_pages_per_sec
+        if psi is None and swap_rate is None:
             return None
         psi_hit = psi is not None and psi >= self._t.mem_pressure_full_avg60
-        swap_hit = swap_used is not None and swap_used >= self._t.swap_used_warn_mb
+        swap_hit = swap_rate is not None and swap_rate >= self._t.swap_pages_per_sec_warn
         if not (psi_hit or swap_hit):
             return (code, None, None)
         payload = HostAlertTransition(
@@ -280,7 +284,8 @@ class HostAlertEvaluator:
             ),
             summary_lines=(
                 f"PSI(memory full avg60)={_fmt(psi, 2, '%')}｜"
-                f"swap={_fmt(swap_used, 0, 'MB')}/{_fmt(s.swap_total_mb, 0, 'MB')}",
+                f"換頁 {_fmt(swap_rate, 0, ' pages/s')}｜"
+                f"swap 佔用 {_fmt(s.swap_used_mb, 0, 'MB')}/{_fmt(s.swap_total_mb, 0, 'MB')}",
                 s.top_line(),
             ),
             suggestions=(

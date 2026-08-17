@@ -169,7 +169,7 @@ class Config:
     host_disk_alert_pct: float = 90.0
     host_disk_path: str = "/"
     host_mem_pressure_full_avg60: float = 5.0
-    host_swap_used_warn_mb: float = 512.0
+    host_swap_pages_per_sec_warn: float = 200.0
     futu_sdk_log_level: str = "WARNING"
 
     @classmethod
@@ -316,6 +316,6 @@ class Config:
             host_disk_alert_pct=_get_env_float("HOST_DISK_ALERT_PCT", 90.0),
             host_disk_path=os.getenv("HOST_DISK_PATH", "/").strip() or "/",
             host_mem_pressure_full_avg60=_get_env_float("HOST_MEM_PRESSURE_FULL_AVG60", 5.0),
-            host_swap_used_warn_mb=_get_env_float("HOST_SWAP_USED_WARN_MB", 512.0),
+            host_swap_pages_per_sec_warn=_get_env_float("HOST_SWAP_PAGES_PER_SEC_WARN", 200.0),
             futu_sdk_log_level=os.getenv("FUTU_SDK_LOG_LEVEL", "WARNING").strip() or "WARNING",
         )

@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 PROC_STAT = Path("/proc/stat")
 PROC_MEMINFO = Path("/proc/meminfo")
 PROC_PRESSURE_MEMORY = Path("/proc/pressure/memory")
+PROC_VMSTAT = Path("/proc/vmstat")
 PROC_ROOT = Path("/proc")
 
 # Rolling window length.  At the 60s health cadence this holds ~15 minutes,
@@ -117,6 +118,18 @@ def read_cpu_times() -> CpuTimes | None:
 
 @dataclass(frozen=True)
 class ProcessCpu:
+    """A process's share of the CPU the box actually consumed.
+
+    Not derived from wall-clock capacity. On a throttled guest, per-task
+    utime/stime and the global /proc/stat disagree badly: the scheduler counts
+    a task as running across a slice the hypervisor stole, so raw per-process
+    ticks over wall time can exceed the global busy total several-fold --
+    measured at 3.7x on this host at 64% steal. Since the inflation is shared
+    across all tasks, the *ranking* survives; the magnitude is restored by
+    normalising against the summed process ticks and rescaling to the global
+    utilisation, which keeps `top_processes` consistent with `cpu_util_pct`.
+    """
+
     pid: int
     name: str
     cpu_pct_of_box: float
@@ -174,6 +187,30 @@ def _read_swap_mb() -> tuple[float | None, float | None]:
     if total_kb is None or free_kb is None:
         return None, None
     return total_kb / 1024.0, (total_kb - free_kb) / 1024.0
+
+
+def _read_swap_events() -> tuple[int | None, int | None]:
+    """Cumulative pages swapped in/out, from /proc/vmstat.
+
+    Absolute swap *occupancy* is a poor pressure signal: pages parked during a
+    past incident stay resident for days without costing anything. What hurts
+    is churn, so the alert is driven from the delta of these counters.
+    """
+
+    pswpin: int | None = None
+    pswpout: int | None = None
+    try:
+        with PROC_VMSTAT.open("r") as handle:
+            for line in handle:
+                if line.startswith("pswpin "):
+                    pswpin = int(line.split()[1])
+                elif line.startswith("pswpout "):
+                    pswpout = int(line.split()[1])
+                if pswpin is not None and pswpout is not None:
+                    break
+    except (OSError, ValueError, IndexError):
+        return None, None
+    return pswpin, pswpout
 
 
 def _read_memory_pressure_full_avg60() -> float | None:
@@ -243,6 +280,7 @@ class HostSnapshot:
 
     swap_used_mb: float | None = None
     swap_total_mb: float | None = None
+    swap_pages_per_sec: float | None = None
     mem_pressure_full_avg60: float | None = None
 
     def cpu_line(self) -> str:
@@ -295,6 +333,7 @@ class HostSensor:
 
         self._over_baseline_since: float | None = None
         self._overdraft_vcpu_min = 0.0
+        self._prev_swap_events: tuple[int | None, int | None] = (None, None)
 
     @property
     def baseline_pct(self) -> float:
@@ -316,7 +355,7 @@ class HostSensor:
                 self._util_window.append(util_pct)
                 self._steal_window.append(steal_pct)
 
-        top = self._top_processes(procs, dt)
+        top = self._top_processes(procs, dt, util_pct)
         util_avg = self._mean(self._util_window)
         self._accumulate_overdraft(util_avg, dt, now)
 
@@ -324,6 +363,14 @@ class HostSensor:
         if disk_used_pct is not None:
             self._disk_window.append((now, disk_used_pct))
         swap_total_mb, swap_used_mb = _read_swap_mb()
+        swap_events = _read_swap_events()
+        swap_pages_per_sec: float | None = None
+        if dt is not None and None not in swap_events and None not in self._prev_swap_events:
+            moved = (swap_events[0] - self._prev_swap_events[0]) + (
+                swap_events[1] - self._prev_swap_events[1]
+            )
+            swap_pages_per_sec = max(0.0, moved / dt)
+        self._prev_swap_events = swap_events
 
         try:
             load1: float | None = os.getloadavg()[0]
@@ -351,6 +398,7 @@ class HostSensor:
             disk_days_to_full=self._disk_days_to_full(disk_used_pct),
             swap_used_mb=swap_used_mb,
             swap_total_mb=swap_total_mb,
+            swap_pages_per_sec=swap_pages_per_sec,
             mem_pressure_full_avg60=_read_memory_pressure_full_avg60(),
         )
 
@@ -363,18 +411,24 @@ class HostSensor:
         return sum(values) / len(values)
 
     def _top_processes(
-        self, procs: dict[int, tuple[str, int]], dt: float | None
+        self,
+        procs: dict[int, tuple[str, int]],
+        dt: float | None,
+        util_pct: float | None,
     ) -> tuple[ProcessCpu, ...]:
+        """Rank processes and express each as a share of the box.
+
+        See ProcessCpu for why the raw ticks cannot be divided by wall-clock
+        capacity on a throttled guest.
+        """
+
         if dt is None or not procs or not self._prev_procs:
             return ()
         try:
             hz = os.sysconf("SC_CLK_TCK") or 100
         except (ValueError, OSError):
             hz = 100
-        capacity_ticks = dt * hz * self._ncpu
-        if capacity_ticks <= 0:
-            return ()
-        scored: list[ProcessCpu] = []
+        deltas: list[tuple[int, str, int]] = []
         for pid, (name, ticks) in procs.items():
             previous = self._prev_procs.get(pid)
             if previous is None:
@@ -382,9 +436,24 @@ class HostSensor:
             delta = ticks - previous[1]
             if delta <= 0 or delta / hz < _MIN_PROC_CPU_SEC:
                 continue
-            scored.append(
-                ProcessCpu(pid=pid, name=name, cpu_pct_of_box=100.0 * delta / capacity_ticks)
-            )
+            deltas.append((delta, pid, name))
+        if not deltas:
+            return ()
+        total_delta = sum(item[0] for item in deltas)
+        if total_delta <= 0:
+            return ()
+        # Rescale to the global utilisation so the parts stay consistent with
+        # the whole. Falls back to wall-clock capacity only when utilisation is
+        # unavailable (first sample), where the two agree anyway.
+        if util_pct is None:
+            capacity_ticks = dt * hz * self._ncpu
+            scale = (100.0 / capacity_ticks) if capacity_ticks > 0 else 0.0
+        else:
+            scale = util_pct / total_delta
+        scored = [
+            ProcessCpu(pid=pid, name=name, cpu_pct_of_box=delta * scale)
+            for delta, pid, name in deltas
+        ]
         scored.sort(key=lambda item: item.cpu_pct_of_box, reverse=True)
         return tuple(scored[:5])
 
