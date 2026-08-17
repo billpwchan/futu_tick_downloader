@@ -1,0 +1,12 @@
+# Instantiated by OnFailure= on the units it guards, e.g.
+#   OnFailure=hk-tick-collector-failure@%n.service
+# %i carries the failing unit name, so one template covers every unit.
+[Unit]
+Description=Telegram notice for failed unit %i
+# Never let the notifier's own failure loop back into another notification.
+CollectMode=inactive-or-failed
+
+[Service]
+Type=oneshot
+ExecStart=/opt/futu_tick_downloader/deploy/scripts/notify_unit_failure.sh %i
+TimeoutStartSec=45

@@ -158,6 +158,19 @@ class Config:
     telegram_action_command_max_lookback_days: int
     instance_id: str
     log_level: str
+    # Host monitoring. Defaulted and kept last so that existing positional /
+    # exhaustive-keyword constructions of Config (tests, tooling) keep working
+    # as this section grows.
+    host_monitor_enabled: bool = True
+    host_cpu_baseline_pct: float = 20.0
+    host_cpu_burn_sustain_sec: int = 1200
+    host_cpu_steal_alert_pct: float = 15.0
+    host_disk_warn_pct: float = 80.0
+    host_disk_alert_pct: float = 90.0
+    host_disk_path: str = "/"
+    host_mem_pressure_full_avg60: float = 5.0
+    host_swap_used_warn_mb: float = 512.0
+    futu_sdk_log_level: str = "WARNING"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -291,4 +304,18 @@ class Config:
             ),
             instance_id=os.getenv("INSTANCE_ID", "").strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
+            host_monitor_enabled=_get_env_bool("HOST_MONITOR_ENABLED", True),
+            # Sustainable ("baseline") CPU share of the whole box for this
+            # instance type. Burstable instances only accrue credit below it.
+            # Not readable from inside the guest, so it must be configured;
+            # AWS publishes it per Lightsail/T-family plan.
+            host_cpu_baseline_pct=_get_env_float("HOST_CPU_BASELINE_PCT", 20.0),
+            host_cpu_burn_sustain_sec=_get_env_int("HOST_CPU_BURN_SUSTAIN_SEC", 1200),
+            host_cpu_steal_alert_pct=_get_env_float("HOST_CPU_STEAL_ALERT_PCT", 15.0),
+            host_disk_warn_pct=_get_env_float("HOST_DISK_WARN_PCT", 80.0),
+            host_disk_alert_pct=_get_env_float("HOST_DISK_ALERT_PCT", 90.0),
+            host_disk_path=os.getenv("HOST_DISK_PATH", "/").strip() or "/",
+            host_mem_pressure_full_avg60=_get_env_float("HOST_MEM_PRESSURE_FULL_AVG60", 5.0),
+            host_swap_used_warn_mb=_get_env_float("HOST_SWAP_USED_WARN_MB", 512.0),
+            futu_sdk_log_level=os.getenv("FUTU_SDK_LOG_LEVEL", "WARNING").strip() or "WARNING",
         )
