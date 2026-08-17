@@ -171,6 +171,8 @@ def _log_sqlite_pragmas(conn: sqlite3.Connection, db_path: Path) -> None:
 
 
 class SQLiteTickWriter:
+    MAX_OPEN_TRADING_DAYS = 2
+
     def __init__(self, store: "SQLiteTickStore", *, gap_detector: GapDetector | None) -> None:
         self._store = store
         self._gap_detector = gap_detector
@@ -206,6 +208,20 @@ class SQLiteTickWriter:
             conn.close()
         except Exception:
             logger.exception("sqlite_writer_reset_failed trading_day=%s", trading_day)
+
+    def _close_stale_day_connections(self) -> None:
+        """Bound open DB/WAL ownership to the two newest trading days.
+
+        The collector is intentionally long-lived. Retaining one connection
+        per day forever keeps deleted DB/WAL inodes alive and makes verified
+        retention ineffective. Two days preserve a narrow late-tick window
+        while allowing older, archived day files to be reclaimed safely.
+        """
+
+        keep = set(sorted(self._connections, reverse=True)[: self.MAX_OPEN_TRADING_DAYS])
+        for trading_day in list(self._connections):
+            if trading_day not in keep:
+                self.reset_connection(trading_day)
 
     def insert_ticks(self, trading_day: str, rows: Iterable[TickRow]) -> PersistResult:
         self._assert_owner_thread()
@@ -251,13 +267,15 @@ class SQLiteTickWriter:
                 latency_ms,
                 "none",
             )
-            return PersistResult(
+            result = PersistResult(
                 db_path=db_path,
                 batch=len(rows_list),
                 inserted=inserted,
                 ignored=ignored,
                 commit_latency_ms=latency_ms,
             )
+            self._close_stale_day_connections()
+            return result
         except sqlite3.DatabaseError:
             try:
                 conn.rollback()
