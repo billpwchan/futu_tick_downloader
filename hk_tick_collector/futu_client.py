@@ -136,7 +136,7 @@ class FutuQuoteClient:
                     disk_warn_pct=self._config.host_disk_warn_pct,
                     disk_alert_pct=self._config.host_disk_alert_pct,
                     mem_pressure_full_avg60=self._config.host_mem_pressure_full_avg60,
-                    swap_used_warn_mb=self._config.host_swap_used_warn_mb,
+                    swap_pages_per_sec_warn=self._config.host_swap_pages_per_sec_warn,
                 )
             )
         self._sqlite_busy_active = False

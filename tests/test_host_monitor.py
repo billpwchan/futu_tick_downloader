@@ -40,7 +40,14 @@ def _cpu_times(*, busy_pct: float, steal_pct: float, elapsed_sec: float, prev: C
 def stub_host(monkeypatch):
     """Drive HostSensor from a scripted CPU series; stub the rest of /proc."""
 
-    state = {"cpu": CpuTimes(0, 0, 0, 0, 0, 0, 0, 0), "disk_pct": 40.0, "psi": 0.0, "swap": 0.0}
+    state = {
+        "cpu": CpuTimes(0, 0, 0, 0, 0, 0, 0, 0),
+        "disk_pct": 40.0,
+        "psi": 0.0,
+        "swap": 0.0,
+        "swpin": 0,
+        "swpout": 0,
+    }
 
     monkeypatch.setattr(host_sensor, "read_cpu_times", lambda: state["cpu"])
     monkeypatch.setattr(host_sensor, "_read_process_cpu_ticks", lambda: {})
@@ -48,6 +55,9 @@ def stub_host(monkeypatch):
         host_sensor, "_read_disk", lambda path: (state["disk_pct"], 10.0, 58.0)
     )
     monkeypatch.setattr(host_sensor, "_read_swap_mb", lambda: (2048.0, state["swap"]))
+    monkeypatch.setattr(
+        host_sensor, "_read_swap_events", lambda: (state["swpin"], state["swpout"])
+    )
     monkeypatch.setattr(host_sensor, "_read_memory_pressure_full_avg60", lambda: state["psi"])
     return state
 
@@ -114,6 +124,39 @@ def test_disk_projection_only_when_growing(stub_host):
     assert snap.disk_days_to_full > 0
 
 
+def test_top_processes_stay_consistent_with_utilisation(stub_host, monkeypatch):
+    """Regression: per-process shares must not exceed the box's actual usage.
+
+    On a throttled guest the kernel's per-task utime/stime overstates work --
+    measured at 3.7x the global busy delta at 64% steal, because the scheduler
+    counts a task as running across slices the hypervisor stole. Dividing raw
+    ticks by wall-clock capacity therefore reported single processes at 31% of
+    a box that /proc/stat said was only 18% busy.
+    """
+
+    ticks = {"a": 0, "b": 0}
+
+    def fake_procs():
+        return {1: ("hog", ticks["a"]), 2: ("small", ticks["b"])}
+
+    monkeypatch.setattr(host_sensor, "_read_process_cpu_ticks", fake_procs)
+    sensor = HostSensor(ncpu=NCPU, baseline_pct=20.0)
+    sensor.sample(now=0.0)
+
+    # Inflated per-task accounting: 3000 + 1000 ticks over 20s on 2 CPUs is
+    # far more than the 18% the global counter will report.
+    ticks["a"] += 3000
+    ticks["b"] += 1000
+    snap = _advance(sensor, stub_host, busy_pct=18.0, steal_pct=64.0, seconds=20, t0=20.0)
+
+    assert snap.cpu_util_pct == pytest.approx(18.0, abs=0.5)
+    total = sum(p.cpu_pct_of_box for p in snap.top_processes)
+    assert total == pytest.approx(snap.cpu_util_pct, abs=0.5)
+    # Ranking is what makes the alert actionable, so it must survive rescaling.
+    assert [p.name for p in snap.top_processes] == ["hog", "small"]
+    assert snap.top_processes[0].cpu_pct_of_box == pytest.approx(13.5, abs=0.5)
+
+
 def test_missing_proc_degrades_to_none(monkeypatch):
     """A non-Linux dev box must not raise, just report nothing."""
 
@@ -121,6 +164,7 @@ def test_missing_proc_degrades_to_none(monkeypatch):
     monkeypatch.setattr(host_sensor, "_read_process_cpu_ticks", lambda: {})
     monkeypatch.setattr(host_sensor, "_read_disk", lambda path: (None, None, None))
     monkeypatch.setattr(host_sensor, "_read_swap_mb", lambda: (None, None))
+    monkeypatch.setattr(host_sensor, "_read_swap_events", lambda: (None, None))
     monkeypatch.setattr(host_sensor, "_read_memory_pressure_full_avg60", lambda: None)
     snap = HostSensor(ncpu=NCPU).sample(now=0.0)
     assert snap.cpu_util_pct_avg is None
@@ -183,21 +227,42 @@ def test_disk_escalation_closes_the_warn_fingerprint():
     assert escalated[1].severity == "ALERT"
 
 
-def test_mem_pressure_fires_on_either_psi_or_swap():
-    ev = HostAlertEvaluator(
-        HostAlertThresholds(mem_pressure_full_avg60=5.0, swap_used_warn_mb=512.0)
+def _mem_ev() -> HostAlertEvaluator:
+    return HostAlertEvaluator(
+        HostAlertThresholds(mem_pressure_full_avg60=5.0, swap_pages_per_sec_warn=200.0)
     )
-    assert ev.evaluate(_snap(mem_pressure_full_avg60=1.0, swap_used_mb=10.0)) == []
-    assert [t.code for t in ev.evaluate(_snap(mem_pressure_full_avg60=9.0, swap_used_mb=10.0))] == [
-        "HOST_MEM_PRESSURE"
-    ]
 
-    ev2 = HostAlertEvaluator(
-        HostAlertThresholds(mem_pressure_full_avg60=5.0, swap_used_warn_mb=512.0)
+
+def test_mem_pressure_fires_on_either_psi_or_paging_rate():
+    ev = _mem_ev()
+    assert ev.evaluate(_snap(mem_pressure_full_avg60=1.0, swap_pages_per_sec=5.0)) == []
+    assert [
+        t.code for t in ev.evaluate(_snap(mem_pressure_full_avg60=9.0, swap_pages_per_sec=5.0))
+    ] == ["HOST_MEM_PRESSURE"]
+
+    ev2 = _mem_ev()
+    assert [
+        t.code for t in ev2.evaluate(_snap(mem_pressure_full_avg60=0.1, swap_pages_per_sec=900.0))
+    ] == ["HOST_MEM_PRESSURE"]
+
+
+def test_parked_swap_with_flat_psi_is_not_pressure():
+    """Regression: 611MB of cold swap left over from an incident is not an alert.
+
+    Observed on the live host -- swap_used sat at 611MB for hours with PSI
+    pinned at 0.0 and no paging traffic. An occupancy threshold fired on every
+    single sample; the rate-based rule must stay silent.
+    """
+
+    ev = _mem_ev()
+    snap = _snap(
+        mem_pressure_full_avg60=0.0,
+        swap_used_mb=611.0,
+        swap_total_mb=2048.0,
+        swap_pages_per_sec=0.0,
     )
-    assert [t.code for t in ev2.evaluate(_snap(mem_pressure_full_avg60=0.1, swap_used_mb=900.0))] == [
-        "HOST_MEM_PRESSURE"
-    ]
+    assert ev.evaluate(snap) == []
+    assert ev.active_codes == ()
 
 
 def test_incident_20260817_replay(stub_host):
