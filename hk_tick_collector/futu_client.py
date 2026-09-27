@@ -20,6 +20,8 @@ from .db import PersistResult, SQLiteTickStore, db_path_for_trading_day
 from .market_state import MarketCalendar, MarketState, resolve_market_state
 from .mapping import ticker_df_to_rows
 from .models import TickRow
+from .host_alerts import HostAlertEvaluator, HostAlertThresholds
+from .host_sensor import HostSensor, HostSnapshot
 from .notifiers.telegram import (
     AlertEvent,
     HealthSnapshot,
@@ -117,10 +119,34 @@ class FutuQuoteClient:
         self._watchdog_dumped = False
         self._last_busy_backoff_count = 0
         self._last_snapshot_sid: str | None = None
+        # Host sensing runs on the same 60s cadence as the health loop; the
+        # evaluator keeps the fire/resolve state so nothing is periodic.
+        self._host_sensor: HostSensor | None = None
+        self._host_evaluator: HostAlertEvaluator | None = None
+        self._host_snapshot: HostSnapshot | None = None
+        if getattr(self._config, "host_monitor_enabled", False):
+            self._host_sensor = HostSensor(
+                baseline_pct=self._config.host_cpu_baseline_pct,
+                disk_path=self._config.host_disk_path,
+            )
+            self._host_evaluator = HostAlertEvaluator(
+                HostAlertThresholds(
+                    cpu_burn_sustain_sec=self._config.host_cpu_burn_sustain_sec,
+                    cpu_steal_alert_pct=self._config.host_cpu_steal_alert_pct,
+                    disk_warn_pct=self._config.host_disk_warn_pct,
+                    disk_alert_pct=self._config.host_disk_alert_pct,
+                    mem_pressure_full_avg60=self._config.host_mem_pressure_full_avg60,
+                    swap_pages_per_sec_warn=self._config.host_swap_pages_per_sec_warn,
+                )
+            )
         self._sqlite_busy_active = False
         self._sqlite_busy_eid: str | None = None
         self._disconnect_active = False
         self._disconnect_eid: str | None = None
+        self._subscribed_symbols: List[str] = list(self._config.symbols)
+        self._unavailable_symbols: Dict[str, str] = {}
+        self._symbol_unavailable_active = False
+        self._symbol_unavailable_eid: str | None = None
         self._last_poll_stats_log_at: float = 0.0
         self._last_offhours_probe_at: float = 0.0
         self._market_calendar = MarketCalendar(
@@ -256,23 +282,155 @@ class FutuQuoteClient:
         logger.info(
             "futu_connecting host=%s port=%s", self._config.futu_host, self._config.futu_port
         )
-        ret, data = self._ctx.subscribe(
-            self._config.symbols,
-            [SubType.TICKER],
-            subscribe_push=True,
-            session=Session.ALL,
+        subscribed_symbols, unavailable_symbols = self._subscribe_symbols_resilient(
+            self._config.symbols
         )
-        logger.info("subscribe ret=%s msg=%s symbols=%s", ret, data, ",".join(self._config.symbols))
-        if ret != RET_OK:
-            raise RuntimeError(f"subscribe failed: {data}")
+        self._subscribed_symbols = subscribed_symbols
+        previous_unavailable = dict(self._unavailable_symbols)
+        self._unavailable_symbols = unavailable_symbols
+        if not self._subscribed_symbols:
+            summary = self._format_unavailable_symbols(unavailable_symbols)
+            raise RuntimeError(f"subscribe failed: no subscribable symbols ({summary})")
 
         self._connected = True
         logger.info(
-            "futu_connected host=%s port=%s", self._config.futu_host, self._config.futu_port
+            "futu_connected host=%s port=%s subscribed_symbols=%s unavailable_symbols=%s",
+            self._config.futu_host,
+            self._config.futu_port,
+            len(self._subscribed_symbols),
+            len(self._unavailable_symbols),
+        )
+        self._publish_symbol_availability_alert(previous_unavailable=previous_unavailable)
+        logger.info(
+            "futu_subscribed active=%s unavailable=%s",
+            ",".join(self._subscribed_symbols),
+            self._format_unavailable_symbols(self._unavailable_symbols),
         )
 
         if self._config.backfill_n > 0:
             await self._backfill_recent()
+
+    def _subscribe_symbols_resilient(
+        self, symbols: Sequence[str]
+    ) -> tuple[List[str], Dict[str, str]]:
+        if self._ctx is None:
+            raise RuntimeError("quote context is not initialized")
+        subscribed, unavailable = self._subscribe_symbol_group(list(symbols))
+        if unavailable:
+            logger.warning(
+                "subscribe_partial_ok subscribed=%s unavailable=%s details=%s",
+                len(subscribed),
+                len(unavailable),
+                self._format_unavailable_symbols(unavailable),
+            )
+        return subscribed, unavailable
+
+    def _subscribe_symbol_group(self, symbols: Sequence[str]) -> tuple[List[str], Dict[str, str]]:
+        if not symbols:
+            return [], {}
+        if self._ctx is None:
+            raise RuntimeError("quote context is not initialized")
+
+        ret, data = self._ctx.subscribe(
+            list(symbols),
+            [SubType.TICKER],
+            subscribe_push=True,
+            session=Session.ALL,
+        )
+        logger.info("subscribe ret=%s msg=%s symbols=%s", ret, data, ",".join(symbols))
+        if ret == RET_OK:
+            return list(symbols), {}
+
+        if len(symbols) == 1:
+            symbol = str(symbols[0])
+            reason = self._truncate_subscribe_error(data)
+            logger.warning("subscribe_symbol_failed symbol=%s msg=%s", symbol, reason)
+            return [], {symbol: reason}
+
+        midpoint = max(1, len(symbols) // 2)
+        left_subscribed, left_unavailable = self._subscribe_symbol_group(symbols[:midpoint])
+        right_subscribed, right_unavailable = self._subscribe_symbol_group(symbols[midpoint:])
+        unavailable = dict(left_unavailable)
+        unavailable.update(right_unavailable)
+        return left_subscribed + right_subscribed, unavailable
+
+    @staticmethod
+    def _truncate_subscribe_error(data: object) -> str:
+        text = str(data).strip()
+        return text[:200] if text else "unknown subscribe error"
+
+    def _format_unavailable_symbols(self, items: Dict[str, str]) -> str:
+        if not items:
+            return "none"
+        pairs = [f"{symbol}({reason})" for symbol, reason in sorted(items.items())[:5]]
+        if len(items) > 5:
+            pairs.append(f"+{len(items) - 5} more")
+        return ",".join(pairs)
+
+    def _publish_symbol_availability_alert(
+        self, *, previous_unavailable: Dict[str, str]
+    ) -> None:
+        if self._notifier is None:
+            return
+
+        trading_day = self._current_trading_day()
+        if self._unavailable_symbols:
+            if self._symbol_unavailable_active and previous_unavailable == self._unavailable_symbols:
+                return
+            if self._symbol_unavailable_active:
+                self._notifier.resolve_alert(
+                    code="SYMBOL_UNAVAILABLE",
+                    fingerprint="SYMBOL_UNAVAILABLE",
+                    trading_day=trading_day,
+                    summary_lines=[
+                        f"cleared_previous={self._format_unavailable_symbols(previous_unavailable)}"
+                    ],
+                    sid=self._last_snapshot_sid,
+                    eid=self._symbol_unavailable_eid,
+                )
+
+            event = AlertEvent(
+                created_at=datetime.now(tz=timezone.utc),
+                code="SYMBOL_UNAVAILABLE",
+                key="SYMBOL_UNAVAILABLE",
+                fingerprint="SYMBOL_UNAVAILABLE",
+                trading_day=trading_day,
+                severity=NotifySeverity.WARN.value,
+                headline="注意：部分股票無法訂閱，已自動跳過",
+                impact="其餘股票維持採集；被跳過的股票暫時不會有即時資料",
+                summary_lines=[
+                    f"configured={len(self._config.symbols)} subscribed={len(self._subscribed_symbols)} unavailable={len(self._unavailable_symbols)}",
+                    f"symbols={','.join(sorted(self._unavailable_symbols)[:8])}",
+                    f"detail={self._format_unavailable_symbols(self._unavailable_symbols)}",
+                ],
+                suggestions=[
+                    "sudo grep -n '^FUTU_SYMBOLS=' /etc/hk-tick-collector.env",
+                    "移除已下市/改代碼股票後重啟 hk-tick-collector",
+                ],
+                sid=self._last_snapshot_sid,
+            )
+            self._symbol_unavailable_active = True
+            self._symbol_unavailable_eid = event.eid
+            logger.warning(
+                "alert_event code=SYMBOL_UNAVAILABLE eid=%s sid=%s count=%s",
+                event.eid,
+                event.sid or "none",
+                len(self._unavailable_symbols),
+            )
+            self._notifier.submit_alert(event)
+            return
+
+        if self._symbol_unavailable_active:
+            self._notifier.resolve_alert(
+                code="SYMBOL_UNAVAILABLE",
+                fingerprint="SYMBOL_UNAVAILABLE",
+                trading_day=trading_day,
+                summary_lines=[f"subscribed={len(self._subscribed_symbols)} unavailable=0"],
+                sid=self._last_snapshot_sid,
+                eid=self._symbol_unavailable_eid,
+            )
+            self._symbol_unavailable_active = False
+            self._symbol_unavailable_eid = None
 
     async def _monitor_connection(self) -> None:
         while not self._stop_event.is_set():
@@ -314,7 +472,7 @@ class FutuQuoteClient:
                 await self._sleep_with_stop(self._config.poll_interval_sec)
                 continue
 
-            for symbol in self._config.symbols:
+            for symbol in self._subscribed_symbols:
                 if self._stop_event.is_set():
                     break
                 if self._ctx is None:
@@ -448,6 +606,8 @@ class FutuQuoteClient:
                     max_ts_utc,
                 )
 
+            await self._tick_host_monitor()
+
             snapshot = await self._build_health_snapshot(
                 now=now,
                 queue_size=queue_size,
@@ -571,7 +731,7 @@ class FutuQuoteClient:
     async def _backfill_recent(self) -> None:
         if self._ctx is None:
             return
-        for symbol in self._config.symbols:
+        for symbol in self._subscribed_symbols:
             ret, data = self._ctx.get_rt_ticker(symbol, num=self._config.backfill_n)
             if ret != RET_OK:
                 logger.warning("backfill failed for %s: %s", symbol, data)
@@ -855,7 +1015,7 @@ class FutuQuoteClient:
         if self._notifier is not None:
             trading_day = self._current_trading_day()
             persisted_parts = []
-            for symbol in self._config.symbols:
+            for symbol in self._subscribed_symbols:
                 persisted_parts.append(f"{symbol}={self._last_persisted_seq.get(symbol, 'none')}")
             event = AlertEvent(
                 created_at=datetime.now(tz=timezone.utc),
@@ -1170,7 +1330,7 @@ class FutuQuoteClient:
             drift_from_db = drift_sec
 
         symbols: List[SymbolSnapshot] = []
-        for symbol in self._config.symbols:
+        for symbol in self._subscribed_symbols:
             last_tick = self._last_tick_seen_at.get(symbol)
             age_sec = None if last_tick is None else max(0.0, now - last_tick)
             seen = self._last_seen_seq.get(symbol)
@@ -1208,7 +1368,77 @@ class FutuQuoteClient:
             system_load1=load1,
             system_rss_mb=rss_mb,
             system_disk_free_gb=disk_free_gb,
+            host=self._host_snapshot,
+            host_alert_codes=self._active_host_alert_codes(),
         )
+
+    def _active_host_alert_codes(self) -> tuple[str, ...]:
+        if self._host_evaluator is None:
+            return ()
+        return self._host_evaluator.active_codes
+
+    async def _tick_host_monitor(self) -> None:
+        """Sample the host and dispatch any threshold transitions.
+
+        Sampling touches ~400 /proc entries, so it is pushed off the event
+        loop. Failures here must never disturb ingestion: the collector was
+        the healthy component during the incident this monitors for.
+        """
+
+        if self._host_sensor is None or self._host_evaluator is None:
+            return
+        try:
+            snapshot = await asyncio.to_thread(self._host_sensor.sample)
+        except Exception:
+            logger.exception("host_sensor_sample_failed")
+            return
+        self._host_snapshot = snapshot
+
+        try:
+            transitions = self._host_evaluator.evaluate(snapshot)
+        except Exception:
+            logger.exception("host_alert_evaluate_failed")
+            return
+        if not transitions or self._notifier is None:
+            return
+
+        trading_day = self._current_trading_day()
+        for transition in transitions:
+            if transition.action == "resolve":
+                logger.info("host_alert_resolved code=%s", transition.code)
+                self._notifier.resolve_alert(
+                    code=transition.code,
+                    fingerprint=transition.fingerprint,
+                    trading_day=trading_day,
+                    summary_lines=list(transition.summary_lines),
+                    sid=self._last_snapshot_sid,
+                )
+                continue
+            severity = (
+                NotifySeverity.ALERT.value
+                if transition.severity == "ALERT"
+                else NotifySeverity.WARN.value
+            )
+            event = AlertEvent(
+                created_at=datetime.now(tz=timezone.utc),
+                code=transition.code,
+                key=transition.code,
+                fingerprint=transition.fingerprint,
+                trading_day=trading_day,
+                severity=severity,
+                headline=transition.headline,
+                impact=transition.impact,
+                summary_lines=list(transition.summary_lines),
+                suggestions=list(transition.suggestions),
+                sid=self._last_snapshot_sid,
+            )
+            logger.warning(
+                "alert_event code=%s eid=%s severity=%s",
+                transition.code,
+                event.eid,
+                severity,
+            )
+            self._notifier.submit_alert(event)
 
     async def _sleep_with_stop(self, delay: float) -> None:
         if delay <= 0:

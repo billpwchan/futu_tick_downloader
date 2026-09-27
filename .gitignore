@@ -40,3 +40,10 @@ dist/
 # Tooling caches
 .mypy_cache/
 .ruff_cache/
+
+# Futu SDK runtime state / logs (created next to HOME at import time)
+.com.futunn.FutuOpenD/
+
+# Server-side operational artifacts (should never be committed)
+.jchart-backups/
+scripts/*.before-venv-fix-*

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec python3 -m hk_tick_collector.cli.main "$@"
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+python_bin="${HK_TICK_PYTHON:-$repo_dir/.venv/bin/python}"
+if [[ ! -x "$python_bin" ]]; then
+  echo "Missing project Python runtime: $python_bin" >&2
+  exit 1
+fi
+cd "$repo_dir"
+exec "$python_bin" -m hk_tick_collector.cli.main "$@"

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 from hk_tick_collector.db import SQLiteTickStore
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "hk-tickctl"
+
+# hk-tickctl deliberately refuses to fall back to the system interpreter, so it
+# requires either a repo-local .venv or an explicit override. Point it at the
+# interpreter running the tests rather than weakening that guarantee.
+_ENV = {**os.environ, "HK_TICK_PYTHON": sys.executable}
 
 
 def _prepare_db(root: Path, day: str) -> None:
@@ -51,6 +58,7 @@ def test_script_db_stats(tmp_path: Path) -> None:
             day,
         ],
         cwd=str(ROOT),
+        env=_ENV,
         capture_output=True,
         text=True,
         check=False,
@@ -96,6 +104,7 @@ def test_script_db_top_symbols(tmp_path: Path) -> None:
             "volume",
         ],
         cwd=str(ROOT),
+        env=_ENV,
         capture_output=True,
         text=True,
         check=False,
@@ -122,6 +131,7 @@ def test_script_status_and_export_report(tmp_path: Path) -> None:
             day,
         ],
         cwd=str(ROOT),
+        env=_ENV,
         capture_output=True,
         text=True,
         check=False,
@@ -144,6 +154,7 @@ def test_script_status_and_export_report(tmp_path: Path) -> None:
             str(out),
         ],
         cwd=str(ROOT),
+        env=_ENV,
         capture_output=True,
         text=True,
         check=False,
@@ -170,6 +181,7 @@ def test_script_export_gaps(tmp_path: Path) -> None:
             str(out),
         ],
         cwd=str(ROOT),
+        env=_ENV,
         capture_output=True,
         text=True,
         check=False,
@@ -194,6 +206,7 @@ def test_script_legacy_export_tar(tmp_path: Path) -> None:
             str(out),
         ],
         cwd=str(ROOT),
+        env=_ENV,
         capture_output=True,
         text=True,
         check=False,
