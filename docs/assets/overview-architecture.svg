@@ -1,64 +1,74 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="HK Tick Collector 架構總覽">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="630" viewBox="0 0 1280 630" role="img" aria-labelledby="title desc">
+  <title id="title">HK Tick Collector 資料流</title>
+  <desc id="desc">正式行情經標準化、記憶體佇列及寫入執行緒存入每日 SQLite。Mock 回放直接寫入測試資料庫。SQLite 可產生校驗歸檔；監控訊號送往 Telegram。</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#eef4ff"/>
-      <stop offset="100%" stop-color="#f6fff2"/>
-    </linearGradient>
     <style>
-      .title { font: 700 34px 'Noto Sans TC', sans-serif; fill: #1b2a4a; }
-      .label { font: 600 20px 'Noto Sans TC', sans-serif; fill: #1f2f3f; }
-      .small { font: 500 16px 'Noto Sans TC', sans-serif; fill: #334155; }
-      .box { fill: #ffffff; stroke: #3b82f6; stroke-width: 2; rx: 14; }
-      .box2 { fill: #ffffff; stroke: #10b981; stroke-width: 2; rx: 14; }
-      .box3 { fill: #ffffff; stroke: #f59e0b; stroke-width: 2; rx: 14; }
-      .arrow { stroke: #1e293b; stroke-width: 2.5; marker-end: url(#m); }
+      .title { font: 700 31px system-ui, sans-serif; fill: #102a43; }
+      .tag { font: 700 16px system-ui, sans-serif; fill: #486581; }
+      .name { font: 700 20px system-ui, sans-serif; fill: #102a43; }
+      .detail { font: 400 15px system-ui, sans-serif; fill: #486581; }
+      .card { fill: #ffffff; stroke: #b4c6d6; stroke-width: 1.5; }
+      .source { fill: #e8f2ff; stroke: #77a7e7; }
+      .data { fill: #e5f7ee; stroke: #75c99e; }
+      .ops { fill: #fff4df; stroke: #e5b95c; }
+      .line { fill: none; stroke: #52718a; stroke-width: 2.5; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #52718a; stroke-width: 2.5; stroke-dasharray: 7 6; marker-end: url(#arrow); }
     </style>
-    <marker id="m" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L0,6 L9,3 z" fill="#1e293b" />
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#52718a"/>
     </marker>
   </defs>
+  <rect width="1280" height="630" fill="#f7fafd"/>
+  <text x="40" y="55" class="title">從行情到可驗證的日檔</text>
+  <text x="40" y="92" class="tag">正式採集</text>
 
-  <rect x="0" y="0" width="1280" height="640" fill="url(#bg)"/>
-  <text x="40" y="60" class="title">HK Tick Collector Architecture</text>
+  <rect x="40" y="112" width="205" height="118" rx="14" class="card source"/>
+  <text x="59" y="154" class="name">Futu OpenD</text>
+  <text x="59" y="184" class="detail">Push + 可選 poll 備援</text>
 
-  <rect x="40" y="110" width="220" height="90" class="box"/>
-  <text x="70" y="165" class="label">Futu OpenD</text>
+  <rect x="284" y="112" width="205" height="118" rx="14" class="card"/>
+  <text x="303" y="154" class="name">映射與校驗</text>
+  <text x="303" y="184" class="detail">欄位標準化</text>
 
-  <rect x="40" y="240" width="220" height="90" class="box"/>
-  <text x="80" y="295" class="label">Poll Fallback</text>
+  <rect x="528" y="112" width="205" height="118" rx="14" class="card"/>
+  <text x="547" y="154" class="name">記憶體佇列</text>
+  <text x="547" y="184" class="detail">有限容量、批次緩衝</text>
 
-  <rect x="40" y="370" width="220" height="90" class="box"/>
-  <text x="70" y="425" class="label">Mock Replay</text>
+  <rect x="772" y="112" width="205" height="118" rx="14" class="card"/>
+  <text x="791" y="154" class="name">寫入執行緒</text>
+  <text x="791" y="184" class="detail">批次 commit、重試</text>
 
-  <rect x="330" y="180" width="270" height="120" class="box2"/>
-  <text x="360" y="235" class="label">Mapper / Validator</text>
-  <text x="360" y="265" class="small">資料清洗、欄位標準化</text>
+  <rect x="1016" y="112" width="224" height="118" rx="14" class="card data"/>
+  <text x="1035" y="154" class="name">SQLite WAL</text>
+  <text x="1035" y="184" class="detail">YYYYMMDD.db</text>
 
-  <rect x="660" y="180" width="220" height="120" class="box2"/>
-  <text x="700" y="235" class="label">Queue</text>
-  <text x="700" y="265" class="small">批次緩衝</text>
+  <path d="M245 171 H284" class="line"/>
+  <path d="M489 171 H528" class="line"/>
+  <path d="M733 171 H772" class="line"/>
+  <path d="M977 171 H1016" class="line"/>
 
-  <rect x="930" y="150" width="280" height="120" class="box2"/>
-  <text x="965" y="205" class="label">Persist Worker Thread</text>
-  <text x="965" y="235" class="small">SQLite WAL 寫入</text>
+  <text x="40" y="296" class="tag">本機體驗：與正式採集分開</text>
+  <rect x="40" y="318" width="267" height="100" rx="14" class="card source"/>
+  <text x="59" y="357" class="name">Mock replay</text>
+  <text x="59" y="384" class="detail">產生示範 tick</text>
+  <rect x="356" y="318" width="267" height="100" rx="14" class="card data"/>
+  <text x="375" y="357" class="name">測試 SQLite DB</text>
+  <text x="375" y="384" class="detail">直接寫入，可查詢行數</text>
+  <path d="M307 368 H356" class="dash"/>
 
-  <rect x="930" y="320" width="280" height="120" class="box3"/>
-  <text x="980" y="375" class="label">Health + Watchdog</text>
-  <text x="980" y="405" class="small">狀態監測 / 自癒</text>
+  <text x="748" y="296" class="tag">日終資料處理</text>
+  <rect x="748" y="318" width="492" height="100" rx="14" class="card data"/>
+  <text x="767" y="357" class="name">SQLite backup → zstd → 校驗</text>
+  <text x="767" y="384" class="detail">SHA-256 + manifest，通過後才可清理舊原檔</text>
+  <path d="M1128 230 V273 H994 V318" class="line"/>
 
-  <rect x="930" y="490" width="280" height="100" class="box3"/>
-  <text x="1000" y="548" class="label">Telegram Notifier</text>
-
-  <rect x="660" y="390" width="220" height="120" class="box2"/>
-  <text x="690" y="445" class="label">SQLite WAL</text>
-  <text x="690" y="475" class="small">YYYYMMDD.db</text>
-
-  <line x1="260" y1="155" x2="330" y2="220" class="arrow"/>
-  <line x1="260" y1="285" x2="330" y2="240" class="arrow"/>
-  <line x1="260" y1="415" x2="330" y2="260" class="arrow"/>
-  <line x1="600" y1="240" x2="660" y2="240" class="arrow"/>
-  <line x1="880" y1="240" x2="930" y2="210" class="arrow"/>
-  <line x1="1070" y1="270" x2="1070" y2="320" class="arrow"/>
-  <line x1="1070" y1="440" x2="1070" y2="490" class="arrow"/>
-  <line x1="930" y1="210" x2="880" y2="430" class="arrow"/>
+  <text x="40" y="487" class="tag">可觀測性</text>
+  <rect x="40" y="507" width="378" height="93" rx="14" class="card ops"/>
+  <text x="59" y="545" class="name">Health / Watchdog / 主機監控</text>
+  <text x="59" y="572" class="detail">寫入、佇列、CPU、磁碟與記憶體</text>
+  <rect x="470" y="507" width="294" height="93" rx="14" class="card ops"/>
+  <text x="489" y="545" class="name">Telegram 通知</text>
+  <text x="489" y="572" class="detail">健康摘要、異常與恢復</text>
+  <path d="M418 553 H470" class="line"/>
+  <text x="828" y="545" class="detail">collector failed 時由 systemd OnFailure 補發通知</text>
 </svg>

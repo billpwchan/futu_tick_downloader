@@ -83,6 +83,6 @@ body:
     attributes:
       label: 日誌片段（最近 10~30 分鐘）
       placeholder: |
-        scripts/hk-tickctl logs --ops --since "20 minutes ago"
+        scripts/hk-tickctl logs --ops 1 --since "20 minutes ago"
     validations:
       required: true

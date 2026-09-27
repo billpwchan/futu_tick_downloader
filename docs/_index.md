@@ -9,7 +9,7 @@
 - SRE/運維：先看 [`/docs/02-部署到 AWS Lightsail（Ubuntu）.md`](02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md) + [`/docs/04-運維 Runbook.md`](04-%E9%81%8B%E7%B6%AD%20Runbook.md)
   - 含 OpenD 登錄短信驗證、行情權限優先（`auto_hold_quote_right`）、常見故障對照表
 - 收盤自動化：看 [`/docs/09-收盤後自動化（歸檔與本地拉取）.md`](09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)
-- 收盤全手動（低 CPU）：看 [`/docs/10-手動批次拉回與轉ZIP（低CPU）.md`](10-%E6%89%8B%E5%8B%95%E6%89%B9%E6%AC%A1%E6%8B%89%E5%9B%9E%E8%88%87%E8%BD%89ZIP%EF%BC%88%E4%BD%8ECPU%EF%BC%89.md)
+- 歷史資料手動導出與恢復（低 CPU）：看 [`/docs/10-手動批次拉回與轉ZIP（低CPU）.md`](10-%E6%89%8B%E5%8B%95%E6%89%B9%E6%AC%A1%E6%8B%89%E5%9B%9E%E8%88%87%E8%BD%89ZIP%EF%BC%88%E4%BD%8ECPU%EF%BC%89.md)
 - 交易資料品質：看 [`/docs/quality.md`](quality.md) + [`/docs/hk-tickctl.md`](hk-tickctl.md)
 - Telegram 值班：先看 [`/docs/telegram.md`](telegram.md) + [`/docs/runbook/telegram-actions.md`](runbook/telegram-actions.md)
 

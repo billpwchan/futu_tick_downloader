@@ -34,6 +34,8 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   install -m 0640 -o root -g "${RUN_GROUP}" "${APP_DIR}/deploy/env/.env.example" "${ENV_FILE}"
   echo "[資訊] 已建立 ${ENV_FILE}（請先填入 FUTU/TG 設定）"
 fi
+chown "root:${RUN_GROUP}" "${ENV_FILE}"
+chmod 0640 "${ENV_FILE}"
 
 "${PYTHON_BIN}" -m venv "${APP_DIR}/.venv"
 "${APP_DIR}/.venv/bin/pip" install --upgrade pip
