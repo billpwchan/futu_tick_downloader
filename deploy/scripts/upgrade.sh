@@ -28,8 +28,23 @@ echo "[步驟] 更新 Python 依賴"
 "${APP_DIR}/.venv/bin/pip" install --upgrade pip
 "${APP_DIR}/.venv/bin/pip" install -e "${APP_DIR}"
 
+echo "[步驟] 更新 systemd units"
+install -m 0644 "${APP_DIR}/deploy/systemd/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+chmod 0755 "${APP_DIR}/deploy/scripts/notify_unit_failure.sh"
+install -m 0644 "${APP_DIR}/deploy/systemd/hk-tick-collector-failure@.service" "/etc/systemd/system/hk-tick-collector-failure@.service"
+install -d -m 0755 "/etc/systemd/system/${SERVICE_NAME}.service.d"
+install -m 0644 "${APP_DIR}/deploy/systemd/hk-tick-collector.service.d-onfailure.conf" "/etc/systemd/system/${SERVICE_NAME}.service.d/onfailure.conf"
+if [[ -f /etc/systemd/system/hk-tick-eod-archive.timer ]]; then
+  install -m 0644 "${APP_DIR}/deploy/systemd/hk-tick-eod-archive.service" /etc/systemd/system/hk-tick-eod-archive.service
+  install -m 0644 "${APP_DIR}/deploy/systemd/hk-tick-eod-archive.timer" /etc/systemd/system/hk-tick-eod-archive.timer
+fi
+systemctl daemon-reload
+
 echo "[步驟] 重啟服務"
 systemctl restart "${SERVICE_NAME}.service"
+if systemctl is-enabled --quiet hk-tick-eod-archive.timer; then
+  systemctl restart hk-tick-eod-archive.timer
+fi
 systemctl --no-pager --full status "${SERVICE_NAME}.service" | sed -n '1,20p'
 
 echo "[完成] ${SERVICE_NAME} 升級完成"

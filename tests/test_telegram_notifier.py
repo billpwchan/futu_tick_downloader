@@ -325,7 +325,9 @@ def test_router_db_output_is_truncated():
             expanded=True,
             include_system_metrics=True,
         ),
-        render_alert_compact_fn=lambda *_: render_alert_compact(event=_make_alert(), market_mode="open"),
+        render_alert_compact_fn=lambda *_: render_alert_compact(
+            event=_make_alert(), market_mode="open"
+        ),
         render_alert_detail_fn=lambda *_: render_alert_detail(
             event=_make_alert(),
             market_mode="open",

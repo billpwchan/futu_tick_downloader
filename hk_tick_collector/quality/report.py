@@ -13,6 +13,7 @@ from hk_tick_collector import __version__
 
 from .config import QualityConfig, TradingSession
 
+
 def quality_report_path(data_root: Path, trading_day: str, config: QualityConfig) -> Path:
     root = Path(data_root) / config.report_rel_dir
     return root / f"{trading_day}.json"
@@ -60,9 +61,7 @@ def generate_quality_report(
                         "symbol": item[0],
                         "rows": int(item[1] or 0),
                         "latest_ts_ms": int(item[2]) if item[2] is not None else None,
-                        "latest_hkt": _fmt_hkt_ms(
-                            int(item[2]), tzinfo=quality_config.tzinfo
-                        )
+                        "latest_hkt": _fmt_hkt_ms(int(item[2]), tzinfo=quality_config.tzinfo)
                         if item[2] is not None
                         else "n/a",
                     }
@@ -315,8 +314,10 @@ def _compact_to_dash(day: str) -> str:
 def _fmt_hkt_ms(ts_ms: int | None, *, tzinfo) -> str:
     if ts_ms is None:
         return "n/a"
-    return datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=timezone.utc).astimezone(tzinfo).strftime(
-        "%Y-%m-%d %H:%M:%S"
+    return (
+        datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=timezone.utc)
+        .astimezone(tzinfo)
+        .strftime("%Y-%m-%d %H:%M:%S")
     )
 
 

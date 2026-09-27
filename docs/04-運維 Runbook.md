@@ -72,13 +72,13 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK \
   --verify 1
 ```
 
-## 6) 每日自動化（systemd + 本地拉取）
+## 6) 每日自動化（systemd + JChart 鏡像）
 
-若要啟用「16:30（UTC+8）服務器歸檔 + 17:10（UTC+8）本地拉取轉 zip」，請看：
+目前順序為 JChart 18:10（香港時間）發布 ZIP、collector 18:30 歸檔、JChart 本地 19:00 鏡像。安裝及驗證方式請看：
 
 - [`/docs/09-收盤後自動化（歸檔與本地拉取）.md`](09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)
 
-若要全手動（低 CPU，不走 zstd 歸檔），請看：
+若要手動批次導出作災難恢復（低 CPU），請看：
 
 - [`/docs/10-手動批次拉回與轉ZIP（低CPU）.md`](10-%E6%89%8B%E5%8B%95%E6%89%B9%E6%AC%A1%E6%8B%89%E5%9B%9E%E8%88%87%E8%BD%89ZIP%EF%BC%88%E4%BD%8ECPU%EF%BC%89.md)
 

@@ -31,8 +31,9 @@ make db-stats
 ```bash
 git clone https://github.com/billpwchan/futu_tick_downloader.git
 cd futu_tick_downloader
-cp deploy/env/.env.example /etc/hk-tick-collector.env
 sudo bash deploy/scripts/install.sh
+sudoedit /etc/hk-tick-collector.env
+sudo systemctl restart hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
 
@@ -71,6 +72,7 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK \
 - 訊息結構：`結論 -> 關鍵指標 -> 下一步`
 - 每則訊息提供互動按鈕：`🔎 詳情` / `🧾 日誌` / `🗃 DB` / `🧯 建議`
 - 互動模式可選啟用：`TG_INTERACTIVE_ENABLED=1`
+- 主機資源監控可觀察 CPU 額度耗用、steal、磁碟與記憶體壓力；systemd `OnFailure` 在 collector 進入 failed 狀態時發通知。設定見[配置說明](docs/03-%E9%85%8D%E7%BD%AE%E8%AA%AA%E6%98%8E%EF%BC%88.env%EF%BC%89.md)。
 
 示例 1（盤中 HEALTH）：
 
@@ -178,11 +180,11 @@ scripts/hk-tickctl archive --data-root /data/sqlite/HK --day 20260213 --verify 1
 - Runbook：[`docs/04-運維 Runbook.md`](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)
 - Telegram 互動通知：[`docs/telegram.md`](docs/telegram.md)
 
-## Roadmap
+## 目前能力與限制
 
-- `v0.1`: 穩定採集 + WAL + Telegram 產品化通知 + 基礎 runbook。
-- `v0.2`: 壓縮存儲、日終歸檔、自動匯出校驗包。
-- `v1.0`: topic 細分路由、symbol 規模擴展、可選多儲存後端。
+- 已有逐日 SQLite WAL、品質報告、經校驗的 zstd 歸檔、Telegram 通知與主機資源告警。
+- Collector 使用記憶體佇列；程序停止期間的資料需依 Futu 可用歷史資料補回，不能把通知等同於資料完整性保證。
+- 盤後自動化依賴獨立的 JChart 發布與鏡像任務；部署順序與故障邊界見[收盤後自動化](docs/09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)。
 
 ## 社群與治理
 

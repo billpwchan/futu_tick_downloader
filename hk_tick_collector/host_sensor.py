@@ -295,9 +295,7 @@ class HostSnapshot:
     def top_line(self, limit: int = 3) -> str:
         if not self.top_processes:
             return "Top: n/a"
-        parts = [
-            f"{proc.name} {proc.cpu_pct_of_box:.1f}%" for proc in self.top_processes[:limit]
-        ]
+        parts = [f"{proc.name} {proc.cpu_pct_of_box:.1f}%" for proc in self.top_processes[:limit]]
         return "Top: " + "  ".join(parts)
 
 
@@ -457,9 +455,7 @@ class HostSensor:
         scored.sort(key=lambda item: item.cpu_pct_of_box, reverse=True)
         return tuple(scored[:5])
 
-    def _accumulate_overdraft(
-        self, util_avg: float | None, dt: float | None, now: float
-    ) -> None:
+    def _accumulate_overdraft(self, util_avg: float | None, dt: float | None, now: float) -> None:
         if util_avg is None:
             return
         excess = util_avg - self._baseline_pct

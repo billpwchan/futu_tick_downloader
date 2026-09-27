@@ -105,7 +105,9 @@ def test_store_writes_gaps_with_single_writer(tmp_path) -> None:
 
     conn = sqlite3.connect(tmp_path / f"{day}.db")
     try:
-        gap_count = conn.execute("SELECT COUNT(*) FROM gaps WHERE trading_day=?", (day,)).fetchone()[0]
+        gap_count = conn.execute(
+            "SELECT COUNT(*) FROM gaps WHERE trading_day=?", (day,)
+        ).fetchone()[0]
     finally:
         conn.close()
     assert gap_count == 1
