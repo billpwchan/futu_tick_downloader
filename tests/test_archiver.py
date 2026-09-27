@@ -4,6 +4,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from hk_tick_collector.archive import archiver
 from hk_tick_collector.archive.archiver import archive_daily_db
 from hk_tick_collector.db import SQLiteTickStore
 from hk_tick_collector.quality.config import QualityConfig
@@ -95,3 +98,81 @@ def test_archive_retention_delete_original_when_verified(tmp_path: Path) -> None
     )
 
     assert not old_db.exists()
+
+
+@pytest.mark.parametrize("damage", ["archive", "checksum", "manifest"])
+def test_retention_keeps_source_when_archive_metadata_is_damaged(
+    tmp_path: Path, damage: str
+) -> None:
+    old_day, new_day = "20260215", "20260216"
+    old_db = _prepare_db(tmp_path, old_day)
+    _prepare_db(tmp_path, new_day)
+    archive_dir = tmp_path / "archive"
+    old = archive_daily_db(
+        trading_day=old_day,
+        data_root=tmp_path,
+        archive_dir=archive_dir,
+        verify=True,
+        quality_config=_quality_cfg(),
+        compression="none",
+    )
+    if damage == "archive":
+        old.archive_file.write_bytes(b"damaged")
+    elif damage == "checksum":
+        old.checksum_file.write_text("incorrect checksum\n", encoding="utf-8")
+    else:
+        old.manifest_file.write_text("{}", encoding="utf-8")
+
+    archive_daily_db(
+        trading_day=new_day,
+        data_root=tmp_path,
+        archive_dir=archive_dir,
+        keep_days=1,
+        delete_original=True,
+        verify=True,
+        quality_config=_quality_cfg(),
+        compression="none",
+    )
+    assert old_db.exists()
+
+
+def test_archive_rejects_deletion_without_verification(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires verify"):
+        archive_daily_db(
+            trading_day="20260216",
+            data_root=tmp_path,
+            archive_dir=tmp_path / "archive",
+            delete_original=True,
+            verify=False,
+        )
+
+
+def test_failed_rerun_preserves_previous_archive(tmp_path: Path, monkeypatch) -> None:
+    day = "20260216"
+    _prepare_db(tmp_path, day)
+    archive_dir = tmp_path / "archive"
+    first = archive_daily_db(
+        trading_day=day,
+        data_root=tmp_path,
+        archive_dir=archive_dir,
+        verify=True,
+        quality_config=_quality_cfg(),
+        compression="none",
+    )
+    before = tuple(
+        path.read_bytes() for path in (first.archive_file, first.checksum_file, first.manifest_file)
+    )
+    monkeypatch.setattr(archiver, "_verify_archive", lambda **kwargs: (False, {"error": "test"}))
+
+    with pytest.raises(RuntimeError, match="archive verify failed"):
+        archive_daily_db(
+            trading_day=day,
+            data_root=tmp_path,
+            archive_dir=archive_dir,
+            verify=True,
+            quality_config=_quality_cfg(),
+            compression="none",
+        )
+    assert before == tuple(
+        path.read_bytes() for path in (first.archive_file, first.checksum_file, first.manifest_file)
+    )

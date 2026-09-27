@@ -87,7 +87,9 @@ def _extract_kpi(lines: Sequence[str]) -> tuple[str, str, str]:
             if m:
                 lag = f"{m.group(2)}s"
         if persist == "n/a":
-            m = re.search(r"(persisted_per_min|persisted|min|write|write_per_min)[=:]([0-9.]+)", text)
+            m = re.search(
+                r"(persisted_per_min|persisted|min|write|write_per_min)[=:]([0-9.]+)", text
+            )
             if m:
                 persist = f"{m.group(2)}/min"
         if queue == "n/a":
@@ -97,7 +99,9 @@ def _extract_kpi(lines: Sequence[str]) -> tuple[str, str, str]:
     return lag, persist, queue
 
 
-def _basic_health_buttons(context_id: str, *, include_mute: bool, include_refresh: bool) -> dict[str, Any]:
+def _basic_health_buttons(
+    context_id: str, *, include_mute: bool, include_refresh: bool
+) -> dict[str, Any]:
     row1 = [
         {"text": "🔎 詳情", "callback_data": _build_cb("d", context_id)},
         {"text": "🧾 近20分鐘日誌", "callback_data": _build_cb("log", context_id)},
@@ -156,8 +160,7 @@ def render_health_compact(
             f"rss={_format_float(rss_mb, 1)}MB | disk_free={_format_float(disk_free, 1)}GB"
         )
     lines.append(
-        "運行："
-        f"uptime={_format_uptime(uptime_sec)} | pid={getattr(snapshot, 'pid', 'n/a')}"
+        f"運行：uptime={_format_uptime(uptime_sec)} | pid={getattr(snapshot, 'pid', 'n/a')}"
     )
     lines.extend(
         [
@@ -260,11 +263,17 @@ def render_alert_compact(*, event: Any, market_mode: str) -> RenderOutput:
         [
             {"text": "🔎 詳情", "callback_data": _build_cb("d", event_id)},
             {"text": "🧾 近20分鐘日誌", "callback_data": _build_cb("log", event_id)},
-            {"text": "🗃 DB 狀態", "callback_data": _build_cb("db", str(getattr(event, "sid", "none") or "none"))},
+            {
+                "text": "🗃 DB 狀態",
+                "callback_data": _build_cb("db", str(getattr(event, "sid", "none") or "none")),
+            },
         ],
         [
             {"text": "🧯 建議/處置", "callback_data": _build_cb("sop", code)},
-            {"text": "🔄 刷新", "callback_data": _build_cb("rf", str(getattr(event, "sid", "none") or "none"))},
+            {
+                "text": "🔄 刷新",
+                "callback_data": _build_cb("rf", str(getattr(event, "sid", "none") or "none")),
+            },
         ],
     )
     return RenderOutput(text="\n".join(lines), reply_markup=keyboard)
@@ -288,10 +297,13 @@ def render_alert_detail(*, event: Any, market_mode: str, expanded: bool) -> Rend
         "<b>🔎 事件詳情（已展開）</b>",
         f"結論：{escape(code)} 事件詳細資訊",
         f"關鍵指標：市況={escape(_market_mode_label(market_mode))} | 條目={len(summary_lines)}",
-        "詳情：" + escape(" | ".join(_sanitize_line(item, 80) for item in summary_lines[:3]) or "n/a"),
+        "詳情："
+        + escape(" | ".join(_sanitize_line(item, 80) for item in summary_lines[:3]) or "n/a"),
     ]
     if suggestions:
-        lines.append("建議：" + escape("；".join(_sanitize_line(item, 80) for item in suggestions[:2])))
+        lines.append(
+            "建議：" + escape("；".join(_sanitize_line(item, 80) for item in suggestions[:2]))
+        )
     lines.append("下一步：內容已截斷，請用 🧾/🗃 看更多。")
     return RenderOutput(text="\n".join(lines))
 

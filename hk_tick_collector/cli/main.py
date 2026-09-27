@@ -60,8 +60,10 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 def _fmt_hkt(ts_ms: int | None, tzinfo: ZoneInfo) -> str:
     if ts_ms is None:
         return "n/a"
-    return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).astimezone(tzinfo).strftime(
-        "%Y-%m-%d %H:%M:%S"
+    return (
+        datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+        .astimezone(tzinfo)
+        .strftime("%Y-%m-%d %H:%M:%S")
     )
 
 
@@ -165,9 +167,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             if symbols_filter and symbol not in symbols_filter:
                 continue
             lag = (
-                round(max(0.0, (now_ms - int(latest)) / 1000.0), 3)
-                if latest is not None
-                else None
+                round(max(0.0, (now_ms - int(latest)) / 1000.0), 3) if latest is not None else None
             )
             print(
                 f"  {symbol} rows={int(count or 0)} latest_hkt={_fmt_hkt(int(latest) if latest else None, qcfg.tzinfo)} "
@@ -322,7 +322,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     service_name = _service_name()
     logs = _journal_lines(service=service_name, since=args.since)
     schema_line = next(
-        (line for line in reversed(logs) if "telegram_notifier_started" in line and "notify_schema=" in line),
+        (
+            line
+            for line in reversed(logs)
+            if "telegram_notifier_started" in line and "notify_schema=" in line
+        ),
         "",
     )
     health_enqueue = next(
@@ -420,7 +424,7 @@ def cmd_export_db(args: argparse.Namespace) -> int:
         out = out / f"{day}.backup.db"
     backup_sqlite_db(db_path, out)
     print(f"OK export_db={out}")
-    print(f"verify=sqlite3 {out} \"SELECT COUNT(*) FROM ticks;\"")
+    print(f'verify=sqlite3 {out} "SELECT COUNT(*) FROM ticks;"')
     return 0
 
 
@@ -595,7 +599,9 @@ def cmd_db_symbols(args: argparse.Namespace) -> int:
     print("symbol,rows,latest_ts_hkt,last_tick_age_sec")
     for symbol, count, latest in rows:
         lag = round(max(0.0, (now_ms - int(latest)) / 1000.0), 3) if latest is not None else None
-        print(f"{symbol},{int(count or 0)},{_fmt_hkt(int(latest) if latest else None, HK_TZ)},{lag}")
+        print(
+            f"{symbol},{int(count or 0)},{_fmt_hkt(int(latest) if latest else None, HK_TZ)},{lag}"
+        )
     return 0
 
 

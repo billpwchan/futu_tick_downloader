@@ -17,7 +17,9 @@ HZ = 100
 NCPU = 2
 
 
-def _cpu_times(*, busy_pct: float, steal_pct: float, elapsed_sec: float, prev: CpuTimes) -> CpuTimes:
+def _cpu_times(
+    *, busy_pct: float, steal_pct: float, elapsed_sec: float, prev: CpuTimes
+) -> CpuTimes:
     """Advance a CpuTimes by one interval at the given utilisation split."""
 
     total_delta = elapsed_sec * HZ * NCPU
@@ -51,13 +53,9 @@ def stub_host(monkeypatch):
 
     monkeypatch.setattr(host_sensor, "read_cpu_times", lambda: state["cpu"])
     monkeypatch.setattr(host_sensor, "_read_process_cpu_ticks", lambda: {})
-    monkeypatch.setattr(
-        host_sensor, "_read_disk", lambda path: (state["disk_pct"], 10.0, 58.0)
-    )
+    monkeypatch.setattr(host_sensor, "_read_disk", lambda path: (state["disk_pct"], 10.0, 58.0))
     monkeypatch.setattr(host_sensor, "_read_swap_mb", lambda: (2048.0, state["swap"]))
-    monkeypatch.setattr(
-        host_sensor, "_read_swap_events", lambda: (state["swpin"], state["swpout"])
-    )
+    monkeypatch.setattr(host_sensor, "_read_swap_events", lambda: (state["swpin"], state["swpout"]))
     monkeypatch.setattr(host_sensor, "_read_memory_pressure_full_avg60", lambda: state["psi"])
     return state
 

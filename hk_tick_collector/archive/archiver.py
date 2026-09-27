@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import socket
 import sqlite3
@@ -52,6 +53,8 @@ def archive_daily_db(
     quality_config: QualityConfig | None = None,
     compression: str = "zstd",
 ) -> ArchiveResult:
+    if delete_original and not verify:
+        raise ValueError("delete_original requires verify=True")
     quality_cfg = quality_config or QualityConfig.from_env()
     db_path = Path(data_root) / f"{trading_day}.db"
     if not db_path.exists():
@@ -64,13 +67,20 @@ def archive_daily_db(
     manifest_file = archive_root / "manifest" / f"{trading_day}.json"
     manifest_file.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix=f"hk-archive-{trading_day}-") as tmp_dir:
+    # Stage artifacts on the destination filesystem. Each replacement is atomic;
+    # the manifest is published last as the completion marker for retention.
+    with tempfile.TemporaryDirectory(
+        prefix=f".hk-archive-{trading_day}-", dir=archive_root
+    ) as tmp_dir:
         tmp_backup = Path(tmp_dir) / f"{trading_day}.backup.db"
+        tmp_archive = Path(tmp_dir) / archive_file.name
+        tmp_checksum = Path(tmp_dir) / checksum_file.name
+        tmp_manifest = Path(tmp_dir) / manifest_file.name
         backup_sqlite_db(db_path, tmp_backup)
-        _compress_backup(source=tmp_backup, out=archive_file, compression=compression)
+        _compress_backup(source=tmp_backup, out=tmp_archive, compression=compression)
 
-        checksum = _sha256_file(archive_file)
-        checksum_file.write_text(
+        checksum = _sha256_file(tmp_archive)
+        tmp_checksum.write_text(
             f"{checksum}  {archive_file.name}\n",
             encoding="utf-8",
         )
@@ -79,15 +89,15 @@ def archive_daily_db(
             data_root=Path(data_root),
             trading_day=trading_day,
             quality_config=quality_cfg,
-            db_path=db_path,
+            db_path=tmp_backup,
         )
         report_file = Path(data_root) / quality_cfg.report_rel_dir / f"{trading_day}.json"
 
-        verify_ok = True
+        verify_ok = False
         verify_details: dict[str, Any] = {}
         if verify:
             verify_ok, verify_details = _verify_archive(
-                archive_file=archive_file, compression=compression
+                archive_file=tmp_archive, compression=compression
             )
             if not verify_ok:
                 raise RuntimeError(f"archive verify failed: {verify_details}")
@@ -99,7 +109,7 @@ def archive_daily_db(
             "collector_version": __version__,
             "source_db": str(db_path),
             "archive_file": str(archive_file),
-            "archive_size_bytes": _file_size(archive_file),
+            "archive_size_bytes": _file_size(tmp_archive),
             "checksum_sha256": checksum,
             "compression": compression,
             "verify_enabled": bool(verify),
@@ -114,10 +124,14 @@ def archive_daily_db(
                 "quality_grade": report.get("conclusion", {}).get("quality_grade", "n/a"),
             },
         }
-        manifest_file.write_text(
+        tmp_manifest.write_text(
             json.dumps(manifest_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        os.replace(tmp_archive, archive_file)
+        os.replace(tmp_checksum, checksum_file)
+        # Publish the manifest last: retention treats it as the completion marker.
+        os.replace(tmp_manifest, manifest_file)
 
     deleted = False
     if delete_original:
@@ -182,6 +196,9 @@ def _verify_sqlite_db(db_file: Path) -> tuple[bool, dict[str, Any]]:
         return False, {"error": "db_missing_after_decompress"}
     conn = sqlite3.connect(f"file:{db_file}?mode=ro&immutable=1", uri=True)
     try:
+        integrity = conn.execute("PRAGMA quick_check").fetchone()[0]
+        if integrity != "ok":
+            return False, {"sqlite_quick_check": integrity}
         row = conn.execute("SELECT COUNT(*), MAX(ts_ms) FROM ticks").fetchone()
     except sqlite3.DatabaseError as exc:
         return False, {"sqlite_error": type(exc).__name__, "message": str(exc)}
@@ -197,7 +214,11 @@ def _cleanup_original_db_files_for_retention(
     keep_days: int,
 ) -> None:
     db_files = sorted(
-        [path for path in Path(data_root).glob("*.db") if len(path.stem) == 8 and path.stem.isdigit()]
+        [
+            path
+            for path in Path(data_root).glob("*.db")
+            if len(path.stem) == 8 and path.stem.isdigit()
+        ]
     )
     if keep_days > 0:
         db_files = db_files[:-keep_days]
@@ -225,9 +246,21 @@ def _is_archived_and_verified(*, day: str, archive_dir: Path) -> bool:
         return False
     try:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        checksum_line = checksum_file.read_text(encoding="utf-8").strip()
+        expected = payload.get("checksum_sha256")
+        if (
+            payload.get("trading_day") != day
+            or payload.get("verify_enabled") is not True
+            or payload.get("verify_ok") is not True
+            or not isinstance(expected, str)
+            or len(expected) != 64
+            or checksum_line != f"{expected}  {archive_file.name}"
+            or payload.get("archive_size_bytes") != archive_file.stat().st_size
+        ):
+            return False
+        return _sha256_file(archive_file) == expected
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
-    return bool(payload.get("verify_ok", False))
 
 
 def _sha256_file(path: Path) -> str:

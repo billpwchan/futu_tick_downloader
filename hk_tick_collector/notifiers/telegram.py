@@ -785,9 +785,7 @@ class MessageRenderer:
         persisted_rows_per_min = max(0, int(snapshot.persisted_rows_per_min))
         write_efficiency = _write_efficiency_pct(snapshot)
         icon = "🟢" if assessment.severity == NotifySeverity.OK else "🟡"
-        system_line = (
-            f"資源：{_host_resource_text(snapshot)}"
-        )
+        system_line = f"資源：{_host_resource_text(snapshot)}"
         progress_line = (
             f"進度：ingest/min={ingest_rows_per_min} | persist/min={persisted_rows_per_min} | "
             f"write_eff={write_efficiency:.1f}% | stale_symbols={stale_symbols} | "
@@ -1758,7 +1756,9 @@ class TelegramNotifier:
             self._client.masked_token,
             self._rate_limiter.limit_per_window,
             self._enable_callbacks,
-            self._health_fixed_interval_sec if self._health_fixed_interval_sec is not None else "disabled",
+            self._health_fixed_interval_sec
+            if self._health_fixed_interval_sec is not None
+            else "disabled",
             PREOPEN_CADENCE_SEC,
             self._health_trading_interval_sec,
             LUNCH_CADENCE_SEC,

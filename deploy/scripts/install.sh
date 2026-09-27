@@ -40,6 +40,10 @@ fi
 "${APP_DIR}/.venv/bin/pip" install -e "${APP_DIR}"
 
 install -m 0644 "${APP_DIR}/deploy/systemd/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+chmod 0755 "${APP_DIR}/deploy/scripts/notify_unit_failure.sh"
+install -m 0644 "${APP_DIR}/deploy/systemd/hk-tick-collector-failure@.service" "/etc/systemd/system/hk-tick-collector-failure@.service"
+install -d -m 0755 "/etc/systemd/system/${SERVICE_NAME}.service.d"
+install -m 0644 "${APP_DIR}/deploy/systemd/hk-tick-collector.service.d-onfailure.conf" "/etc/systemd/system/${SERVICE_NAME}.service.d/onfailure.conf"
 if [[ -f "${APP_DIR}/deploy/systemd/${FUTU_SERVICE_NAME}.service" ]]; then
   install -m 0644 "${APP_DIR}/deploy/systemd/${FUTU_SERVICE_NAME}.service" "/etc/systemd/system/${FUTU_SERVICE_NAME}.service"
 fi

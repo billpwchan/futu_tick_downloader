@@ -1,5 +1,7 @@
 # 10-手動從服務器導出 backup 並同步到本地（低 CPU）
 
+此流程供補救或歷史資料遷移使用。日常發布與本地鏡像請依[收盤後自動化](09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)。
+
 適用情境：
 
 1. 不用定時器（systemd / launchd）
@@ -175,29 +177,25 @@ ls -ld /home/ubuntu/hk_batch_* 2>/dev/null || true
 df -h
 ```
 
-刪除批次導出目錄：
+只刪除本次批次導出目錄，將路徑替換為 C 步實際輸出的 `OUT`：
 
 ```bash
-rm -rf /home/ubuntu/hk_batch_*
+OUT=/home/ubuntu/hk_batch_20260310_160440
+test -d "$OUT" && rm -r -- "$OUT"
 ```
 
-刪除原始日庫：
+原始日庫由 collector 的歸檔保留策略清理。手動批次導出與本地 ZIP 校驗並不代替 collector
+歸檔校驗；不要直接刪除 `*.db`、`*.db-wal`、`*.db-shm`。
+
+若要檢查歸檔與保留策略：
 
 ```bash
-sudo find /data/sqlite/HK -maxdepth 1 -type f \
-  \( -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].db' -o \
-     -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].db-wal' -o \
-     -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].db-shm' \) -delete
+sudo systemctl status hk-tick-eod-archive.timer --no-pager
+sudo journalctl -u hk-tick-eod-archive.service --since today --no-pager
 ```
 
-如果刪完後空間看起來沒回來，檢查：
-
-```bash
-df -h
-sudo lsof +L1
-```
-
-如果 `lsof +L1` 有輸出，表示有「已刪除但仍被進程占用」的檔案，重啟對應服務後空間才會釋放。
+如果歸檔清理後空間仍未回來，檢查 `df -h` 與 `sudo lsof +L1`。若有已刪除但仍被進程占用的檔案，
+先確認進程和資料日期，再安排服務重啟。
 
 ---
 
@@ -208,7 +206,7 @@ sudo lsof +L1
 3. 在本地跑 D，用 `scp -r` 把整個目錄拉回來
 4. 跑 E，確認 `SHA256SUMS` 全部通過
 5. 跑 F，批量轉成 Futu zip
-6. 確認本地結果無誤後，再跑 G 清理服務器
+6. 確認本地結果無誤後，只清理本次批次導出目錄；原始日庫交由已驗證的歸檔策略處理
 
 ---
 

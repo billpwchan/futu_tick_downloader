@@ -367,15 +367,16 @@ class FutuQuoteClient:
             pairs.append(f"+{len(items) - 5} more")
         return ",".join(pairs)
 
-    def _publish_symbol_availability_alert(
-        self, *, previous_unavailable: Dict[str, str]
-    ) -> None:
+    def _publish_symbol_availability_alert(self, *, previous_unavailable: Dict[str, str]) -> None:
         if self._notifier is None:
             return
 
         trading_day = self._current_trading_day()
         if self._unavailable_symbols:
-            if self._symbol_unavailable_active and previous_unavailable == self._unavailable_symbols:
+            if (
+                self._symbol_unavailable_active
+                and previous_unavailable == self._unavailable_symbols
+            ):
                 return
             if self._symbol_unavailable_active:
                 self._notifier.resolve_alert(

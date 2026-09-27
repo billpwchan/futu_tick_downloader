@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### 2026-09 repository refresh
+
+- 整合主機資源監控與遠端採集修復；安裝和升級腳本現在會部署 systemd 失敗通知 unit。
+- 盤後歸檔改為 18:30 香港時間，原始日庫預設保留 14 個交易日。
+- 歸檔先在目的地暫存，驗證 SQLite `quick_check` 後發布；清理前重新核對 manifest、大小及 SHA-256。
+- 更正手動資料導出文件，移除直接刪除原始 DB/WAL 的命令；同步配置與運維說明。
+- 修復 CI 的格式檢查基線，移除不會造成失敗的假性 typecheck 步驟。
+- 更新套件授權 metadata 為 SPDX 字串，消除新版 setuptools 的棄用警告。
+
 ### Added
 
 - 建立標準 OSS 文件結構（`docs/00-總覽.md` 到 `docs/08-發版流程.md`）。

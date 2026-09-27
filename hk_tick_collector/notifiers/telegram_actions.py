@@ -185,7 +185,9 @@ class SafeOpsCommandRunner:
         ]
         output = self._run_allowed(cmd=cmd)
         lines = output.splitlines()
-        pattern = re.compile(r"(ERROR|WARN|WATCHDOG|persist|sqlite_busy|alert_event)", re.IGNORECASE)
+        pattern = re.compile(
+            r"(ERROR|WARN|WATCHDOG|persist|sqlite_busy|alert_event)", re.IGNORECASE
+        )
         selected = [line.strip() for line in lines if pattern.search(line)]
         return [self._sanitize(line) for line in selected if line.strip()]
 
@@ -254,7 +256,9 @@ class SafeOpsCommandRunner:
         }
         if tuple(cmd[:2]) not in allowed_prefixes:
             raise ValueError("command_not_allowed")
-        effective_timeout = self._timeout_sec if timeout_sec is None else max(1.0, float(timeout_sec))
+        effective_timeout = (
+            self._timeout_sec if timeout_sec is None else max(1.0, float(timeout_sec))
+        )
         completed = subprocess.run(
             cmd,
             capture_output=True,
@@ -440,7 +444,9 @@ class TelegramActionRouter:
 
         try:
             if route.action == "d":
-                return self._on_toggle_detail(chat_id=chat_id, message_id=message_id, context_id=route.value)
+                return self._on_toggle_detail(
+                    chat_id=chat_id, message_id=message_id, context_id=route.value
+                )
             if route.action == "log":
                 return await self._on_logs(context_id=route.value)
             if route.action == "db":
@@ -450,7 +456,9 @@ class TelegramActionRouter:
             if route.action == "mute":
                 return self._on_mute(chat_id=chat_id, value=route.value)
             if route.action == "rf":
-                return self._on_refresh(chat_id=chat_id, message_id=message_id, context_id=route.value)
+                return self._on_refresh(
+                    chat_id=chat_id, message_id=message_id, context_id=route.value
+                )
             if route.action == "top":
                 return self._on_top(context_id=route.value)
         except subprocess.TimeoutExpired:
@@ -605,7 +613,9 @@ class TelegramActionRouter:
         if message_id is None:
             return CallbackDispatchResult(
                 ack_text="已刷新",
-                messages=[RouterMessage(mode="send", text=target_text, reply_markup=compact.reply_markup)],
+                messages=[
+                    RouterMessage(mode="send", text=target_text, reply_markup=compact.reply_markup)
+                ],
             )
         return CallbackDispatchResult(
             ack_text="已刷新",
@@ -648,9 +658,7 @@ class TelegramActionRouter:
             )
         if len(positional) > 1:
             return self._render_command_result(
-                "<b>❌ 參數錯誤</b>\n"
-                "結論：日期參數只能提供 1 個\n"
-                "下一步：例 /db_stats 20260220"
+                "<b>❌ 參數錯誤</b>\n結論：日期參數只能提供 1 個\n下一步：例 /db_stats 20260220"
             )
         day_override, day_error = self._resolve_command_day(
             day_hint=options.get("day") or (positional[0] if positional else None),
@@ -684,14 +692,16 @@ class TelegramActionRouter:
             )
         if len(positional) > 4:
             return self._render_command_result(
-                "<b>❌ 參數錯誤</b>\n"
-                "結論：參數過多\n"
-                "下一步：例 /top_symbols 10 15 rows 20260220"
+                "<b>❌ 參數錯誤</b>\n結論：參數過多\n下一步：例 /top_symbols 10 15 rows 20260220"
             )
 
         limit_text = options.get("limit") or (positional[0] if len(positional) >= 1 else "")
         minutes_text = options.get("minutes") or (positional[1] if len(positional) >= 2 else "")
-        metric = (options.get("metric") or (positional[2] if len(positional) >= 3 else "rows")).strip().lower()
+        metric = (
+            (options.get("metric") or (positional[2] if len(positional) >= 3 else "rows"))
+            .strip()
+            .lower()
+        )
         day_hint = options.get("day") or (positional[3] if len(positional) >= 4 else None)
 
         if limit_text:
@@ -699,9 +709,7 @@ class TelegramActionRouter:
                 limit = int(limit_text)
             except ValueError:
                 return self._render_command_result(
-                    "<b>❌ 參數錯誤</b>\n"
-                    "結論：limit 需為整數\n"
-                    "下一步：例 /top_symbols 10 15 rows"
+                    "<b>❌ 參數錯誤</b>\n結論：limit 需為整數\n下一步：例 /top_symbols 10 15 rows"
                 )
         else:
             limit = 10
@@ -711,9 +719,7 @@ class TelegramActionRouter:
                 minutes = int(minutes_text)
             except ValueError:
                 return self._render_command_result(
-                    "<b>❌ 參數錯誤</b>\n"
-                    "結論：minutes 需為整數\n"
-                    "下一步：例 /top_symbols 10 15 rows"
+                    "<b>❌ 參數錯誤</b>\n結論：minutes 需為整數\n下一步：例 /top_symbols 10 15 rows"
                 )
         else:
             minutes = 15
@@ -738,9 +744,7 @@ class TelegramActionRouter:
         )
         if not output:
             output = (
-                "<b>📈 Top Symbols</b>\n"
-                "結論：查無資料\n"
-                "下一步：稍後再試，或確認 ticks 是否有落盤"
+                "<b>📈 Top Symbols</b>\n結論：查無資料\n下一步：稍後再試，或確認 ticks 是否有落盤"
             )
         return self._render_command_result(output, escape_html=True)
 
@@ -800,11 +804,7 @@ class TelegramActionRouter:
             last=max(1, min(100, last)),
         )
         if not output:
-            output = (
-                "<b>🔎 Symbol 查詢</b>\n"
-                "結論：查無資料\n"
-                "下一步：確認 symbol 與交易日是否正確"
-            )
+            output = "<b>🔎 Symbol 查詢</b>\n結論：查無資料\n下一步：確認 symbol 與交易日是否正確"
         return self._render_command_result(output, escape_html=True)
 
     def _render_help_text(self) -> str:
@@ -818,7 +818,9 @@ class TelegramActionRouter:
             "下一步：例 /top_symbols --limit 10 --minutes 15 --metric rows --day 20260220"
         )
 
-    def _render_command_result(self, text: str, *, escape_html: bool = False) -> CallbackDispatchResult:
+    def _render_command_result(
+        self, text: str, *, escape_html: bool = False
+    ) -> CallbackDispatchResult:
         rendered_text = escape(text) if escape_html else text
         rendered, _ = truncate_text(rendered_text)
         return CallbackDispatchResult(
