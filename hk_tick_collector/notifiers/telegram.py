@@ -38,6 +38,8 @@ from hk_tick_collector.notifiers.telegram_render import (
     render_health_detail,
 )
 
+from ..host_sensor import HostSnapshot
+
 logger = logging.getLogger(__name__)
 
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
@@ -112,6 +114,11 @@ class HealthSnapshot:
     system_load1: float | None = None
     system_rss_mb: float | None = None
     system_disk_free_gb: float | None = None
+    # Host-level state. `host` carries the raw reading for rendering;
+    # `host_alert_codes` are the codes the HostAlertEvaluator currently holds
+    # active, so assess_health can escalate without restating any threshold.
+    host: "HostSnapshot | None" = None
+    host_alert_codes: Sequence[str] = ()
     sid: str = field(default_factory=lambda: _make_short_id("sid"))
 
 
@@ -420,6 +427,28 @@ def _percentile_float(values: Sequence[float], percentile: float) -> float | Non
     return float(ordered[index])
 
 
+def _host_resource_text(snapshot: HealthSnapshot) -> str:
+    """Resource line for the health digest.
+
+    Falls back to the original load/rss/disk_free form when the host sensor is
+    disabled or unavailable (e.g. a non-Linux dev box with no /proc).
+    """
+
+    host = getattr(snapshot, "host", None)
+    if host is None:
+        return (
+            f"load1={_format_float(snapshot.system_load1, 2)} "
+            f"rss={_format_float(snapshot.system_rss_mb, 1)}MB "
+            f"disk_free={_format_float(snapshot.system_disk_free_gb, 2)}GB"
+        )
+    return (
+        f"{host.cpu_line()} "
+        f"disk={_format_float(host.disk_used_pct, 1)}% "
+        f"swap={_format_float(host.swap_used_mb, 0)}MB "
+        f"rss={_format_float(snapshot.system_rss_mb, 1)}MB | {host.top_line(3)}"
+    )
+
+
 def truncate_rendered_message(
     message: RenderedMessage,
     max_chars: int = TELEGRAM_MAX_MESSAGE_CHARS,
@@ -629,6 +658,21 @@ class AlertStateMachine:
                 impact = "目前不需人工介入"
                 needs_action = False
 
+        # Host trouble must be able to override an otherwise-green pipeline.
+        # On 2026-08-17 every branch above returned OK while the box was being
+        # throttled to a fraction of its vCPU, so the digest reassured the
+        # operator for hours. Codes come from HostAlertEvaluator, which owns
+        # the thresholds; nothing is re-tested here.
+        if snapshot.host_alert_codes:
+            codes = ", ".join(sorted(snapshot.host_alert_codes))
+            if _severity_rank(severity) < _severity_rank(NotifySeverity.WARN):
+                severity = NotifySeverity.WARN
+                conclusion = f"注意：主機資源異常（{codes}）"
+                impact = "採集管線本身正常，但主機層面的問題會拖慢所有服務"
+                needs_action = True
+            else:
+                conclusion = f"{conclusion}；另有主機告警（{codes}）"
+
         self._last_persisted_rows_per_min = persisted
         return HealthAssessment(
             severity=severity,
@@ -742,9 +786,7 @@ class MessageRenderer:
         write_efficiency = _write_efficiency_pct(snapshot)
         icon = "🟢" if assessment.severity == NotifySeverity.OK else "🟡"
         system_line = (
-            f"資源：load1={_format_float(snapshot.system_load1, 2)} "
-            f"rss={_format_float(snapshot.system_rss_mb, 1)}MB "
-            f"disk_free={_format_float(snapshot.system_disk_free_gb, 2)}GB"
+            f"資源：{_host_resource_text(snapshot)}"
         )
         progress_line = (
             f"進度：ingest/min={ingest_rows_per_min} | persist/min={persisted_rows_per_min} | "
@@ -963,6 +1005,8 @@ class MessageRenderer:
             return "異常：與 OpenD 連線中斷"
         if code.upper() == "SQLITE_BUSY":
             return "異常：SQLite 鎖競爭升高"
+        if code.upper() == "SYMBOL_UNAVAILABLE":
+            return "注意：部分股票無法訂閱，已自動跳過"
         if severity == NotifySeverity.ALERT:
             return "異常：偵測到需要立即處理的事件"
         return "注意：偵測到風險事件"
@@ -974,6 +1018,8 @@ class MessageRenderer:
             return "可能短暫影響即時資料完整性，重連成功後可恢復"
         if code.upper() == "SQLITE_BUSY":
             return "寫入吞吐可能下降，若持續將增加延遲與積壓"
+        if code.upper() == "SYMBOL_UNAVAILABLE":
+            return "系統會跳過無法訂閱股票，其餘股票可持續採集"
         if severity == NotifySeverity.ALERT:
             return "資料可靠性可能受影響，建議立即排查"
         return "目前為退化狀態，建議持續觀察"
@@ -1283,6 +1329,8 @@ class MessageComposer:
             return "SQLite 鎖競爭升高，需確認是否有並行寫入"
         if code == "DISCONNECT":
             return "與 OpenD 連線中斷，先確認 OpenD 服務狀態"
+        if code == "SYMBOL_UNAVAILABLE":
+            return "部分股票不可訂閱，需確認是否已下市、改代碼或權限不足"
         return "請先確認最新 health 與告警事件是否持續"
 
     def _runbook_steps(self, code: str) -> list[str]:
@@ -1303,6 +1351,12 @@ class MessageComposer:
                 "先確認 OpenD 與 collector service 狀態",
                 "觀察重連後是否出現已恢復訊息",
                 'sudo systemctl status futu-opend --no-pager; scripts/hk-tickctl logs --ops --since "20 minutes ago"; sudo systemctl status hk-tick-collector --no-pager',
+            ]
+        if code == "SYMBOL_UNAVAILABLE":
+            return [
+                "先確認壞票是否已下市、改代碼或不在當前行情權限內",
+                "再檢查 /etc/hk-tick-collector.env 的 FUTU_SYMBOLS",
+                "移除無效股票後重啟服務，避免每次重連都再次降級",
             ]
         return [
             "先確認是否為暫時性波動",

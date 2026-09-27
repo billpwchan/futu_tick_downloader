@@ -372,6 +372,11 @@ def render_sop(*, code: str) -> str:
             "看 OpenD / collector service 是否 active",
             "觀察是否出現 RECOVERED，若無則依 runbook 重啟服務",
         ),
+        "SYMBOL_UNAVAILABLE": (
+            "先確認是否為下市/改代碼/權限不足",
+            "檢查 FUTU_SYMBOLS 是否仍包含不可訂閱股票",
+            "移除無效股票後重啟 collector，避免反覆降級",
+        ),
         "HEALTH": (
             "先看健康趨勢",
             "先按 🧾 再按 🗃，判斷是延遲問題還是停寫",
