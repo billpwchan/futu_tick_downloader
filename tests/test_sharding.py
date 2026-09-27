@@ -48,6 +48,42 @@ def test_db_path_and_trading_day_switch(tmp_path):
     assert db_path_for_trading_day(tmp_path, day2).exists()
 
 
+def test_long_lived_writer_closes_connections_older_than_two_trading_days(tmp_path):
+    store = SQLiteTickStore(tmp_path)
+    writer = store.open_writer()
+    try:
+        for index, day in enumerate(("20240102", "20240103", "20240104", "20240105"), start=1):
+            writer.insert_ticks(
+                day,
+                [
+                    TickRow(
+                        market="HK",
+                        symbol="HK.00001",
+                        ts_ms=1704161400000 + index,
+                        price=10.0 + index,
+                        volume=100,
+                        turnover=1000.0,
+                        direction="BUY",
+                        seq=index,
+                        tick_type="AUTO_MATCH",
+                        push_type="push",
+                        provider="futu",
+                        trading_day=day,
+                        recv_ts_ms=1704161400000 + index,
+                        inserted_at_ms=1704161400000 + index,
+                    )
+                ],
+            )
+
+        assert set(writer._connections) == {"20240104", "20240105"}
+        assert set(writer._db_paths) == {"20240104", "20240105"}
+        assert all(
+            db_path_for_trading_day(tmp_path, day).exists() for day in ("20240102", "20240103")
+        )
+    finally:
+        writer.close()
+
+
 def test_fetch_max_seq_by_symbol_recent_across_multiple_days(tmp_path):
     store = SQLiteTickStore(tmp_path)
 

@@ -10,7 +10,7 @@ Environment (optional):
   REPO_ROOT=/opt/futu_tick_downloader
   DATA_ROOT=/data/sqlite/HK
   ARCHIVE_DIR=/data/sqlite/HK/_archive
-  RAW_KEEP_DAYS=3
+  RAW_KEEP_DAYS=14
   LOCK_FILE=/tmp/hk-tick-eod-archive.lock
   TZ_NAME=Asia/Hong_Kong
 EOF
@@ -38,7 +38,7 @@ done
 REPO_ROOT="${REPO_ROOT:-/opt/futu_tick_downloader}"
 DATA_ROOT="${DATA_ROOT:-/data/sqlite/HK}"
 ARCHIVE_DIR="${ARCHIVE_DIR:-${DATA_ROOT}/_archive}"
-RAW_KEEP_DAYS="${RAW_KEEP_DAYS:-3}"
+RAW_KEEP_DAYS="${RAW_KEEP_DAYS:-14}"
 LOCK_FILE="${LOCK_FILE:-/tmp/hk-tick-eod-archive.lock}"
 TZ_NAME="${TZ_NAME:-Asia/Hong_Kong}"
 

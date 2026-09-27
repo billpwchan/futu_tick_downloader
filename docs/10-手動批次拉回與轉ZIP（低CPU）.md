@@ -1,34 +1,67 @@
-# 10-手動批次拉回與轉 ZIP（低 CPU）
+# 10-手動從服務器導出 backup 並同步到本地（低 CPU）
 
 適用情境：
 
 1. 不用定時器（systemd / launchd）
-2. 每日收盤後手動批次處理
-3. 避免壓縮打滿 CPU（不走 `archive` 的 `zstd -T0 -19` 路徑）
+2. 收盤後手動批次導出多個交易日
+3. 不想額外打 tar，只想直接把整個 backup 目錄同步回本地
+4. 避免壓縮打滿 CPU（不走 `archive` 的 `zstd -T0 -19` 路徑）
 
-以下流程以交易日 `20260226`（2026-02-26）示例。
+以下流程假設：
 
----
-
-## A. 關閉自動化（只需做一次）
-
-### 服務器
-
-```bash
-sudo systemctl disable --now hk-tick-eod-archive.timer 2>/dev/null || true
-```
-
-### 本地 macOS
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.billpwchan.hk-tick-pull.plist 2>/dev/null || true
-```
+- 服務器 repo：`/opt/futu_tick_downloader`
+- 服務器 SQLite 根目錄：`/data/sqlite/HK`
+- 服務器登入帳號：`ubuntu`
+- 本地下載目錄：`~/Downloads`
 
 ---
 
-## B. 服務器手動批次導出（低 CPU）
+## A. 可選：一次性 SSH 設定（建議）
 
-這一步只做 SQLite 一致性 backup，不做 zstd 壓縮。
+如果你有 Lightsail key，建議先放到 `~/.ssh`，後面 `scp` 會簡單很多。
+
+```bash
+mkdir -p ~/.ssh
+mv ~/Downloads/LightsailDefaultKey-ap-northeast-1.pem ~/.ssh/lightsail-apne1.pem
+chmod 600 ~/.ssh/lightsail-apne1.pem
+```
+
+可選：加入 `~/.ssh/config`
+
+```sshconfig
+Host lightsail-hk
+  HostName <server-ip>
+  User ubuntu
+  IdentityFile ~/.ssh/lightsail-apne1.pem
+  IdentitiesOnly yes
+  Port 22
+```
+
+之後可直接用 `lightsail-hk` 當主機別名。
+
+---
+
+## B. 可選：先確認服務正常
+
+導出前可先確認採集服務與 OpenD 都還活著。
+
+```bash
+sudo systemctl is-active --quiet hk-tick-collector futu-opend && \
+  echo "OK: hk-tick-collector + futu-opend 都在運行" || \
+  (echo "NOT OK"; sudo systemctl --no-pager -l status hk-tick-collector futu-opend | sed -n '1,80p')
+```
+
+---
+
+## C. 服務器批次導出 backup（低 CPU）
+
+這一步只做 SQLite 一致性 backup，不做 tar，不做 zstd。
+
+重點：
+
+1. 要用 `sudo env PYTHONPATH="$REPO"`，否則容易遇到 `ModuleNotFoundError: No module named 'hk_tick_collector'`
+2. 輸出到 `/home/ubuntu/hk_batch_YYYYMMDD_HHMMSS`
+3. 最後生成 `SHA256SUMS` 供本地校驗
 
 ```bash
 set -euo pipefail
@@ -48,35 +81,65 @@ sudo chown -R ubuntu:ubuntu "$OUT"
 ( cd "$OUT" && shasum -a 256 *.backup.db > SHA256SUMS )
 echo "OUT=$OUT"
 ls -lh "$OUT" | sed -n '1,20p'
-
 ```
+
+成功後會看到類似：
+
+```text
+OUT=/home/ubuntu/hk_batch_20260310_160440
+```
+
+把這個 `OUT` 記下來，後面同步會用到。
 
 ---
 
-## C. 本地一次性拉回（不打包 tar）
+## D. 同步到本地（推薦：整個目錄直接 scp）
+
+### 方案 1：一次性帶 key 的 `scp -r`
+
+`scp` 複製目錄一定要帶 `-r`，否則會報：
+
+```text
+scp: download ...: not a regular file
+```
 
 ```bash
-SERVER="ubuntu@<server-ip>"
-OUT="/home/ubuntu/hk_batch_20260310_160440"    # 換成上一步輸出的 OUT
-LOCAL_OUT="$HOME/Downloads/$(basename "$OUT")"
-mkdir -p "$LOCAL_OUT"
-
-scp -P 22 "$SERVER:$OUT/"'*.backup.db' "$SERVER:$OUT/SHA256SUMS" "$LOCAL_OUT/"
+scp -i ~/.ssh/lightsail-apne1.pem -r \
+  ubuntu@<server-ip>:/home/ubuntu/hk_batch_20260310_160440 \
+  ~/Downloads/
 ```
+
+### 方案 2：已配置 `~/.ssh/config`
+
+```bash
+scp -r lightsail-hk:/home/ubuntu/hk_batch_20260310_160440 ~/Downloads/
+```
+
+同步後，本地會得到：
+
+```text
+~/Downloads/hk_batch_20260310_160440
+```
+
+裡面包含：
+
+- `*.backup.db`
+- `SHA256SUMS`
 
 ---
 
-## D. 本地校驗
+## E. 本地校驗
 
 ```bash
-OUT="/home/ubuntu/hk_batch_20260310_160440"    # 換成你拉回的那批
-cd "$HOME/Downloads/$(basename "$OUT")"
+cd ~/Downloads/hk_batch_20260310_160440
 shasum -a 256 -c SHA256SUMS
 ```
 
+理想結果是每個 `.backup.db` 都顯示 `OK`。
+
 ---
 
-## E. 批量轉成 Futu zip（YYYYMMDD.zip）
+## F. 批量轉成 Futu zip（YYYYMMDD.zip）
 
 使用腳本：
 
@@ -99,7 +162,7 @@ shasum -a 256 -c SHA256SUMS
 
 ---
 
-## F. 服務器清理（確認本地已校驗與轉檔後）
+## G. 服務器清理（確認本地已校驗與轉檔後）
 
 先預覽：
 
@@ -109,9 +172,10 @@ sudo find /data/sqlite/HK -maxdepth 1 -type f \
      -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].db-wal' -o \
      -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].db-shm' \) -print
 ls -ld /home/ubuntu/hk_batch_* 2>/dev/null || true
+df -h
 ```
 
-刪除批次導出檔：
+刪除批次導出目錄：
 
 ```bash
 rm -rf /home/ubuntu/hk_batch_*
@@ -126,12 +190,60 @@ sudo find /data/sqlite/HK -maxdepth 1 -type f \
      -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].db-shm' \) -delete
 ```
 
+如果刪完後空間看起來沒回來，檢查：
+
+```bash
+df -h
+sudo lsof +L1
+```
+
+如果 `lsof +L1` 有輸出，表示有「已刪除但仍被進程占用」的檔案，重啟對應服務後空間才會釋放。
+
 ---
 
-## G. 每日最短操作清單
+## H. 每次最短操作清單
 
-1. 跑 B（服務器批次導出）
-2. 跑 C（直接 scp 全部 `.backup.db` + `SHA256SUMS`）
-3. 跑 D（checksum）
-4. 跑 E（批量轉 ZIP）
-5. 跑 F（確認後清理）
+1. 在服務器跑 C，導出整批 `.backup.db`
+2. 記下輸出的 `OUT=/home/ubuntu/hk_batch_YYYYMMDD_HHMMSS`
+3. 在本地跑 D，用 `scp -r` 把整個目錄拉回來
+4. 跑 E，確認 `SHA256SUMS` 全部通過
+5. 跑 F，批量轉成 Futu zip
+6. 確認本地結果無誤後，再跑 G 清理服務器
+
+---
+
+## I. 常見坑
+
+### 1. `ModuleNotFoundError: No module named 'hk_tick_collector'`
+
+原因：從 `~` 直接跑 `python -m hk_tick_collector.cli.main`，但 repo 沒有在 `PYTHONPATH`。
+
+處理方式：照本文件的導出命令，使用：
+
+```bash
+sudo env PYTHONPATH="$REPO" "$REPO/.venv/bin/python" -m hk_tick_collector.cli.main ...
+```
+
+### 2. `scp: ... not a regular file`
+
+原因：你在複製目錄，但沒加 `-r`。
+
+正確方式：
+
+```bash
+scp -r ubuntu@<server-ip>:/home/ubuntu/hk_batch_20260310_160440 ~/Downloads/
+```
+
+### 3. 刪掉 `/home/ubuntu/hk_batch_*` 後空間沒有明顯下降
+
+常見原因：
+
+1. 真正佔空間的是別的目錄，例如 `/opt/futu_tick_downloader/.com.futunn.FutuOpenD/Log` 或 `/var/log/journal`
+2. 檔案已刪除，但仍被進程占用
+
+排查：
+
+```bash
+sudo du -xhd1 /home /data /var /opt 2>/dev/null | sort -h
+sudo lsof +L1
+```
