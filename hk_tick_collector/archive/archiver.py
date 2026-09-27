@@ -67,15 +67,18 @@ def archive_daily_db(
     manifest_file = archive_root / "manifest" / f"{trading_day}.json"
     manifest_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Stage artifacts on the destination filesystem. Each replacement is atomic;
-    # the manifest is published last as the completion marker for retention.
-    with tempfile.TemporaryDirectory(
-        prefix=f".hk-archive-{trading_day}-", dir=archive_root
-    ) as tmp_dir:
-        tmp_backup = Path(tmp_dir) / f"{trading_day}.backup.db"
-        tmp_archive = Path(tmp_dir) / archive_file.name
-        tmp_checksum = Path(tmp_dir) / checksum_file.name
-        tmp_manifest = Path(tmp_dir) / manifest_file.name
+    # Keep the large SQLite backup on the temporary filesystem. Stage only
+    # published artifacts on the destination filesystem for atomic replacement.
+    with (
+        tempfile.TemporaryDirectory(prefix=f"hk-archive-{trading_day}-") as backup_dir,
+        tempfile.TemporaryDirectory(
+            prefix=f".hk-archive-{trading_day}-", dir=archive_root
+        ) as stage_dir,
+    ):
+        tmp_backup = Path(backup_dir) / f"{trading_day}.backup.db"
+        tmp_archive = Path(stage_dir) / archive_file.name
+        tmp_checksum = Path(stage_dir) / checksum_file.name
+        tmp_manifest = Path(stage_dir) / manifest_file.name
         backup_sqlite_db(db_path, tmp_backup)
         _compress_backup(source=tmp_backup, out=tmp_archive, compression=compression)
 
