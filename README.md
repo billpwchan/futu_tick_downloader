@@ -4,192 +4,99 @@
 [![Release](https://img.shields.io/github/v/release/billpwchan/futu_tick_downloader)](https://github.com/billpwchan/futu_tick_downloader/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-一個面向生產環境的港股逐筆採集器：從 Futu OpenD 接收行情，經佇列（queue）與批次持久化（persist）安全寫入 SQLite（WAL），並提供 systemd 維運與 Telegram 產品化告警，讓陌生人可以從 0 到可驗證地跑起來。
+從 Futu OpenD 接收港股逐筆行情，按香港交易日寫入 SQLite WAL。專案包含佇列與批次寫入、資料品質報告、經校驗的日終歸檔，以及 systemd 和 Telegram 維運工具。
 
-![架構總覽](docs/assets/overview-architecture.svg)
+> **先選路徑：**想看資料怎麼流動，從下方的 Docker mock 開始，不需要 Futu 帳戶；要接真實行情，請先完成 [OpenD 與行情權限部署](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)。Mock 資料不能用於交易研究。
 
-## 使用場景
+## 資料怎麼走
 
-- 量化研究：逐筆落庫、回放查核、策略前資料完整性驗證。
-- SRE/運維：watchdog 自癒、低噪音告警、值班 runbook。
-- 個人玩家：在 AWS Lightsail 低成本長期運行。
+![正式採集、mock 回放、監控與日終歸檔的資料流](docs/assets/overview-architecture.svg)
 
-## 30 秒快速開始
+正式採集由 OpenD push 與可選 poll 備援進入映射器、記憶體佇列、寫入執行緒，再落入每日一個 SQLite DB。Mock 回放會**直接寫入測試 DB**，用來體驗查詢和檢查工具。主機監控與 watchdog 觀察執行狀態，Telegram 可發送健康摘要和異常通知。
 
-### 路徑 A：本機 Docker（含可選 mock）
+## 5 分鐘本機體驗
+
+前置需求：Docker 與 Docker Compose。下列指令從 repo 根目錄執行。
 
 ```bash
 git clone https://github.com/billpwchan/futu_tick_downloader.git
 cd futu_tick_downloader
 cp .env.example .env
 docker compose --profile mock up -d --build mock-replay
-make db-stats
+docker compose --profile mock exec -T mock-replay \
+  python -m hk_tick_collector.cli.main db stats --data-root /data/sqlite/HK
 ```
 
-### 路徑 B：伺服器 systemd（Ubuntu/Lightsail）
+重跑最後一個命令，`rows` 應持續增加；也可用 `docker compose --profile mock logs --tail=20 mock-replay` 看寫入日誌。結束時執行 `docker compose --profile mock down`。本機 DB 存在 `./data/sqlite/`，停止容器不會刪除檔案。進階查詢見[本機快速開始](docs/01-%E5%BF%AB%E9%80%9F%E9%96%8B%E5%A7%8B%EF%BC%88%E6%9C%AC%E6%A9%9F%EF%BC%89.md)。
+
+## 真實行情部署
+
+Linux/systemd 安裝腳本以 `/opt/futu_tick_downloader` 為程式路徑，並需要 Python 3.10+、Futu OpenD 和有效的港股行情權限。腳本預設使用 `python3.11`；以下用 Ubuntu 已安裝的 `python3` 建立環境。請先依 [Lightsail 部署指南](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)完成前置設定：
 
 ```bash
-git clone https://github.com/billpwchan/futu_tick_downloader.git
-cd futu_tick_downloader
-sudo bash deploy/scripts/install.sh
+sudo git clone https://github.com/billpwchan/futu_tick_downloader.git /opt/futu_tick_downloader
+cd /opt/futu_tick_downloader
+sudo PYTHON_BIN=python3 bash deploy/scripts/install.sh
 sudoedit /etc/hk-tick-collector.env
 sudo systemctl restart hk-tick-collector
 sudo systemctl status hk-tick-collector --no-pager
 ```
 
-## Demo：三件事就知道有跑起來
+至少確認 `FUTU_HOST`、`FUTU_PORT`、`FUTU_SYMBOLS` 與資料目錄；Telegram 需另設 token、chat ID。安裝腳本會建立環境檔，但第一次啟動可能在填妥連線設定前失敗；填寫後重啟並檢查日誌。完整設定見[環境變數說明](docs/03-%E9%85%8D%E7%BD%AE%E8%AA%AA%E6%98%8E%EF%BC%88.env%EF%BC%89.md)。
 
-### 1) 看今日資料是否活著（status）
+## 驗證資料與歸檔
 
-```bash
-scripts/hk-tickctl status --data-root /data/sqlite/HK --day $(TZ=Asia/Hong_Kong date +%Y%m%d)
-```
-
-### 2) 做可用性驗收（validate）
+以下在已安裝專案 `.venv` 的主機執行。`DAY` 用香港時區計算；休市日或當日尚無 tick 時，沒有日檔屬正常情況。
 
 ```bash
-scripts/hk-tickctl validate --data-root /data/sqlite/HK \
-  --day $(TZ=Asia/Hong_Kong date +%Y%m%d) \
-  --regen-report 1 \
-  --strict 1
+cd /opt/futu_tick_downloader
+DAY="$(TZ=Asia/Hong_Kong date +%Y%m%d)"
+scripts/hk-tickctl status --data-root /data/sqlite/HK --day "$DAY"
+scripts/hk-tickctl validate --data-root /data/sqlite/HK --day "$DAY" --regen-report 1 --strict 1
 ```
 
-### 3) 盤後歸檔（archive）
-
-```bash
-scripts/hk-tickctl archive --data-root /data/sqlite/HK \
-  --day $(TZ=Asia/Hong_Kong date +%Y%m%d) \
-  --archive-dir /data/sqlite/HK/_archive \
-  --keep-days 14 \
-  --delete-original 1 \
-  --verify 1
-```
-
-![Telegram 訊息示例](docs/assets/telegram-sample.svg)
-
-## Telegram 產品化通知
-
-- 訊息結構：`結論 -> 關鍵指標 -> 下一步`
-- 每則訊息提供互動按鈕：`🔎 詳情` / `🧾 日誌` / `🗃 DB` / `🧯 建議`
-- 互動模式可選啟用：`TG_INTERACTIVE_ENABLED=1`
-- 主機資源監控可觀察 CPU 額度耗用、steal、磁碟與記憶體壓力；systemd `OnFailure` 在 collector 進入 failed 狀態時發通知。設定見[配置說明](docs/03-%E9%85%8D%E7%BD%AE%E8%AA%AA%E6%98%8E%EF%BC%88.env%EF%BC%89.md)。
-
-示例 1（盤中 HEALTH）：
-
-```text
-🟢 HEALTH OK
-結論：盤中採集與落庫穩定
-關鍵指標：市況=盤中 | 落庫=12600/min | 延遲=1.8s | 今日rows=2,300,000 | 佇列=8/1000
-下一步：按 🔎 看詳情；排查時先按 🧾 或 🗃
-```
-
-示例 2（PERSIST_STALL ALERT）：
-
-```text
-🔴 ALERT
-結論：持久化停滯，資料可能未落庫
-關鍵指標：事件=PERSIST_STALL | 市況=盤中 | 重點=lag_sec=88.2 | persisted_per_min=0
-影響：資料可能持續落後
-下一步：先按 🧾 看是否持續，再按 🧯 執行 SOP
-```
-
-示例 3（收盤 DAILY DIGEST）：
-
-```text
-📊 DAILY DIGEST
-結論：20260214 收盤摘要
-關鍵指標：總量=1,000,000 | 峰值=38,000/min | 最大延遲=3.2s | 告警/恢復=4/3
-資料檔：/data/sqlite/HK/20260214.db | rows=2,300,000
-下一步：按 📈 今日 Top 異常
-```
-
-## 架構圖（資料流、模組邊界、線程/佇列）
+`status` 看檔案、行數與最近資料；`validate` 檢查 schema、覆蓋率及品質指標。盤後歸檔使用 SQLite 一致性備份，產生 zstd 檔、SHA-256 與 manifest；保留策略只清理通過校驗的舊日庫。
 
 ```mermaid
 flowchart LR
-    subgraph Source[資料來源]
-      A[Futu OpenD Push]
-      B[Poll Fallback]
-      M[Mock Replay]
-    end
-
-    subgraph Collector[採集器程序]
-      C[Mapper/Validator]
-      Q[(In-Memory Queue)]
-      W[Persist Worker Thread]
-      H[Health/Watchdog]
-      N[Telegram Notifier]
-    end
-
-    subgraph Storage[持久層]
-      S[(SQLite WAL<br/>YYYYMMDD.db)]
-    end
-
-    A --> C
-    B --> C
-    M --> S
-    C --> Q --> W --> S
-    W --> H --> N
-    H --> N
+  DB[每日 SQLite DB + WAL] --> Backup[一致性 backup]
+  Backup --> Archive[zstd 歸檔]
+  Archive --> Verify[解壓 + SQLite quick_check + SHA-256]
+  Verify --> Manifest[發布 manifest]
+  Manifest --> Retention[校驗後按保留期清理原始日庫]
 ```
 
-## 常用命令（最少必要）
+手動預覽歸檔時可保留原始 DB：
 
 ```bash
-make setup
-make lint
-make test
-make run
-make logs
-make db-stats
-scripts/hk-tickctl status --data-root /data/sqlite/HK
-scripts/hk-tickctl validate --data-root /data/sqlite/HK --day 20260213 --regen-report 1
-scripts/hk-tickctl export --data-root /data/sqlite/HK db --day 20260213 --out /tmp/20260213.backup.db
-scripts/hk-tickctl archive --data-root /data/sqlite/HK --day 20260213 --verify 1
+scripts/hk-tickctl archive --data-root /data/sqlite/HK --day "$DAY" \
+  --archive-dir /data/sqlite/HK/_archive --verify 1 --delete-original 0
 ```
 
-其餘操作請看：[`docs/04-運維 Runbook.md`](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)
+自動歸檔的預設原始日庫保留量為最近 14 個交易日檔案，時間與上下游任務順序見[收盤後自動化](docs/09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)。歸檔格式和校驗規則見[歸檔說明](docs/archive.md)。
 
-## FAQ（常見坑）
+## 告警與維運
 
-1. 時區怎麼看？
-   `ts_ms`/`recv_ts_ms` 都是 UTC epoch 毫秒；交易日切分用 `Asia/Hong_Kong`。
-2. 為什麼堅持 WAL？
-   WAL 讓讀寫並行更穩定，降低寫入尖峰時讀取阻塞。
-3. `busy_timeout` 要設多少？
-   建議先用 `5000ms`，高併發下可視磁碟 I/O 調到 `7000-10000ms`。
-4. OpenD 常斷線怎麼辦？
-   先看 `hk-tickctl status` 與 `logs --ops`，確認 reconnect 與 watchdog 是否正常觸發。
-5. 盤前/盤後零流量算異常嗎？
-   不一定。通知策略會依 market mode（開盤前/盤中/午休/收盤後）降噪。
-6. 非交易日為什麼會看到 `YYYYMMDD.db`？
-   新版行為改為「首筆 tick 才建庫」，非交易日不會因服務啟動自動建立空 DB。
-7. 收盤後有 `.db-wal` 是不是還在持續寫入？
-   不一定。WAL 檔在程序存活期間存在屬正常；請以 `db rows`、`persisted_rows_per_min`、`queue` 判斷是否仍有實際寫入。
+![Telegram 健康摘要與異常通知示意，數值僅供展示](docs/assets/telegram-sample.svg)
 
-## 文件入口
+Telegram 訊息按「結論 → 關鍵指標 → 下一步」呈現，可選啟用互動按鈕。主機監控觀察 CPU、steal、磁碟及記憶體壓力；collector 進入 systemd failed 狀態時，獨立的 `OnFailure` unit 可通知值班群。設定與操作見 [Telegram 指南](docs/telegram.md)及[運維 Runbook](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)。
 
-- 文件總入口：[`docs/_index.md`](docs/_index.md)
-- CLI 手冊：[`docs/hk-tickctl.md`](docs/hk-tickctl.md)
-- 品質報告：[`docs/quality.md`](docs/quality.md)
-- 歸檔策略：[`docs/archive.md`](docs/archive.md)
-- 收盤自動化：[`docs/09-收盤後自動化（歸檔與本地拉取）.md`](docs/09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)
-- 收盤全手動（低 CPU）：[`docs/10-手動批次拉回與轉ZIP（低CPU）.md`](docs/10-%E6%89%8B%E5%8B%95%E6%89%B9%E6%AC%A1%E6%8B%89%E5%9B%9E%E8%88%87%E8%BD%89ZIP%EF%BC%88%E4%BD%8ECPU%EF%BC%89.md)
-- 快速開始（本機）：[`docs/01-快速開始（本機）.md`](docs/01-%E5%BF%AB%E9%80%9F%E9%96%8B%E5%A7%8B%EF%BC%88%E6%9C%AC%E6%A9%9F%EF%BC%89.md)
-- Lightsail 部署：[`docs/02-部署到 AWS Lightsail（Ubuntu）.md`](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)
-- Runbook：[`docs/04-運維 Runbook.md`](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md)
-- Telegram 互動通知：[`docs/telegram.md`](docs/telegram.md)
+## 資料語義與邊界
 
-## 目前能力與限制
+- `ts_ms`、`recv_ts_ms` 是 UTC epoch 毫秒；檔名 `YYYYMMDD.db` 按 `Asia/Hong_Kong` 交易日切分。
+- WAL 允許讀寫並行；`.db-wal` 存在不代表仍有新成交。確認行數、寫入速率與佇列狀態。
+- 首筆 tick 才建立日檔；不能把「沒有檔案」直接判定為故障。
+- 採集佇列位於記憶體。程序停止或上游斷線期間可能缺資料，需配合品質報告與可用的歷史資料補回。
 
-- 已有逐日 SQLite WAL、品質報告、經校驗的 zstd 歸檔、Telegram 通知與主機資源告警。
-- Collector 使用記憶體佇列；程序停止期間的資料需依 Futu 可用歷史資料補回，不能把通知等同於資料完整性保證。
-- 盤後自動化依賴獨立的 JChart 發布與鏡像任務；部署順序與故障邊界見[收盤後自動化](docs/09-%E6%94%B6%E7%9B%A4%E5%BE%8C%E8%87%AA%E5%8B%95%E5%8C%96%EF%BC%88%E6%AD%B8%E6%AA%94%E8%88%87%E6%9C%AC%E5%9C%B0%E6%8B%89%E5%8F%96%EF%BC%89.md)。
+## 文件與開發
 
-## 社群與治理
+| 目的 | 入口 |
+| --- | --- |
+| CLI 查詢、匯出與歸檔 | [hk-tickctl 手冊](docs/hk-tickctl.md) |
+| 資料格式與 SQL 查詢 | [資料格式](docs/06-%E8%B3%87%E6%96%99%E6%A0%BC%E5%BC%8F%E8%88%87%E6%9F%A5%E8%A9%A2.md) |
+| 品質報告與缺口 | [品質說明](docs/quality.md) |
+| 部署、排查與恢復 | [運維 Runbook](docs/04-%E9%81%8B%E7%B6%AD%20Runbook.md) |
+| 所有文件 | [文件索引](docs/_index.md) |
+| 貢獻與安全回報 | [貢獻指南](CONTRIBUTING.md) · [安全政策](SECURITY.md) |
 
-- 貢獻指南：[`CONTRIBUTING.md`](CONTRIBUTING.md)
-- 行為準則：[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
-- 安全政策：[`SECURITY.md`](SECURITY.md)
-- 支援方式：[`SUPPORT.md`](SUPPORT.md)
-- 授權：Apache-2.0（[`LICENSE`](LICENSE)）
+開發環境執行 `make setup`，之後用 `make lint` 和 `make test` 檢查。專案以 Apache-2.0 授權，見 [LICENSE](LICENSE)。

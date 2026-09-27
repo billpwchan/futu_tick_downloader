@@ -28,6 +28,7 @@ cd /opt/futu_tick_downloader
 sudo cp deploy/env/.env.example /etc/hk-tick-collector.env
 sudo chown root:root /etc/hk-tick-collector.env
 sudo chmod 640 /etc/hk-tick-collector.env
+sudoedit /etc/hk-tick-collector.env
 ```
 
 先填這些關鍵值：
@@ -42,7 +43,7 @@ sudo chmod 640 /etc/hk-tick-collector.env
 
 ```bash
 cd /opt/futu_tick_downloader
-sudo bash deploy/scripts/install.sh
+sudo PYTHON_BIN=python3 bash deploy/scripts/install.sh
 ```
 
 這會建立：
@@ -51,6 +52,8 @@ sudo bash deploy/scripts/install.sh
 - `.venv`（服務實際使用）
 - `hk-tick-collector.service`
 - `futu-opend.service`（若檔案存在）
+
+安裝腳本會把現有環境檔設為 `root:hkcollector`、權限 `0640`，讓服務帳號可以讀取。
 
 ## 5. OpenD 服務與行情最高權限
 

@@ -25,5 +25,5 @@
   <text x="70" y="365" class="t">🔴 HK Tick 警報</text>
   <text x="70" y="400" class="s">結論：異常，持久化停滯超過門檻</text>
   <text x="70" y="435" class="s">KPI：延遲 95.3s | 寫入 0/min | 佇列 420/20,000</text>
-  <text x="70" y="470" class="s">建議：先執行 hk-tickctl logs --ops，再確認 OpenD 連線</text>
+  <text x="70" y="470" class="s">建議：先執行 hk-tickctl logs --ops 1，再確認 OpenD 連線</text>
 </svg>
