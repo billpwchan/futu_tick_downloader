@@ -1,3 +1,5 @@
+<a href="https://github.com/billpwchan"><img src="https://raw.githubusercontent.com/billpwchan/billpwchan/output/banner-futu_tick_downloader.svg" alt="futu_tick_downloader: 24/7 HK tick capture into SQLite WAL" width="100%"></a>
+
 # HK Tick Collector
 
 [![CI](https://github.com/billpwchan/futu_tick_downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/billpwchan/futu_tick_downloader/actions/workflows/ci.yml)
@@ -100,3 +102,9 @@ Telegram 訊息按「結論 → 關鍵指標 → 下一步」呈現，可選啟�
 | 貢獻與安全回報 | [貢獻指南](CONTRIBUTING.md) · [安全政策](SECURITY.md) |
 
 開發環境執行 `make setup`，之後用 `make lint` 和 `make test` 檢查。專案以 Apache-2.0 授權，見 [LICENSE](LICENSE)。
+
+## 同一套交易基礎設施
+
+**futu_tick_downloader**（逐筆採集）→ **[strategy_powerbacktest](https://github.com/billpwchan/strategy_powerbacktest)**（回測）→ **[futu_algo](https://github.com/billpwchan/futu_algo)**（實盤交易）
+
+由 [Bill Chan](https://github.com/billpwchan) 開發與維護。
