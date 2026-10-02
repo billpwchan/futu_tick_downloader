@@ -18,7 +18,7 @@
 
 ## 5 分鐘本機體驗
 
-前置需求：Docker 與 Docker Compose。下列指令從 repo 根目錄執行。
+前置需求：Docker 與 Docker Compose。下列指令從 repo 根目錄執行。容器以非 root 的 uid `10001` 執行；Linux 主機首次啟動前先執行 `mkdir -p data/sqlite && sudo chown -R 10001:10001 data/sqlite`。
 
 ```bash
 git clone https://github.com/billpwchan/futu_tick_downloader.git
