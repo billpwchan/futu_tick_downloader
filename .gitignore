@@ -13,6 +13,12 @@ venv/
 .env
 .env.*
 !.env.example
+*.env
+!*.env.example
+
+# Credentials (OpenD config holds the Futu login)
+*OpenD.xml
+*.pem
 
 # Testing
 .pytest_cache/
@@ -28,6 +34,11 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+
+# Local data root (compose bind mount) and EOD archive artifacts
+/data/
+*.zst
+*.sha256
 
 # Logs
 *.log
