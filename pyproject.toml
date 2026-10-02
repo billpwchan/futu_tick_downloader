@@ -25,7 +25,9 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-  "futu-api>=8.0.0",
+  "futu-api>=8.0.0,<11",
+  # futu-api's pbjson reads FieldDescriptor.label, which protobuf 7 removed.
+  "protobuf>=3.20.0,<7",
   "pandas>=2.1.0",
 ]
 
