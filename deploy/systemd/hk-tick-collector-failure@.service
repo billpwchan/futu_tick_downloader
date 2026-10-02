@@ -8,5 +8,25 @@ CollectMode=inactive-or-failed
 
 [Service]
 Type=oneshot
+# The script lives in the hkcollector-owned checkout, so it must never run as root.
+# systemd-journal lets `journalctl -u` read the failed unit's log tail.
+User=hkcollector
+Group=hkcollector
+SupplementaryGroups=systemd-journal
 ExecStart=/opt/futu_tick_downloader/deploy/scripts/notify_unit_failure.sh %i
 TimeoutStartSec=45
+UMask=0027
+
+# Security hardening (same baseline as hk-tick-collector.service; read-only, needs network)
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true

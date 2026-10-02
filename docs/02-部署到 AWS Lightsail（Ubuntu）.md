@@ -51,9 +51,10 @@ sudo PYTHON_BIN=python3 bash deploy/scripts/install.sh
 - `hkcollector`（collector 執行帳號）
 - `.venv`（服務實際使用）
 - `hk-tick-collector.service`
+- `hk-tick-collector-failure@.service`（collector 進入 failed 時的 Telegram 通知；以 `hkcollector` 執行，非 root，附加 `systemd-journal` 群組讀取日誌）
 - `futu-opend.service`（若檔案存在）
 
-安裝腳本會把現有環境檔設為 `root:hkcollector`、權限 `0640`，讓服務帳號可以讀取。
+安裝腳本會把現有環境檔設為 `root:hkcollector`、權限 `0640`，讓服務帳號（collector 與失敗通知）可以讀取。
 
 ## 5. OpenD 服務與行情最高權限
 

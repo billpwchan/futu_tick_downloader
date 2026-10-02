@@ -197,3 +197,15 @@ sudo journalctl -u hk-tick-collector -n 120 --no-pager -l
 sudo systemctl kill -s SIGINT hk-tick-collector
 sudo systemctl stop hk-tick-collector
 ```
+
+### I. collector 已 failed 但沒有收到 Telegram 通知
+
+`hk-tick-collector-failure@.service` 以 `hkcollector` 身分執行（非 root），透過 `systemd-journal` 群組讀取日誌，
+並讀取 `/etc/hk-tick-collector.env`（需為 `root:hkcollector`、`0640`）。
+
+```bash
+sudo systemctl status 'hk-tick-collector-failure@*' --no-pager -l
+sudo journalctl -u 'hk-tick-collector-failure@*' -n 50 --no-pager
+getent group systemd-journal
+sudo stat -c '%U:%G %a' /etc/hk-tick-collector.env
+```
