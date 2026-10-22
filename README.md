@@ -108,3 +108,8 @@ Telegram 訊息按「結論 → 關鍵指標 → 下一步」呈現，可選啟�
 **futu_tick_downloader**（逐筆採集）→ **[strategy_powerbacktest](https://github.com/billpwchan/strategy_powerbacktest)**（回測）→ **[futu_algo](https://github.com/billpwchan/futu_algo)**（實盤交易）
 
 由 [Bill Chan](https://github.com/billpwchan) 開發與維護。
+
+## 相關專案
+
+- [futu_algo](https://github.com/billpwchan/futu_algo)：港股選股、回測與模擬盤交易，附網頁控制台。
+- [strategy_powerbacktest](https://github.com/billpwchan/strategy_powerbacktest)：K 線回測框架，可直接讀取本專案的逐筆資料庫並合成一分鐘 K 線。
