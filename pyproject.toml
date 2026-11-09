@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hk-tick-collector"
-version = "0.1.0"
+version = "0.2.0"
 description = "Production-grade HK tick collector from Futu OpenD to SQLite WAL"
 readme = "README.md"
 requires-python = ">=3.10"

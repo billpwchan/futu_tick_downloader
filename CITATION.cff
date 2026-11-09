@@ -9,8 +9,8 @@ affiliation: Open Source Community
 repository-code: "https://github.com/billpwchan/futu_tick_downloader"
 url: "https://github.com/billpwchan/futu_tick_downloader"
 license: Apache-2.0
-version: 0.1.0
-date-released: 2026-02-13
+version: 0.2.0
+date-released: 2026-11-09
 keywords:
   - futu
   - opend
