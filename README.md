@@ -12,7 +12,7 @@
 
 ![每個交易日收到的港股逐筆成交，2026-05-26 至 08-28](docs/assets/ticks-per-day.svg)
 
-> **先選路徑：**想看資料怎麼流動，從下方的 Docker mock 開始，不需要 Futu 帳戶；要接真實行情，請先完成 [OpenD 與行情權限部署](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)。Mock 資料不能用於交易研究。
+> **先選路徑**：想看資料怎麼流動，從下方的 Docker mock 開始，不需要 Futu 帳戶；要接真實行情，請先完成 [OpenD 與行情權限部署](docs/02-%E9%83%A8%E7%BD%B2%E5%88%B0%20AWS%20Lightsail%EF%BC%88Ubuntu%EF%BC%89.md)。Mock 資料不能用於交易研究。
 
 ## 資料怎麼走
 
